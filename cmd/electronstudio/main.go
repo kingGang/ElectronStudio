@@ -31,6 +31,7 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 	"github.com/kingGang/ElectronStudio/internal/robot"
 	"github.com/kingGang/ElectronStudio/internal/server"
+	"github.com/kingGang/ElectronStudio/internal/speech"
 )
 
 // systemPrompt 是对话的系统提示，约束助手扮演桌面机器人小电。
@@ -56,8 +57,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// 消费入站命令。
+	// 启动语音服务（Mock 为空操作；Sidecar 会连接外部进程）。
+	if err := a.speech.Start(ctx); err != nil {
+		log.Warn("语音服务启动失败，将仅支持文本输入", "err", err)
+	}
+	defer a.speech.Close()
+
+	// 消费入站命令与上行语音事件。
 	go a.dispatchLoop(ctx)
+	go a.speechLoop(ctx)
 
 	if err := a.srv.Serve(ctx, *addr); err != nil {
 		log.Error("服务退出", "err", err)
@@ -67,11 +75,12 @@ func main() {
 
 // app 持有各模块依赖与少量运行时状态，并实现命令分发。
 type app struct {
-	srv  *server.Server
-	chor *choreography.Engine
-	llm  *llm.Router
-	bot  robot.Transport
-	log  *slog.Logger
+	srv    *server.Server
+	chor   *choreography.Engine
+	llm    *llm.Router
+	bot    robot.Transport
+	speech speech.Service
+	log    *slog.Logger
 
 	histMu  sync.Mutex
 	history []llm.Message  // 对话历史（含系统提示）
@@ -104,10 +113,20 @@ func newApp(log *slog.Logger) (*app, error) {
 		log.Info("已挂接 OpenAI 兼容模型", "base", base, "model", os.Getenv("OPENAI_MODEL"))
 	}
 
+	// 语音：默认 Mock（无 sidecar 也能跑文本链路）；若配置了 sidecar 地址则对接真实语音服务。
+	var voice speech.Service
+	if url := os.Getenv("SPEECH_SIDECAR_URL"); url != "" {
+		voice = speech.NewSidecar(url, log)
+		log.Info("已配置语音 sidecar", "url", url)
+	} else {
+		voice = speech.NewMock(log)
+	}
+
 	a := &app{
 		chor:    chor,
 		llm:     router,
 		bot:     bot,
+		speech:  voice,
 		log:     log,
 		history: []llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}},
 	}
@@ -132,6 +151,41 @@ func (a *app) dispatchLoop(ctx context.Context) {
 			return
 		case in := <-a.srv.Inbound():
 			a.handle(ctx, in)
+		}
+	}
+}
+
+// speechLoop 消费上行语音事件（唤醒 / VAD / ASR），把它们接到对话与状态广播上。
+func (a *app) speechLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-a.speech.Events():
+			if !ok {
+				return // 事件流已关闭
+			}
+			a.handleSpeechEvent(ctx, ev)
+		}
+	}
+}
+
+// handleSpeechEvent 处理单条语音事件。
+func (a *app) handleSpeechEvent(ctx context.Context, ev speech.Event) {
+	switch ev.Kind {
+	case speech.KindWake:
+		a.srv.Broadcast(protocol.WakeEvent{Keyword: ev.Keyword})
+		a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceListening})
+
+	case speech.KindVAD:
+		a.srv.Broadcast(protocol.VADEvent{Speaking: ev.Speaking, Level: ev.Level})
+
+	case speech.KindASR:
+		// 把识别文本作为前端的中间/最终 ASR 展示。
+		a.srv.Broadcast(protocol.ASREvent{Text: ev.Text, Final: ev.Final})
+		// 最终结果触发一次对话（与文本输入同一路径）。
+		if ev.Final && ev.Text != "" {
+			go a.handleChat(ctx, ev.Text)
 		}
 	}
 }
@@ -184,6 +238,7 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 
 	case protocol.TypeInterrupt:
 		a.chor.Stop()
+		a.speech.Stop() // 打断正在播放的语音
 		a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
 
 	default:
@@ -239,7 +294,7 @@ func (a *app) handleChat(ctx context.Context, text string) {
 		})
 	}
 
-	// 4) 收尾：最终消息 + 入历史 + 结束朗读，回到待命。
+	// 4) 收尾：最终消息 + 入历史。
 	a.srv.Broadcast(protocol.ChatEvent{
 		ID:      id,
 		Role:    protocol.RoleAssistant,
@@ -248,7 +303,13 @@ func (a *app) handleChat(ctx context.Context, text string) {
 	})
 	if content != "" {
 		a.appendHistory(llm.Message{Role: llm.RoleAssistant, Content: content})
+		// 交给语音服务朗读（Mock 仅记录；Sidecar 会真正合成播放）。
+		if err := a.speech.Speak(ctx, content); err != nil {
+			a.log.Warn("语音合成失败", "err", err)
+		}
 	}
+
+	// 结束朗读，回到待命。
 	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStop, Text: content})
 	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
 }
@@ -278,6 +339,7 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 	for _, info := range a.llm.List() {
 		models = append(models, protocol.ModelInfo{ID: info.ID, Name: info.Name, Provider: info.Provider})
 	}
+	ss := a.speech.Status()
 	return protocol.StatusEvent{
 		Robot: protocol.RobotStatus{
 			Connected: a.bot.Connected(),
@@ -285,8 +347,8 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 			PID:       0x8023,
 			FPS:       30,
 		},
-		ASR: protocol.ServiceStatus{Running: false, Detail: "未接入(待 #5)"},
-		TTS: protocol.ServiceStatus{Running: false, Detail: "未接入(待 #5)"},
+		ASR: protocol.ServiceStatus{Running: ss.ASRRunning, Detail: ss.Detail},
+		TTS: protocol.ServiceStatus{Running: ss.TTSRunning, Detail: ss.Detail},
 		LLM: protocol.LLMStatus{Active: a.llm.ActiveID(), Available: models},
 	}
 }
