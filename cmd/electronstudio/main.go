@@ -32,6 +32,7 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/robot"
 	"github.com/kingGang/ElectronStudio/internal/server"
 	"github.com/kingGang/ElectronStudio/internal/speech"
+	"github.com/kingGang/ElectronStudio/web"
 )
 
 // systemPrompt 是对话的系统提示，约束助手扮演桌面机器人小电。
@@ -133,7 +134,8 @@ func newApp(log *slog.Logger) (*app, error) {
 
 	// 新客户端连上时，推送一次状态快照，让前端立即渲染。
 	a.srv = server.New(server.Options{
-		Logger: log,
+		Logger:   log,
+		StaticFS: web.FS(), // 内嵌前端单页应用，访问 http://addr/ 即是界面
 		OnConnect: func(c *server.Client) {
 			if err := c.Send(a.statusSnapshot()); err != nil {
 				log.Warn("推送初始状态失败", "err", err)

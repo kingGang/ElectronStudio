@@ -75,6 +75,6 @@ OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_API_KEY=sk-xxx OPENAI_MODEL=gpt
 - [x] `internal/choreography` 动作编排引擎（关键帧插值）
 - [x] `internal/llm` 多模型路由（Echo / OpenAI 兼容）
 - [x] `cmd/electronstudio` 最小可运行入口
-- [ ] `internal/robot/electronbot` 真机 USB 传输（purego + libusb）
-- [ ] `internal/speech` 语音 sidecar 对接（唤醒 / VAD / ASR / TTS）
-- [ ] `web` 前端单页应用（深色科技风）
+- [x] `internal/speech` 语音 sidecar 对接（唤醒 / VAD / ASR / TTS）
+- [x] `web` 前端单页应用（深色科技风，go:embed 内嵌）
+- [ ] `internal/robot/electronbot` 真机 USB 传输（purego + libusb）— 最后对接

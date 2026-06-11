@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ElectronStudio · 小电</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- 顶栏：品牌 / 子系统状态灯 / 模型选择 -->
+  <header class="topbar">
+    <div class="brand">◢ VERDUGO</div>
+    <div class="status-dots">
+      <span class="dot" id="dot-usb"><i></i>USB</span>
+      <span class="dot" id="dot-asr"><i></i>ASR</span>
+      <span class="dot" id="dot-tts"><i></i>TTS</span>
+    </div>
+    <div class="spacer"></div>
+    <label class="model-picker">
+      <span>模型</span>
+      <select id="model-select"></select>
+    </label>
+    <div class="conn-state" id="conn-state">连接中…</div>
+  </header>
+
+  <main class="layout">
+    <!-- 左栏：机器人本体 -->
+    <section class="robot-pane">
+      <div class="robot-face" id="robot-face" data-state="idle">
+        <canvas id="mirror" width="240" height="240"></canvas>
+        <!-- 无真机画面时显示 CSS 表情作占位 -->
+        <div class="face-fallback" id="face-fallback">
+          <div class="eyes"><span class="eye"></span><span class="eye"></span></div>
+          <div class="mouth"></div>
+        </div>
+      </div>
+
+      <div class="voice-state" id="voice-state">
+        <span class="vs-dot"></span><span class="vs-text" id="vs-text">待命</span>
+      </div>
+
+      <!-- VAD 实时波形 -->
+      <canvas class="waveform" id="waveform" width="220" height="40"></canvas>
+
+      <div class="emotions" id="emotions" aria-label="情绪">
+        <button class="chip" data-emotion="happy">😊</button>
+        <button class="chip" data-emotion="sad">😢</button>
+        <button class="chip" data-emotion="angry">😠</button>
+        <button class="chip" data-emotion="surprised">😮</button>
+        <button class="chip" data-emotion="neutral">😐</button>
+      </div>
+    </section>
+
+    <!-- 右栏：对话 -->
+    <section class="chat-pane">
+      <div class="chat-stream" id="chat-stream"></div>
+
+      <div class="quick-actions" id="quick-actions">
+        <span class="qa-label">快捷动作</span>
+        <button class="qa" data-action="wave">👋 打招呼</button>
+        <button class="qa" data-action="nod">🙂 点头</button>
+        <button class="qa" data-action="shake">🙅 摇头</button>
+        <button class="qa" data-action="home">↩ 归位</button>
+        <button class="qa danger" id="btn-interrupt">⏹ 打断</button>
+      </div>
+
+      <form class="composer" id="composer">
+        <input id="composer-input" type="text" placeholder="输入文字…" autocomplete="off" />
+        <button type="button" class="icon-btn" id="btn-mic" title="按住说话/切换拾音">🎤</button>
+        <button type="submit" class="icon-btn primary" title="发送">➤</button>
+      </form>
+    </section>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
