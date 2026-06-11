@@ -1,0 +1,34 @@
+# ===== Go =====
+# 编译产物
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+# 测试与覆盖率
+*.test
+*.out
+coverage.*
+# Go 工作区
+go.work
+go.work.sum
+
+# ===== 前端 (web/) =====
+node_modules/
+web/dist/
+web/.vite/
+*.local
+
+# ===== sidecar 二进制 (按平台分发, 不入库) =====
+/sidecars/**/bin/
+*.onnx
+*.bin
+!**/.gitkeep
+
+# ===== 编辑器 / 系统 =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

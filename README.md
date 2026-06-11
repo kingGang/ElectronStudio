@@ -1,0 +1,50 @@
+# ElectronStudio
+
+面向 [ElectronBot](https://github.com/peng-zhihui/ElectronBot) 桌面机器人的跨平台语音助手，使用 **纯 Go**（`CGO_ENABLED=0`，可交叉编译到 macOS / Windows / 树莓派）编写后端，Web 前端可重构。
+
+## 设计目标
+
+| # | 目标 | 方案 |
+|---|------|------|
+| 1 | 不依赖 C 工具链 | 主程序纯 Go 交叉编译；原生能力（USB / 语音）通过 sidecar 二进制或 purego 运行时加载 |
+| 2 | 多平台运行 | macOS / Windows / 树莓派 |
+| 3 | 界面可重构 | Go 后端 + Web 前端（浏览器 / webview），深色科技风 |
+| 4 | 保留动作编排 | 移植 ElectronBot 的 6 轴关键帧动作序列 |
+| 5 | 本地语音 | sherpa-onnx（唤醒 + VAD + ASR）+ Piper（TTS）以 sidecar 形式本地运行 |
+| 6 | 多大模型 | LLM Provider 抽象，配置文件可挂任意多个（Ollama / OpenAI 兼容 / Anthropic …） |
+
+## 硬件
+
+ElectronBot 通过 **USB bulk** 通信（VID `0x1001` / PID `0x8023`）：上位机下发 240×240 RGB888 画面 + 6 轴舵机角度，读回真实角度。屏幕、舵机的 SPI/I2C 驱动都在机器人 STM32 固件内部完成。
+
+## 目录结构
+
+```
+cmd/electronstudio/      程序入口
+internal/
+  protocol/              ★ 前后端 WebSocket 消息协议（单一事实来源）
+  server/                HTTP + WebSocket 服务
+  fsm/                   对话状态机
+  choreography/          动作编排：情绪 → 6 轴角度序列
+  llm/                   LLM Provider 抽象与路由
+  speech/                唤醒 / VAD / ASR / TTS 协调（对接 sidecar）
+  robot/                 机器人传输层接口
+    electronbot/         purego + libusb 实现
+web/                     前端单页应用（Vue3 + Vite，go:embed 打包）
+sidecars/                各平台预编译的 sherpa-onnx / Piper 二进制
+docs/                    设计与协议文档
+```
+
+## 构建
+
+```bash
+# 主程序（无 C 工具链）
+CGO_ENABLED=0 go build ./cmd/electronstudio
+
+# 交叉编译示例（树莓派 64 位）
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/electronstudio
+```
+
+## 协议
+
+前后端通信契约见 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)，Go 侧实现于 `internal/protocol`，前端类型镜像于 `web/src/protocol.ts`。
