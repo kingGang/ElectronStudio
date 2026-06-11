@@ -58,6 +58,9 @@ type Options struct {
 	OriginPatterns []string
 	// Logger 为日志器。为 nil 时使用 slog 默认 logger。
 	Logger *slog.Logger
+	// OnConnect 在一个新客户端注册成功后被调用（可选），常用于向其推送初始状态快照。
+	// 回调在连接的接管 goroutine 中同步执行，应尽量轻量、避免阻塞。
+	OnConnect func(c *Client)
 }
 
 // withDefaults 返回填充了默认值的 Options 副本，避免在各处重复判空。
@@ -187,6 +190,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	c := newClient(s, conn)
 	s.hub.add(c)
 	s.log.Debug("客户端已连接", "remote", r.RemoteAddr, "total", s.hub.count())
+
+	// 通知上层有新连接（如推送初始状态快照）。
+	if s.opts.OnConnect != nil {
+		s.opts.OnConnect(c)
+	}
 
 	// run 阻塞至连接结束；结束后从 hub 注销。
 	// 使用请求上下文，使服务关闭时连接随之收敛。

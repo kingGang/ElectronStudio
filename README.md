@@ -45,6 +45,36 @@ CGO_ENABLED=0 go build ./cmd/electronstudio
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/electronstudio
 ```
 
+## 运行（最小入口）
+
+当前入口使用 **Mock 机器人 + 本地 Echo 模型**，无需真机 / 联网 / C 工具链即可启动：
+
+```bash
+go run ./cmd/electronstudio -addr :8080
+# 连接 ws://localhost:8080/ws 即可看到事件流动
+```
+
+挂接真实大模型（纯 HTTP，无 cgo；本地 Ollama 或任意 OpenAI 兼容服务）：
+
+```bash
+# 例：本地 Ollama
+OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_MODEL=qwen2.5 go run ./cmd/electronstudio
+# 例：OpenAI
+OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_API_KEY=sk-xxx OPENAI_MODEL=gpt-4o go run ./cmd/electronstudio
+```
+
 ## 协议
 
 前后端通信契约见 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)，Go 侧实现于 `internal/protocol`，前端类型镜像于 `web/src/protocol.ts`。
+
+## 进度
+
+- [x] `internal/protocol` 消息契约（+ TS 镜像 + 文档）
+- [x] `internal/server` WebSocket 服务（连接管理 / 广播 / 心跳）
+- [x] `internal/robot` 传输接口 + Mock 实现
+- [x] `internal/choreography` 动作编排引擎（关键帧插值）
+- [x] `internal/llm` 多模型路由（Echo / OpenAI 兼容）
+- [x] `cmd/electronstudio` 最小可运行入口
+- [ ] `internal/robot/electronbot` 真机 USB 传输（purego + libusb）
+- [ ] `internal/speech` 语音 sidecar 对接（唤醒 / VAD / ASR / TTS）
+- [ ] `web` 前端单页应用（深色科技风）
