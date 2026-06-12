@@ -178,6 +178,28 @@ type GreetCommand struct{}
 // Type 实现 Payload。
 func (GreetCommand) Type() Type { return TypeGreet }
 
+// ScheduleAddCommand 新增定时任务/提醒。At/Every/Daily 三选一。
+type ScheduleAddCommand struct {
+	Title string `json:"title"`
+	At    string `json:"at,omitempty"`    // RFC3339 一次性
+	Every string `json:"every,omitempty"` // 时长，如 1h
+	Daily string `json:"daily,omitempty"` // HH:MM 每日
+	Kind  string `json:"kind"`            // say | weather | greet | music
+	Text  string `json:"text,omitempty"`  // say 内容
+	Query string `json:"query,omitempty"` // weather 城市 / music 歌名
+}
+
+// Type 实现 Payload。
+func (ScheduleAddCommand) Type() Type { return TypeScheduleAdd }
+
+// ScheduleRemoveCommand 删除一个定时任务。
+type ScheduleRemoveCommand struct {
+	ID string `json:"id"`
+}
+
+// Type 实现 Payload。
+func (ScheduleRemoveCommand) Type() Type { return TypeScheduleRemove }
+
 // MusicCommand 控制音乐播放。
 type MusicCommand struct {
 	Action string `json:"action"`           // play | pause | resume | stop | volume

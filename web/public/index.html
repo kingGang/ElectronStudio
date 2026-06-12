@@ -139,6 +139,22 @@
       <p class="muted">唤醒词 / VAD 灵敏度在语音 sidecar 内配置，见 docs/SPEECH.md。</p>
     </section>
     <section class="panel">
+      <h2>提醒 / 定时任务</h2>
+      <div class="model-list" id="schedule-list"><span class="muted">无</span></div>
+      <form class="add-model" id="add-schedule">
+        <div class="am-row">
+          <input id="sch-title" placeholder="标题/提醒内容" />
+          <select id="sch-when">
+            <option value="after">N 分钟后</option>
+            <option value="daily">每日 HH:MM</option>
+            <option value="every">每隔（如 1h）</option>
+          </select>
+          <input id="sch-val" placeholder="10 / 08:00 / 1h" style="max-width:90px" />
+        </div>
+        <button type="submit" class="qa">+ 添加</button>
+      </form>
+    </section>
+    <section class="panel">
       <h2>机器人</h2>
       <div class="kv"><span>连接</span><b id="set-usb">—</b></div>
       <div class="kv"><span>VID / PID</span><b id="set-vidpid">—</b></div>

@@ -39,9 +39,11 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 	"github.com/kingGang/ElectronStudio/internal/robot"
 	"github.com/kingGang/ElectronStudio/internal/robot/electronbot"
+	"github.com/kingGang/ElectronStudio/internal/scheduler"
 	"github.com/kingGang/ElectronStudio/internal/server"
 	"github.com/kingGang/ElectronStudio/internal/speech"
 	"github.com/kingGang/ElectronStudio/internal/tools"
+	"github.com/kingGang/ElectronStudio/internal/weather"
 	"github.com/kingGang/ElectronStudio/web"
 )
 
@@ -91,6 +93,9 @@ func main() {
 	}
 	defer a.gesture.Close()
 
+	// 启动定时任务调度。
+	go a.sched.Run(ctx)
+
 	// 启动设备驱动循环（统一推帧 + 同步）。
 	go a.driver.Run(ctx)
 
@@ -117,6 +122,9 @@ type app struct {
 	speech  speech.Service
 	gesture gesture.Service
 	music   *music.Service
+	weather *weather.Client
+	sched   *scheduler.Scheduler
+	schedPath string
 	tools   *tools.Registry
 	log     *slog.Logger
 
@@ -198,6 +206,7 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 			if err := c.Send(a.statusSnapshot()); err != nil {
 				log.Warn("推送初始状态失败", "err", err)
 			}
+			_ = c.Send(a.scheduleListEvent()) // 推送当前定时任务列表
 		},
 	})
 
@@ -236,9 +245,61 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		},
 	)
 
-	// 工具：注册可供大模型调用的工具（设备控制 / 情绪 / 动作 / 信息 / 音乐）。
+	// 天气 + 定时任务（提醒/闹钟/周期）。
+	a.weather = weather.New()
+	a.schedPath = filepath.Join(filepath.Dir(cfgPath), "jobs.json")
+	a.sched = scheduler.New(a.onJobFire, log)
+	if err := a.sched.Load(a.schedPath); err != nil {
+		log.Warn("加载定时任务失败", "err", err)
+	}
+	a.sched.SetPath(a.schedPath) // Load 后再设路径，触发/增删后自动存盘
+
+	// 工具：注册可供大模型调用的工具（设备控制 / 情绪 / 动作 / 信息 / 音乐 / 天气 / 提醒）。
 	a.tools = buildTools(a)
 	return a, nil
+}
+
+// onJobFire 在定时任务到点时执行其动作。
+func (a *app) onJobFire(j scheduler.Job) {
+	ctx := context.Background()
+	switch j.Action.Kind {
+	case "weather":
+		if txt, err := a.weather.Get(ctx, j.Action.Query); err == nil {
+			a.say(ctx, txt)
+		}
+	case "greet":
+		a.handleGreet(ctx)
+	case "music":
+		_, _ = a.music.SearchAndPlay(ctx, j.Action.Query)
+	default: // say
+		if j.Action.Text != "" {
+			a.say(ctx, j.Action.Text)
+		}
+	}
+}
+
+// say 让机器人主动说一句（广播为助手消息 + 语音播报）。
+func (a *app) say(ctx context.Context, text string) {
+	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceSpeaking})
+	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStart})
+	a.screen.SetSpeaking(true)
+	a.srv.Broadcast(protocol.ChatEvent{
+		ID: a.nextMsgID(), Role: protocol.RoleAssistant, Content: text, Status: protocol.ChatFinal,
+	})
+	a.finishAssistant(ctx, text)
+}
+
+// scheduleListEvent 构造当前任务列表事件。
+func (a *app) scheduleListEvent() protocol.ScheduleListEvent {
+	jobs := a.sched.List()
+	out := make([]protocol.ScheduleJob, 0, len(jobs))
+	for _, j := range jobs {
+		out = append(out, protocol.ScheduleJob{
+			ID: j.ID, Title: j.Title, At: j.At, Every: j.Every, Daily: j.Daily,
+			Kind: j.Action.Kind, Text: j.Action.Text,
+		})
+	}
+	return protocol.ScheduleListEvent{Jobs: out}
 }
 
 // onDriverFrame 把设备屏当前帧编码为二进制镜像帧广播给 UI（与设备屏同源 = 同步）。
@@ -312,6 +373,18 @@ func buildTools(a *app) *tools.Registry {
 
 	reg.Register(tools.TimeTool())
 	reg.Register(tools.NewLamp().Tool())
+
+	// 天气：查询某城市天气。
+	reg.Register(tools.WeatherTool(func(ctx context.Context, city string) (string, error) {
+		return a.weather.Get(ctx, city)
+	}))
+
+	// 提醒：N 分钟后提醒（或指定时间），到点机器人会说出来。
+	reg.Register(tools.ReminderTool(func(_ context.Context, minutes int, text string) (string, error) {
+		at := time.Now().Add(time.Duration(minutes) * time.Minute).Format(time.RFC3339)
+		a.handleScheduleAdd(protocol.ScheduleAddCommand{Title: text, At: at, Kind: "say", Text: text})
+		return fmt.Sprintf("好的，%d 分钟后提醒你：%s", minutes, text), nil
+	}))
 
 	// 音乐：搜索并播放（大模型可"放首歌"）。
 	reg.Register(tools.MusicTool(func(ctx context.Context, query string) (string, error) {
@@ -527,6 +600,17 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 	case protocol.TypeMusic:
 		if cmd, err := protocol.As[protocol.MusicCommand](in.Env); err == nil {
 			go a.handleMusic(ctx, cmd)
+		}
+
+	case protocol.TypeScheduleAdd:
+		if cmd, err := protocol.As[protocol.ScheduleAddCommand](in.Env); err == nil {
+			a.handleScheduleAdd(cmd)
+		}
+
+	case protocol.TypeScheduleRemove:
+		if cmd, err := protocol.As[protocol.ScheduleRemoveCommand](in.Env); err == nil {
+			a.sched.Remove(cmd.ID)
+			a.srv.Broadcast(a.scheduleListEvent())
 		}
 
 	default:
@@ -783,6 +867,24 @@ func (a *app) handleGesture(ctx context.Context, ev gesture.Event) {
 	default:
 		a.log.Debug("未映射的手势", "name", ev.Name)
 	}
+}
+
+// handleScheduleAdd 新增一个定时任务并存盘、广播。
+func (a *app) handleScheduleAdd(cmd protocol.ScheduleAddCommand) {
+	kind := cmd.Kind
+	if kind == "" {
+		kind = "say"
+	}
+	job := scheduler.Job{
+		Title: cmd.Title, At: cmd.At, Every: cmd.Every, Daily: cmd.Daily,
+		Action: scheduler.Action{Kind: kind, Text: cmd.Text, Query: cmd.Query},
+	}
+	if _, err := a.sched.Add(job); err != nil {
+		a.log.Warn("添加定时任务失败", "err", err)
+		a.srv.Broadcast(protocol.ErrorEvent{Code: "schedule_error", Message: err.Error()})
+		return
+	}
+	a.srv.Broadcast(a.scheduleListEvent())
 }
 
 // handleMusic 处理音乐控制命令。

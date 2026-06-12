@@ -27,6 +27,7 @@ export const ServerType = {
   Error: 'error',
   Gesture: 'gesture',
   MusicState: 'music_state',
+  ScheduleList: 'schedule_list',
   Log: 'log',
 } as const
 
@@ -49,7 +50,19 @@ export const ClientType = {
   Camera: 'camera',
   Greet: 'greet',
   Music: 'music',
+  ScheduleAdd: 'schedule_add',
+  ScheduleRemove: 'schedule_remove',
 } as const
+
+export interface ScheduleAddCommand {
+  title: string
+  at?: string
+  every?: string
+  daily?: string
+  kind: string
+  text?: string
+  query?: string
+}
 
 export interface MusicCommand {
   action: 'play' | 'pause' | 'resume' | 'stop' | 'volume'

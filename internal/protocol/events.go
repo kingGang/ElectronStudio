@@ -233,6 +233,25 @@ type ErrorEvent struct {
 // Type 实现 Payload。
 func (ErrorEvent) Type() Type { return TypeError }
 
+// ScheduleJob 是一个定时任务的展示信息。
+type ScheduleJob struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	At    string `json:"at,omitempty"`
+	Every string `json:"every,omitempty"`
+	Daily string `json:"daily,omitempty"`
+	Kind  string `json:"kind"`
+	Text  string `json:"text,omitempty"`
+}
+
+// ScheduleListEvent 是定时任务列表（增删后广播）。
+type ScheduleListEvent struct {
+	Jobs []ScheduleJob `json:"jobs"`
+}
+
+// Type 实现 Payload。
+func (ScheduleListEvent) Type() Type { return TypeScheduleList }
+
 // MusicEvent 表示音乐播放状态变化。
 type MusicEvent struct {
 	State  string `json:"state"`            // playing | paused | stopped

@@ -94,6 +94,7 @@
       case SrvType.Joints: onJoints(p); break;
       case SrvType.Gesture: toast('识别到手势：' + (p.name || '')); break;
       case SrvType.MusicState: onMusicState(p); break;
+      case SrvType.ScheduleList: renderSchedule(p.jobs || []); break;
       case SrvType.Error: toast(p.message || '发生错误'); break;
       default: break;
     }
@@ -408,9 +409,50 @@
   });
   $('music-stop').addEventListener('click', () => send(CliType.Music, { action: 'stop' }));
 
+  // ---- 提醒 / 定时任务 ----
+  function renderSchedule(jobs) {
+    const list = $('schedule-list');
+    if (!list) return;
+    if (!jobs.length) { list.innerHTML = '<span class="muted">无</span>'; return; }
+    list.innerHTML = '';
+    jobs.forEach((j) => {
+      const when = j.at ? new Date(j.at).toLocaleString() : (j.daily ? '每日 ' + j.daily : (j.every ? '每隔 ' + j.every : ''));
+      const row = document.createElement('div');
+      row.className = 'model-row';
+      row.innerHTML = `<span class="mr-name">${j.title || j.text || j.kind}</span>` +
+        `<span class="mr-prov">${when}</span><button class="mr-rm">✕</button>`;
+      row.querySelector('.mr-rm').addEventListener('click', () => send(CliType.ScheduleRemove, { id: j.id }));
+      list.appendChild(row);
+    });
+  }
+  function setupSchedule() {
+    const form = $('add-schedule');
+    if (!form) return;
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const title = $('sch-title').value.trim();
+      const when = $('sch-when').value;
+      const val = $('sch-val').value.trim();
+      if (!title || !val) { toast('请填写内容与时间'); return; }
+      const payload = { title, kind: 'say', text: title };
+      if (when === 'after') {
+        const m = parseInt(val, 10);
+        if (!m) { toast('分钟数无效'); return; }
+        payload.at = new Date(Date.now() + m * 60000).toISOString();
+      } else if (when === 'daily') {
+        payload.daily = val;
+      } else {
+        payload.every = val;
+      }
+      send(CliType.ScheduleAdd, payload);
+      form.reset();
+    });
+  }
+
   // 启动。
   buildJoints();
   setupAddModelForm();
+  setupSchedule();
   setupRecord();
   connect();
 })();

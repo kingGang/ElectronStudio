@@ -84,6 +84,44 @@ func LookTool(
 	}
 }
 
+// WeatherTool 构造"查天气"工具。get 由上层注入（接天气客户端）。
+func WeatherTool(get func(ctx context.Context, city string) (string, error)) Tool {
+	schema := objectSchema(`{"city":{"type":"string","description":"城市名；留空则按当前位置"}}`)
+	return Tool{
+		Spec: Spec{Name: "get_weather", Description: "查询某城市的当前天气", Parameters: schema},
+		Handler: func(ctx context.Context, args string) (string, error) {
+			var p struct {
+				City string `json:"city"`
+			}
+			_ = json.Unmarshal([]byte(args), &p)
+			return get(ctx, p.City)
+		},
+	}
+}
+
+// ReminderTool 构造"设提醒"工具：N 分钟后提醒。add 由上层注入（接调度器）。
+func ReminderTool(add func(ctx context.Context, minutes int, text string) (string, error)) Tool {
+	schema := objectSchema(
+		`{"minutes":{"type":"integer","description":"多少分钟后提醒"},"text":{"type":"string","description":"提醒内容"}}`,
+		"minutes", "text")
+	return Tool{
+		Spec: Spec{Name: "set_reminder", Description: "设置一个提醒，N 分钟后机器人会说出提醒内容", Parameters: schema},
+		Handler: func(ctx context.Context, args string) (string, error) {
+			var p struct {
+				Minutes int    `json:"minutes"`
+				Text    string `json:"text"`
+			}
+			if err := json.Unmarshal([]byte(args), &p); err != nil {
+				return "", fmt.Errorf("参数解析失败: %w", err)
+			}
+			if p.Minutes <= 0 || p.Text == "" {
+				return "", fmt.Errorf("需提供 minutes(>0) 与 text")
+			}
+			return add(ctx, p.Minutes, p.Text)
+		},
+	}
+}
+
 // MusicTool 构造"放首歌"工具：按关键词搜索并播放。play 由上层注入（接音乐服务）。
 func MusicTool(play func(ctx context.Context, query string) (string, error)) Tool {
 	schema := objectSchema(`{"query":{"type":"string","description":"要播放的歌曲名或歌手名"}}`, "query")
