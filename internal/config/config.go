@@ -33,6 +33,11 @@ type GestureConfig struct {
 	SidecarURL string `json:"sidecar_url,omitempty"`
 }
 
+// MusicConfig 描述音乐配置。
+type MusicConfig struct {
+	Mpg123 string `json:"mpg123,omitempty"` // mpg123 可执行路径，默认 "mpg123"
+}
+
 // CameraConfig 描述摄像头采集配置（经 ffmpeg 抓取 UVC 摄像头）。
 type CameraConfig struct {
 	Enabled     bool   `json:"enabled,omitempty"`
@@ -48,6 +53,7 @@ type Config struct {
 	Speech  SpeechConfig  `json:"speech"`
 	Gesture GestureConfig `json:"gesture"`
 	Camera  CameraConfig  `json:"camera"`
+	Music   MusicConfig   `json:"music"`
 	Models []ModelConfig `json:"models"`
 	Active string        `json:"active,omitempty"`
 }

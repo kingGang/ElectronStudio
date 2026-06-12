@@ -233,6 +233,16 @@ type ErrorEvent struct {
 // Type 实现 Payload。
 func (ErrorEvent) Type() Type { return TypeError }
 
+// MusicEvent 表示音乐播放状态变化。
+type MusicEvent struct {
+	State  string `json:"state"`            // playing | paused | stopped
+	Name   string `json:"name,omitempty"`   // 当前曲名
+	Artist string `json:"artist,omitempty"` // 当前歌手
+}
+
+// Type 实现 Payload。
+func (MusicEvent) Type() Type { return TypeMusicState }
+
 // GestureEvent 表示识别到一个手势（来自手势 sidecar）。
 type GestureEvent struct {
 	Name       string  `json:"name"`

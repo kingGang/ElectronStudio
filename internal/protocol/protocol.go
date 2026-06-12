@@ -37,6 +37,7 @@ const (
 	TypeJoints     Type = "joints"      // 6 轴舵机真实角度反馈
 	TypeError      Type = "error"       // 错误通知
 	TypeGesture    Type = "gesture"     // 识别到手势
+	TypeMusicState Type = "music_state" // 音乐播放状态变化
 	TypeLog        Type = "log"         // 调试日志（可选，供前端日志面板使用）
 )
 
@@ -60,6 +61,7 @@ const (
 	TypeDeleteAction Type = "delete_action" // 删除一段动作
 	TypeCamera       Type = "camera"        // 开关屏幕显示摄像头画面
 	TypeGreet        Type = "greet"         // 看一眼并主动打招呼
+	TypeMusic        Type = "music"         // 音乐控制（播放/暂停/停止/音量）
 )
 
 // Payload 是所有可被封装进 Envelope 的负载结构的统一约束。

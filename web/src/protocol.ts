@@ -26,6 +26,7 @@ export const ServerType = {
   Joints: 'joints',
   Error: 'error',
   Gesture: 'gesture',
+  MusicState: 'music_state',
   Log: 'log',
 } as const
 
@@ -47,7 +48,14 @@ export const ClientType = {
   DeleteAction: 'delete_action',
   Camera: 'camera',
   Greet: 'greet',
+  Music: 'music',
 } as const
+
+export interface MusicCommand {
+  action: 'play' | 'pause' | 'resume' | 'stop' | 'volume'
+  query?: string
+  volume?: number
+}
 
 // ===========================================================================
 // 共享枚举

@@ -84,6 +84,26 @@ func LookTool(
 	}
 }
 
+// MusicTool 构造"放首歌"工具：按关键词搜索并播放。play 由上层注入（接音乐服务）。
+func MusicTool(play func(ctx context.Context, query string) (string, error)) Tool {
+	schema := objectSchema(`{"query":{"type":"string","description":"要播放的歌曲名或歌手名"}}`, "query")
+	return Tool{
+		Spec: Spec{Name: "play_music", Description: "搜索并播放一首音乐", Parameters: schema},
+		Handler: func(ctx context.Context, args string) (string, error) {
+			var p struct {
+				Query string `json:"query"`
+			}
+			if err := json.Unmarshal([]byte(args), &p); err != nil {
+				return "", fmt.Errorf("参数解析失败: %w", err)
+			}
+			if p.Query == "" {
+				return "", fmt.Errorf("请提供歌曲名")
+			}
+			return play(ctx, p.Query)
+		},
+	}
+}
+
 // TimeTool 构造"获取当前时间"工具（无副作用，演示信息类工具）。
 func TimeTool() Tool {
 	return Tool{

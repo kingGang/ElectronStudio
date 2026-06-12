@@ -177,3 +177,13 @@ type GreetCommand struct{}
 
 // Type 实现 Payload。
 func (GreetCommand) Type() Type { return TypeGreet }
+
+// MusicCommand 控制音乐播放。
+type MusicCommand struct {
+	Action string `json:"action"`           // play | pause | resume | stop | volume
+	Query  string `json:"query,omitempty"`  // action=play 时的搜索关键词
+	Volume int    `json:"volume,omitempty"` // action=volume 时的音量(0~100)
+}
+
+// Type 实现 Payload。
+func (MusicCommand) Type() Type { return TypeMusic }

@@ -254,6 +254,12 @@ body {
 .qa:hover { border-color: var(--accent); box-shadow: 0 0 10px rgba(0, 229, 199, 0.25); }
 .qa.danger:hover { border-color: var(--err); box-shadow: 0 0 10px rgba(239, 68, 68, 0.3); }
 
+.music-bar { display: flex; align-items: center; gap: 6px; }
+.music-bar input { flex: 1; min-width: 0; background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm); padding: 6px 10px; font-size: 13px; }
+.music-bar input:focus { border-color: var(--accent); outline: none; }
+.music-bar .icon-btn { width: 36px; font-size: 13px; }
+.music-now { font-size: 12px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .composer { display: flex; gap: 8px; }
 .composer input {
   flex: 1; background: var(--card); border: 1px solid var(--border); color: var(--text);

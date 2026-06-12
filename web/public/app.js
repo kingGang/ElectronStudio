@@ -11,7 +11,7 @@
   const SrvType = {
     Status: 'status', VoiceState: 'voice_state', VAD: 'vad', Wake: 'wake',
     ASR: 'asr', Chat: 'chat', TTS: 'tts', Emotion: 'emotion',
-    Joints: 'joints', Error: 'error', Gesture: 'gesture', Log: 'log',
+    Joints: 'joints', Error: 'error', Gesture: 'gesture', MusicState: 'music_state', Log: 'log',
   };
   const CliType = {
     SendText: 'send_text', Mic: 'mic', Interrupt: 'interrupt',
@@ -93,6 +93,7 @@
       case SrvType.Emotion: el.face.dataset.emotion = p.emotion || 'neutral'; break;
       case SrvType.Joints: onJoints(p); break;
       case SrvType.Gesture: toast('识别到手势：' + (p.name || '')); break;
+      case SrvType.MusicState: onMusicState(p); break;
       case SrvType.Error: toast(p.message || '发生错误'); break;
       default: break;
     }
@@ -388,6 +389,24 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => el.toast.classList.remove('show'), 3000);
   }
+
+  // ---- 音乐控制条 ----
+  let musicPlaying = false;
+  function onMusicState(p) {
+    const now = $('music-now');
+    if (p.state === 'stopped' || !p.state) { now.textContent = '未播放'; musicPlaying = false; return; }
+    musicPlaying = p.state === 'playing';
+    now.textContent = (p.state === 'paused' ? '⏸ ' : '♪ ') + (p.name || '') + (p.artist ? ' - ' + p.artist : '');
+  }
+  $('music-play').addEventListener('click', () => {
+    const q = $('music-query').value.trim();
+    if (!q) { toast('请输入歌名'); return; }
+    send(CliType.Music, { action: 'play', query: q });
+  });
+  $('music-pause').addEventListener('click', () => {
+    send(CliType.Music, { action: musicPlaying ? 'pause' : 'resume' });
+  });
+  $('music-stop').addEventListener('click', () => send(CliType.Music, { action: 'stop' }));
 
   // 启动。
   buildJoints();

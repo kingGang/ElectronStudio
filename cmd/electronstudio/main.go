@@ -35,6 +35,7 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/display"
 	"github.com/kingGang/ElectronStudio/internal/gesture"
 	"github.com/kingGang/ElectronStudio/internal/llm"
+	"github.com/kingGang/ElectronStudio/internal/music"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 	"github.com/kingGang/ElectronStudio/internal/robot"
 	"github.com/kingGang/ElectronStudio/internal/robot/electronbot"
@@ -82,6 +83,7 @@ func main() {
 		log.Warn("语音服务启动失败，将仅支持文本输入", "err", err)
 	}
 	defer a.speech.Close()
+	defer a.music.Close()
 
 	// 启动手势服务（Mock 为空操作；Sidecar 连接外部识别进程）。
 	if err := a.gesture.Start(ctx); err != nil {
@@ -114,6 +116,7 @@ type app struct {
 	camera  *display.CameraSource // 摄像头采集（可为 nil）
 	speech  speech.Service
 	gesture gesture.Service
+	music   *music.Service
 	tools   *tools.Registry
 	log     *slog.Logger
 
@@ -223,7 +226,17 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		log.Warn("加载录制动作失败", "err", err)
 	}
 
-	// 工具：注册可供大模型调用的工具（设备控制 / 情绪 / 动作 / 信息）。
+	// 音乐：酷我搜索 + mpg123 播放（子进程，无 cgo），状态变化广播给 UI。
+	a.music = music.NewService(
+		music.NewKuwoSearcher(),
+		music.NewMpg123Player(cfg.Music.Mpg123, log),
+		log,
+		func(t music.Track, st music.State) {
+			a.srv.Broadcast(protocol.MusicEvent{State: string(st), Name: t.Name, Artist: t.Artist})
+		},
+	)
+
+	// 工具：注册可供大模型调用的工具（设备控制 / 情绪 / 动作 / 信息 / 音乐）。
 	a.tools = buildTools(a)
 	return a, nil
 }
@@ -299,6 +312,15 @@ func buildTools(a *app) *tools.Registry {
 
 	reg.Register(tools.TimeTool())
 	reg.Register(tools.NewLamp().Tool())
+
+	// 音乐：搜索并播放（大模型可"放首歌"）。
+	reg.Register(tools.MusicTool(func(ctx context.Context, query string) (string, error) {
+		t, err := a.music.SearchAndPlay(ctx, query)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("正在播放：%s - %s", t.Name, t.Artist), nil
+	}))
 
 	// 视觉："看一眼"——抓摄像头帧交给视觉模型描述（仅在配置了摄像头时提供）。
 	if a.camera != nil {
@@ -501,6 +523,11 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 
 	case protocol.TypeGreet:
 		go a.handleGreet(ctx) // 看一眼打招呼，放后台
+
+	case protocol.TypeMusic:
+		if cmd, err := protocol.As[protocol.MusicCommand](in.Env); err == nil {
+			go a.handleMusic(ctx, cmd)
+		}
 
 	default:
 		a.log.Debug("未处理的命令类型", "type", in.Env.Type)
@@ -755,6 +782,27 @@ func (a *app) handleGesture(ctx context.Context, ev gesture.Event) {
 		_ = a.chor.Play(ctx, "shake", 1)
 	default:
 		a.log.Debug("未映射的手势", "name", ev.Name)
+	}
+}
+
+// handleMusic 处理音乐控制命令。
+func (a *app) handleMusic(ctx context.Context, cmd protocol.MusicCommand) {
+	switch cmd.Action {
+	case "play":
+		if _, err := a.music.SearchAndPlay(ctx, cmd.Query); err != nil {
+			a.log.Warn("播放音乐失败", "query", cmd.Query, "err", err)
+			a.srv.Broadcast(protocol.ErrorEvent{Code: "music_error", Message: err.Error()})
+		}
+	case "pause":
+		a.music.Pause()
+	case "resume":
+		a.music.Resume()
+	case "stop":
+		a.music.Stop()
+	case "volume":
+		a.music.SetVolume(cmd.Volume)
+	default:
+		a.log.Debug("未知音乐动作", "action", cmd.Action)
 	}
 }
 
