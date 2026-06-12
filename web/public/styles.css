@@ -135,7 +135,22 @@ body {
 }
 .model-row.active { border-color: var(--accent); box-shadow: 0 0 10px rgba(0, 229, 199, 0.2); }
 .model-row .mr-name { font-size: 14px; }
-.model-row .mr-prov { margin-left: auto; font-size: 11px; color: var(--text-dim); font-family: var(--mono); }
+.model-row .mr-prov { font-size: 11px; color: var(--text-dim); font-family: var(--mono); }
+.model-row .mr-active { color: var(--accent); font-size: 11px; }
+.model-row .mr-rm {
+  margin-left: auto; background: transparent; border: none; color: var(--text-dim);
+  cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 6px;
+}
+.model-row .mr-rm:hover { color: var(--err); background: rgba(239, 68, 68, 0.1); }
+
+/* 添加模型表单 */
+.add-model { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.am-row { display: flex; gap: 8px; }
+.add-model input, .add-model select {
+  flex: 1; min-width: 0; background: var(--card); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px;
+}
+.add-model input:focus, .add-model select:focus { border-color: var(--accent); outline: none; }
 
 /* ---------- 左栏：机器人 ---------- */
 .robot-pane {

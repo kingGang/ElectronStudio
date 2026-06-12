@@ -90,6 +90,23 @@
     <section class="panel">
       <h2>大模型</h2>
       <div class="model-list" id="model-list"><span class="muted">等待状态…</span></div>
+      <form class="add-model" id="add-model">
+        <div class="am-row">
+          <input id="am-name" placeholder="显示名" />
+          <select id="am-type">
+            <option value="openai">OpenAI 兼容 / Ollama</option>
+            <option value="echo">本地回声(echo)</option>
+          </select>
+        </div>
+        <div class="am-row am-openai">
+          <input id="am-base" placeholder="Base URL，如 http://localhost:11434/v1" />
+        </div>
+        <div class="am-row am-openai">
+          <input id="am-model" placeholder="模型名，如 qwen2.5 / gpt-4o" />
+          <input id="am-key" type="password" placeholder="API Key（本地可留空）" />
+        </div>
+        <button type="submit" class="qa">+ 添加模型</button>
+      </form>
     </section>
     <section class="panel">
       <h2>语音（本地）</h2>

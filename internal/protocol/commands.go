@@ -97,3 +97,29 @@ type JogJointCommand struct {
 
 // Type 实现 Payload。
 func (JogJointCommand) Type() Type { return TypeJogJoint }
+
+// ---------------------------------------------------------------------------
+// add_model / remove_model —— 设置页管理大模型
+// ---------------------------------------------------------------------------
+
+// AddModelCommand 新增或编辑一个大模型条目（ID 为空表示新增）。
+// 注意：模型种类字段的 Go 名为 Kind（JSON 仍为 "type"），以避免与 Payload.Type() 方法重名。
+type AddModelCommand struct {
+	ID      string `json:"id,omitempty"`
+	Name    string `json:"name"`
+	Kind    string `json:"type"` // echo | openai
+	BaseURL string `json:"base_url,omitempty"`
+	APIKey  string `json:"api_key,omitempty"`
+	Model   string `json:"model,omitempty"`
+}
+
+// Type 实现 Payload。
+func (AddModelCommand) Type() Type { return TypeAddModel }
+
+// RemoveModelCommand 删除一个大模型条目。
+type RemoveModelCommand struct {
+	ID string `json:"id"`
+}
+
+// Type 实现 Payload。
+func (RemoveModelCommand) Type() Type { return TypeRemoveModel }

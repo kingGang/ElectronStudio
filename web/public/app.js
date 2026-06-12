@@ -227,14 +227,57 @@
   // ======================================================================
   function renderModelList(llm) {
     el.modelList.innerHTML = '';
-    (llm.available || []).forEach((m) => {
+    const list = llm.available || [];
+    list.forEach((m) => {
+      const active = m.id === llm.active;
       const row = document.createElement('div');
-      row.className = 'model-row' + (m.id === llm.active ? ' active' : '');
-      row.innerHTML = `<span class="mr-name">${m.name}</span><span class="mr-prov">${m.provider}</span>`;
+      row.className = 'model-row' + (active ? ' active' : '');
+      row.innerHTML =
+        `<span class="mr-name">${m.name}</span>` +
+        `<span class="mr-prov">${m.provider}</span>` +
+        (active ? `<span class="mr-active">● 生效</span>` : '') +
+        `<button class="mr-rm" title="删除">✕</button>`;
+      // 点击行切换生效模型。
       row.addEventListener('click', () => send(CliType.SelectModel, { id: m.id }));
+      // 删除按钮（阻止冒泡，避免触发切换）。
+      row.querySelector('.mr-rm').addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (list.length <= 1) { toast('至少保留一个模型'); return; }
+        send(CliType.RemoveModel, { id: m.id });
+      });
       el.modelList.appendChild(row);
     });
   }
+  // 添加模型表单：按种类显示/隐藏 OpenAI 专属字段，提交发送 add_model。
+  function setupAddModelForm() {
+    const form = $('add-model');
+    if (!form) return;
+    const typeSel = $('am-type');
+    const toggleOpenAI = () => {
+      const isOpenAI = typeSel.value === 'openai';
+      document.querySelectorAll('.am-openai').forEach((r) => { r.style.display = isOpenAI ? 'flex' : 'none'; });
+    };
+    typeSel.addEventListener('change', toggleOpenAI);
+    toggleOpenAI();
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const type = typeSel.value;
+      const name = $('am-name').value.trim();
+      if (!name) { toast('请填写显示名'); return; }
+      const payload = { name, type };
+      if (type === 'openai') {
+        payload.base_url = $('am-base').value.trim();
+        payload.model = $('am-model').value.trim();
+        payload.api_key = $('am-key').value;
+        if (!payload.base_url || !payload.model) { toast('请填写 Base URL 与模型名'); return; }
+      }
+      send(CliType.AddModel, payload);
+      form.reset();
+      toggleOpenAI();
+    });
+  }
+
   function renderSettings(s) {
     if (s.asr) el.setASR.textContent = (s.asr.running ? '在线' : '离线') + (s.asr.detail ? ` · ${s.asr.detail}` : '');
     if (s.tts) el.setTTS.textContent = (s.tts.running ? '在线' : '离线') + (s.tts.detail ? ` · ${s.tts.detail}` : '');
@@ -293,5 +336,6 @@
 
   // 启动。
   buildJoints();
+  setupAddModelForm();
   connect();
 })();

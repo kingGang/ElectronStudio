@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 
 	"github.com/kingGang/ElectronStudio/internal/choreography"
+	"github.com/kingGang/ElectronStudio/internal/config"
 	"github.com/kingGang/ElectronStudio/internal/llm"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 	"github.com/kingGang/ElectronStudio/internal/robot"
@@ -44,12 +45,22 @@ const systemPrompt = "你是桌面机器人小电，回答简洁友好。"
 const maxHistory = 20
 
 func main() {
-	addr := flag.String("addr", ":8080", "HTTP/WebSocket 监听地址")
+	addr := flag.String("addr", "", "HTTP/WebSocket 监听地址（覆盖配置文件）")
+	cfgPath := flag.String("config", "config.json", "配置文件路径")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	a, err := newApp(log)
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		log.Error("加载配置失败", "err", err)
+		os.Exit(1)
+	}
+	if *addr != "" {
+		cfg.Addr = *addr // 命令行优先
+	}
+
+	a, err := newApp(cfg, *cfgPath, log)
 	if err != nil {
 		log.Error("初始化失败", "err", err)
 		os.Exit(1)
@@ -70,7 +81,7 @@ func main() {
 	go a.dispatchLoop(ctx)
 	go a.speechLoop(ctx)
 
-	if err := a.srv.Serve(ctx, *addr); err != nil {
+	if err := a.srv.Serve(ctx, cfg.Addr); err != nil {
 		log.Error("服务退出", "err", err)
 		os.Exit(1)
 	}
@@ -86,13 +97,17 @@ type app struct {
 	tools  *tools.Registry
 	log    *slog.Logger
 
+	cfgMu   sync.Mutex     // 保护 cfg 的读改存
+	cfg     *config.Config // 当前配置
+	cfgPath string         // 配置文件路径
+
 	histMu  sync.Mutex
 	history []llm.Message  // 对话历史（含系统提示）
 	msgSeq  atomic.Uint64  // 对话消息 ID 自增源
 }
 
 // newApp 组装所有依赖。
-func newApp(log *slog.Logger) (*app, error) {
+func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) {
 	// 机器人：当前用 Mock；后续替换为 electronbot(USB) 实现即可，其余代码不变。
 	bot := robot.NewMock(log)
 	if err := bot.Connect(); err != nil {
@@ -105,23 +120,24 @@ func newApp(log *slog.Logger) (*app, error) {
 		chor.Register(act)
 	}
 
-	// 大模型：本地 Echo 兜底，确保无网络也能跑通；若配置了环境变量则追加真实模型。
+	// 大模型：从配置构建路由（至少含 Echo 兜底）。
 	router := llm.NewRouter()
-	router.Add(llm.NewEcho("echo", "本地回声"))
-	if base := os.Getenv("OPENAI_BASE_URL"); base != "" {
-		router.Add(llm.NewOpenAICompat(llm.OpenAIConfig{
-			BaseURL: base,
-			APIKey:  os.Getenv("OPENAI_API_KEY"),
-			Model:   os.Getenv("OPENAI_MODEL"),
-		}))
-		log.Info("已挂接 OpenAI 兼容模型", "base", base, "model", os.Getenv("OPENAI_MODEL"))
+	for _, mc := range cfg.Models {
+		router.Add(providerFromConfig(mc))
+	}
+	if cfg.Active != "" {
+		_ = router.SetActive(cfg.Active)
 	}
 
-	// 语音：默认 Mock（无 sidecar 也能跑文本链路）；若配置了 sidecar 地址则对接真实语音服务。
+	// 语音：默认 Mock（无 sidecar 也能跑文本链路）；sidecar 地址优先取配置，其次环境变量。
+	sidecarURL := cfg.Speech.SidecarURL
+	if sidecarURL == "" {
+		sidecarURL = os.Getenv("SPEECH_SIDECAR_URL")
+	}
 	var voice speech.Service
-	if url := os.Getenv("SPEECH_SIDECAR_URL"); url != "" {
-		voice = speech.NewSidecar(url, log)
-		log.Info("已配置语音 sidecar", "url", url)
+	if sidecarURL != "" {
+		voice = speech.NewSidecar(sidecarURL, log)
+		log.Info("已配置语音 sidecar", "url", sidecarURL)
 	} else {
 		voice = speech.NewMock(log)
 	}
@@ -132,6 +148,8 @@ func newApp(log *slog.Logger) (*app, error) {
 		bot:     bot,
 		speech:  voice,
 		log:     log,
+		cfg:     cfg,
+		cfgPath: cfgPath,
 		history: []llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}},
 	}
 
@@ -173,6 +191,33 @@ func buildTools(a *app) *tools.Registry {
 	reg.Register(tools.TimeTool())
 	reg.Register(tools.NewLamp().Tool())
 	return reg
+}
+
+// providerFromConfig 依据配置条目构造一个 LLM Provider。
+func providerFromConfig(mc config.ModelConfig) llm.Provider {
+	id := mc.ID
+	if id == "" {
+		id = mc.Type + ":" + mc.Model
+	}
+	switch mc.Type {
+	case "openai":
+		return llm.NewOpenAICompat(llm.OpenAIConfig{
+			ID: id, Name: mc.Name, BaseURL: mc.BaseURL, APIKey: mc.APIKey, Model: mc.Model,
+		})
+	default: // echo 及未知类型一律回退为本地回声，避免启动失败
+		name := mc.Name
+		if name == "" {
+			name = "本地回声"
+		}
+		return llm.NewEcho(id, name)
+	}
+}
+
+// saveConfig 持久化当前配置（已加锁的调用方使用）。
+func (a *app) saveConfig() {
+	if err := a.cfg.Save(a.cfgPath); err != nil {
+		a.log.Warn("保存配置失败", "err", err)
+	}
 }
 
 // dispatchLoop 持续消费入站命令，直到 ctx 取消。
@@ -250,8 +295,23 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 		if cmd, err := protocol.As[protocol.SelectModelCommand](in.Env); err == nil {
 			if err := a.llm.SetActive(cmd.ID); err != nil {
 				a.log.Warn("切换模型失败", "id", cmd.ID, "err", err)
+			} else {
+				a.cfgMu.Lock()
+				a.cfg.SetActive(cmd.ID)
+				a.saveConfig()
+				a.cfgMu.Unlock()
 			}
 			a.srv.Broadcast(a.statusSnapshot()) // 让所有端同步当前模型
+		}
+
+	case protocol.TypeAddModel:
+		if cmd, err := protocol.As[protocol.AddModelCommand](in.Env); err == nil {
+			a.handleAddModel(cmd)
+		}
+
+	case protocol.TypeRemoveModel:
+		if cmd, err := protocol.As[protocol.RemoveModelCommand](in.Env); err == nil {
+			a.handleRemoveModel(cmd)
 		}
 
 	case protocol.TypeJogJoint:
@@ -419,6 +479,40 @@ func (a *app) handleJog(cmd protocol.JogJointCommand) {
 		return
 	}
 	a.srv.Broadcast(protocol.JointsEvent{Angles: a.bot.JointAngles(), Enabled: cmd.Enable})
+}
+
+// handleAddModel 新增/编辑一个模型：更新路由、持久化配置、广播状态。
+func (a *app) handleAddModel(cmd protocol.AddModelCommand) {
+	mc := config.ModelConfig{
+		ID: cmd.ID, Name: cmd.Name, Type: cmd.Kind,
+		BaseURL: cmd.BaseURL, APIKey: cmd.APIKey, Model: cmd.Model,
+	}
+	a.cfgMu.Lock()
+	id := a.cfg.Upsert(mc)
+	mc.ID = id
+	a.saveConfig()
+	a.cfgMu.Unlock()
+
+	// 重建该 Provider 并加入路由（Add 同 ID 会覆盖）。
+	a.llm.Add(providerFromConfig(mc))
+	a.log.Info("已添加/更新模型", "id", id, "type", mc.Type)
+	a.srv.Broadcast(a.statusSnapshot())
+}
+
+// handleRemoveModel 删除一个模型：从路由与配置移除并持久化。
+func (a *app) handleRemoveModel(cmd protocol.RemoveModelCommand) {
+	a.cfgMu.Lock()
+	removed := a.cfg.Remove(cmd.ID)
+	active := a.cfg.Active
+	a.saveConfig()
+	a.cfgMu.Unlock()
+	if !removed {
+		return
+	}
+	a.llm.Remove(cmd.ID)
+	_ = a.llm.SetActive(active) // 与配置归一化后的 active 对齐
+	a.log.Info("已删除模型", "id", cmd.ID)
+	a.srv.Broadcast(a.statusSnapshot())
 }
 
 // statusSnapshot 构造当前各子系统的状态快照。

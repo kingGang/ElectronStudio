@@ -81,8 +81,10 @@
 | `interrupt` | `InterruptCommand` | 打断当前回应或动作 |
 | `play_action` | `PlayActionCommand` | 触发编排动作（`name` + 可选 `loops`） |
 | `set_emotion` | `SetEmotionCommand` | 手动设置情绪 |
-| `select_model` | `SelectModelCommand` | 切换大模型（`id` 取自 `status.llm.available`） |
+| `select_model` | `SelectModelCommand` | 切换大模型（`id` 取自 `status.llm.available`），并持久化为生效模型 |
 | `jog_joint` | `JogJointCommand` | 手动微调单个舵机（`joint` / `angle` / `enable`） |
+| `add_model` | `AddModelCommand` | 新增/编辑大模型（`name` / `type` / `base_url` / `api_key` / `model`），写入配置文件 |
+| `remove_model` | `RemoveModelCommand` | 删除大模型（`id`），写入配置文件 |
 
 ### 示例
 

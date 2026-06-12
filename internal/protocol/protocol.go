@@ -48,6 +48,8 @@ const (
 	TypeSetEmotion  Type = "set_emotion"  // 手动设置情绪
 	TypeSelectModel Type = "select_model" // 切换当前大模型
 	TypeJogJoint    Type = "jog_joint"    // 手动微调单个舵机角度
+	TypeAddModel    Type = "add_model"    // 新增/编辑一个大模型（设置页）
+	TypeRemoveModel Type = "remove_model" // 删除一个大模型（设置页）
 )
 
 // Payload 是所有可被封装进 Envelope 的负载结构的统一约束。

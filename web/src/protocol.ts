@@ -37,6 +37,8 @@ export const ClientType = {
   SetEmotion: 'set_emotion',
   SelectModel: 'select_model',
   JogJoint: 'jog_joint',
+  AddModel: 'add_model',
+  RemoveModel: 'remove_model',
 } as const
 
 // ===========================================================================
@@ -187,6 +189,17 @@ export interface JogJointCommand {
   joint: number
   angle: number
   enable: boolean
+}
+export interface AddModelCommand {
+  id?: string
+  name: string
+  type: string // echo | openai
+  base_url?: string
+  api_key?: string
+  model?: string
+}
+export interface RemoveModelCommand {
+  id: string
 }
 
 // ===========================================================================

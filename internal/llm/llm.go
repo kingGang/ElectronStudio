@@ -123,6 +123,29 @@ func (r *Router) Add(p Provider) {
 	}
 }
 
+// Remove 注销一个 Provider；移除当前生效模型时自动改选第一个剩余模型。
+func (r *Router) Remove(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.providers[id]; !ok {
+		return
+	}
+	delete(r.providers, id)
+	for i, x := range r.order {
+		if x == id {
+			r.order = append(r.order[:i], r.order[i+1:]...)
+			break
+		}
+	}
+	if r.active == id {
+		if len(r.order) > 0 {
+			r.active = r.order[0]
+		} else {
+			r.active = ""
+		}
+	}
+}
+
 // List 按添加顺序返回所有模型的元信息。
 func (r *Router) List() []Info {
 	r.mu.RLock()
