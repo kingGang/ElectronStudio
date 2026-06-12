@@ -170,6 +170,37 @@ func TestClipFrameRateAccumulator(t *testing.T) {
 	}
 }
 
+// TestLoadEmotionDirFPS 验证目录素材读取可选 clip.json 帧率（视频抽帧后即此形式），
+// 且 clip.json 本身不被当作帧。
+func TestLoadEmotionDirFPS(t *testing.T) {
+	dir := t.TempDir()
+	emo := filepath.Join(dir, "wave")
+	if err := os.MkdirAll(emo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	for i := range img.Pix {
+		img.Pix[i] = 255
+	}
+	writePNG(t, filepath.Join(emo, "0001.png"), img)
+	writePNG(t, filepath.Join(emo, "0002.png"), img)
+	if err := os.WriteFile(filepath.Join(emo, "clip.json"), []byte(`{"fps":24}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	clips, err := LoadClips(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := clips["wave"]
+	if len(c.Frames) != 2 {
+		t.Fatalf("帧数应为 2（clip.json 不算帧），实际 %d", len(c.Frames))
+	}
+	if c.FPS != 24 {
+		t.Fatalf("应读取 clip.json fps=24, 实际 %d", c.FPS)
+	}
+}
+
 // TestReplaceAndInfo 验证热重载替换与素材概要/首帧读取。
 func TestReplaceAndInfo(t *testing.T) {
 	frame := make([]byte, scrW*scrH*3)

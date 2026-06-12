@@ -206,8 +206,8 @@ func LoadClips(dir string) (map[string]Clip, error) {
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() {
-			if frames, err := loadEmotionFrames(filepath.Join(dir, name)); err == nil && len(frames) > 0 {
-				out[name] = Clip{Frames: frames, FPS: clipFPS}
+			if clip, err := loadEmotionDir(filepath.Join(dir, name)); err == nil && len(clip.Frames) > 0 {
+				out[name] = clip
 			}
 			continue
 		}
@@ -293,7 +293,27 @@ func loadGridSheet(pngPath string, metaData []byte) (Clip, error) {
 	return Clip{Frames: frames, FPS: m.FPS}, nil
 }
 
+// loadEmotionDir 加载一个情绪目录（一帧一文件）为动画片，并读取可选的 clip.json 帧率。
+// 视频上传经 ffmpeg 抽帧后即以此形式落盘（含 clip.json 记录 fps）；无 clip.json 时回退默认帧率。
+func loadEmotionDir(dir string) (Clip, error) {
+	frames, err := loadEmotionFrames(dir)
+	if err != nil {
+		return Clip{}, err
+	}
+	fps := clipFPS
+	if data, err := os.ReadFile(filepath.Join(dir, "clip.json")); err == nil {
+		var m struct {
+			FPS int `json:"fps"`
+		}
+		if json.Unmarshal(data, &m) == nil && m.FPS > 0 {
+			fps = m.FPS
+		}
+	}
+	return Clip{Frames: frames, FPS: fps}, nil
+}
+
 // loadEmotionFrames 读取一个情绪目录下的全部帧图（按名排序）并转为 240×240 RGB888。
+// 非图片文件（如 clip.json）解码失败会被自动跳过，不计入帧。
 func loadEmotionFrames(dir string) ([][]byte, error) {
 	files, err := os.ReadDir(dir)
 	if err != nil {

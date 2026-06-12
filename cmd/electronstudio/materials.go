@@ -15,7 +15,9 @@ package main
 // 上传/删除后调用 reloadClips 热重载，立即生效并镜像到设备屏。
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -24,14 +26,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kingGang/ElectronStudio/internal/display"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 	"github.com/kingGang/ElectronStudio/internal/robot"
 )
 
-// maxUploadBytes 限制单次素材上传大小，防御性上限。
-const maxUploadBytes = 32 << 20 // 32 MiB
+const (
+	maxUploadBytes = 64 << 20          // 单次素材上传大小上限（视频偏大，放宽到 64 MiB）
+	videoFPS       = 20                // 视频抽帧的目标帧率（兼顾流畅与体积；上限 maxGIFFrames 帧）
+	videoTimeout   = 90 * time.Second  // ffmpeg 抽帧超时，防异常输入卡死
+)
+
+// videoExts 是支持的视频扩展名（经 ffmpeg 抽帧）。
+var videoExts = map[string]bool{
+	".mp4": true, ".webm": true, ".mov": true, ".mkv": true, ".avi": true, ".m4v": true,
+}
 
 // materialRoutes 在 HTTP mux 上挂载素材管理的 REST 接口。
 func (a *app) materialRoutes(mux *http.ServeMux) {
@@ -62,6 +73,12 @@ func (a *app) handleMaterialUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 	ext := strings.ToLower(filepath.Ext(hdr.Filename))
+
+	// 视频走 ffmpeg 抽帧（无 cgo，与摄像头同一依赖），其余（GIF/图片）走纯 Go 内存校验。
+	if videoExts[ext] {
+		a.handleVideoUpload(w, r, name, ext, file)
+		return
+	}
 
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -94,6 +111,78 @@ func (a *app) handleMaterialUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	a.broadcastMaterials()
 	writeJSON(w, map[string]any{"ok": true, "name": name})
+}
+
+// handleVideoUpload 处理视频素材上传：用 ffmpeg 抽帧 → 落盘为 emotions/<情绪>/ 帧序列（含 fps）。
+// 抽帧（重活）在锁外完成；仅“替换旧素材 + 热重载”持锁，且只有抽帧成功后才动旧素材，故失败不丢数据。
+func (a *app) handleVideoUpload(w http.ResponseWriter, r *http.Request, name, ext string, file io.Reader) {
+	if err := os.MkdirAll(a.emotionsDir, 0o755); err != nil {
+		a.log.Warn("创建素材目录失败", "err", err)
+		http.Error(w, "保存失败", http.StatusInternalServerError)
+		return
+	}
+
+	// 1) 把上传写到临时输入文件（ffmpeg 需要真实文件输入）。
+	in, err := os.CreateTemp("", "esvideo-*"+ext)
+	if err != nil {
+		http.Error(w, "保存失败", http.StatusInternalServerError)
+		return
+	}
+	inPath := in.Name()
+	defer os.Remove(inPath)
+	if _, err := io.Copy(in, file); err != nil {
+		in.Close()
+		http.Error(w, "读取上传内容失败", http.StatusBadRequest)
+		return
+	}
+	in.Close()
+
+	// 2) 抽帧到 emotions/ 下的暂存目录（同卷，便于稍后原子改名），传 0 用 ffmpeg 抽帧的默认帧数上限。
+	stage := filepath.Join(a.emotionsDir, ".staging-"+name)
+	_ = os.RemoveAll(stage)
+	defer os.RemoveAll(stage)
+
+	ctx, cancel := context.WithTimeout(r.Context(), videoTimeout)
+	defer cancel()
+	n, err := display.ExtractVideoFrames(ctx, a.ffmpegPath(), inPath, stage, videoFPS, 0)
+	if err != nil {
+		if errors.Is(err, display.ErrFFmpegNotFound) {
+			http.Error(w, "服务器未安装 ffmpeg，无法处理视频（图片/GIF 不受影响）", http.StatusBadRequest)
+			return
+		}
+		a.log.Warn("视频抽帧失败", "name", name, "err", err)
+		http.Error(w, "视频无法解析（请确认是有效视频文件）", http.StatusBadRequest)
+		return
+	}
+	if n == 0 {
+		http.Error(w, "视频未抽到任何帧", http.StatusBadRequest)
+		return
+	}
+	// 记录帧率，供加载时按视频速率播放（目录加载器读取 clip.json）。
+	_ = os.WriteFile(filepath.Join(stage, "clip.json"), []byte(fmt.Sprintf(`{"fps":%d}`, videoFPS)), 0o644)
+
+	// 3) 锁内原子替换旧素材并热重载（抽帧已成功，删旧素材安全）。
+	a.matMu.Lock()
+	defer a.matMu.Unlock()
+	a.removeMaterialFiles(name)
+	if err := os.Rename(stage, filepath.Join(a.emotionsDir, name)); err != nil {
+		a.log.Warn("替换素材失败", "name", name, "err", err)
+		http.Error(w, "保存失败", http.StatusInternalServerError)
+		return
+	}
+	if err := a.reloadClips(); err != nil {
+		a.log.Warn("素材热重载失败", "err", err)
+	}
+	a.broadcastMaterials()
+	writeJSON(w, map[string]any{"ok": true, "name": name, "frames": n})
+}
+
+// ffmpegPath 返回 ffmpeg 可执行路径：复用摄像头配置的路径，缺省为 "ffmpeg"（取自 PATH）。
+func (a *app) ffmpegPath() string {
+	if a.cfg != nil && a.cfg.Camera.FFmpeg != "" {
+		return a.cfg.Camera.FFmpeg
+	}
+	return "ffmpeg"
 }
 
 // saveMaterialBytes 把已校验的素材字节写到 emotions/ 下的对应位置（覆盖同名旧素材）。

@@ -117,13 +117,14 @@
         <span class="muted" id="mat-count"></span>
       </div>
       <p class="muted">
-        为每个情绪上传一段 <b>GIF</b>（或一张静态图片），机器人屏幕会用它替代程序动画脸。
+        为每个情绪上传一段 <b>GIF / 视频</b>（或一张静态图片），机器人屏幕会用它替代程序动画脸。
         上传后立即生效并镜像到设备屏；没有素材的情绪自动回退到程序脸。
         情绪名用字母/数字/<code>-</code>/<code>_</code>（如 <code>happy</code>、<code>dance</code>）。
+        <br>视频走 ffmpeg 抽帧（需服务器装有 ffmpeg），按约 20fps 重采样、居中裁剪到圆屏。
       </p>
       <form class="mat-upload" id="mat-upload">
         <input id="mat-name" placeholder="情绪名，如 happy / dance" autocomplete="off" />
-        <input id="mat-file" type="file" accept="image/gif,image/png,image/jpeg" />
+        <input id="mat-file" type="file" accept="image/gif,image/png,image/jpeg,video/mp4,video/webm,video/quicktime,video/x-matroska,.mp4,.webm,.mov,.mkv,.avi,.m4v" />
         <button type="submit" class="qa" id="mat-submit">⬆ 上传</button>
       </form>
       <div class="mat-grid" id="mat-grid"><span class="muted">暂无素材</span></div>
