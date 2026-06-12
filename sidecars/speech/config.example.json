@@ -3,6 +3,12 @@
   "ws_port": 7800,
   "sample_rate": 16000,
 
+  "audio": {
+    "_comment": "麦克风/扬声器设备(设备名子串或索引)；留空=系统默认。ElectronBot 板载 USB 麦克风插上后，用 `python sidecar.py --list-devices` 查到它的名字填这里。",
+    "input_device": "",
+    "output_device": ""
+  },
+
   "asr": {
     "_comment": "离线 ASR：SenseVoice（中文效果好）。模型见 download_models 脚本。",
     "model": "models/sense-voice/model.onnx",

@@ -38,6 +38,19 @@
 
 > 主程序自身用 `CGO_ENABLED=0` 交叉编译，不需要 C 工具链；libusb 仅在运行时按设备需要加载。
 
+## USB 拓扑：一线多设备
+
+ElectronBot 内部有一颗 **4 口 USB Hub**，一根 USB 线插进去，主机看到的是多个**标准 USB 设备**：
+
+| 设备 | 类型 | 主机如何访问 |
+|------|------|------------|
+| STM32 屏幕 + 舵机 | 自定义（VID 0x1001 / PID 0x8023） | 本包实现的 USB 协议（屏幕只写 + 32B 舵机反馈，**无音频**） |
+| 摄像头 | 标准 UVC | 当普通 webcam 直接读（可作画面源推到屏幕，见 docs/EMOTIONS.md 的可插拔 Source） |
+| 麦克风（预留口，需自加） | 标准 UAC | 当普通麦克风读；语音 sidecar 选中该设备即可（见 sidecars/speech） |
+
+要点：**摄像头/麦克风不走 0x8023 自定义协议**，它们是 hub 上的独立标准 USB 设备，主机用通用方式访问。
+base ElectronBot 本身无麦克风/喇叭，板上预留了一个 USB 口供加 USB 麦。
+
 ## 6 自由度关节（与官方 ElectronStudio 的 RobotController 一致）
 
 ElectronBot 是 **6 自由度**：每臂 2 个（横滚 + 俯仰），头 1 个（俯仰），身体 1 个（偏航）——**没有肘关节**。下标顺序即 `Joints`：

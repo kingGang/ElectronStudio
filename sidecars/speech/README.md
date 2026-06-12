@@ -30,6 +30,16 @@ SPEECH_SIDECAR_URL=ws://127.0.0.1:7800 go run ./cmd/electronstudio
 
 此时说话即可被识别并触发对话，助手回复会被合成播放；前端状态灯 ASR/TTS 转为在线。
 
+## 选择麦克风/扬声器（ElectronBot 板载 USB 麦）
+
+ElectronBot 内部是 USB Hub，板载 USB 麦克风/摄像头对主机就是**标准 USB 设备**。指定用哪个麦：
+
+```bash
+python sidecar.py --list-devices     # 列出所有音频设备，找到 ElectronBot USB 麦的名字/索引
+```
+
+把名字（子串即可）或索引填进 `config.json` 的 `audio.input_device` / `audio.output_device`；留空则用系统默认。
+
 ## 模型
 
 `download_models.{sh,ps1}` 会下载并归一化到与 `config.example.json` 一致的路径：

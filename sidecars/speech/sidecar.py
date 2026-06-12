@@ -55,6 +55,18 @@ class Config:
     def sample_rate(self) -> int:
         return int(self.raw.get("sample_rate", 16000))
 
+    @property
+    def input_device(self):
+        """麦克风设备（名称子串或索引）；空字符串返回 None（系统默认）。"""
+        d = self.raw.get("audio", {}).get("input_device", "")
+        return d if d not in ("", None) else None
+
+    @property
+    def output_device(self):
+        """扬声器设备（名称子串或索引）；空字符串返回 None（系统默认）。"""
+        d = self.raw.get("audio", {}).get("output_device", "")
+        return d if d not in ("", None) else None
+
 
 def load_config(path: str) -> Config:
     with open(path, "r", encoding="utf-8") as f:
@@ -162,6 +174,7 @@ class Session:
         self._stream = sd.InputStream(
             samplerate=self.sr, channels=1, dtype="float32",
             blocksize=self.BLOCK, callback=self._mic_callback,
+            device=self.cfg.input_device,  # None=系统默认；可指定 ElectronBot 板载 USB 麦
         )
         self._stream.start()
 
@@ -237,7 +250,7 @@ class Session:
         """合成并播放（阻塞，在执行器线程中运行）。"""
         try:
             samples, sr = self.eng.synthesize(text)
-            sd.play(samples, sr)
+            sd.play(samples, sr, device=self.cfg.output_device)
             sd.wait()
         except Exception as e:  # 播放失败不应拖垮会话
             print("TTS 播放失败:", e, file=sys.stderr)
@@ -268,7 +281,13 @@ async def serve(cfg: Config, engines: Engines):
 def main():
     ap = argparse.ArgumentParser(description="ElectronStudio 语音 sidecar")
     ap.add_argument("-c", "--config", default="config.json", help="配置文件路径")
+    ap.add_argument("--list-devices", action="store_true",
+                    help="列出所有音频设备(找 ElectronBot 板载 USB 麦克风的名字/索引)后退出")
     args = ap.parse_args()
+
+    if args.list_devices:
+        print(sd.query_devices())
+        return
 
     cfg = load_config(args.config)
     print("加载模型中…", file=sys.stderr)
