@@ -205,6 +205,9 @@ func LoadClips(dir string) (map[string]Clip, error) {
 	}
 	for _, e := range entries {
 		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue // 跳过隐藏/暂存条目（如视频抽帧用的 .staging-* 临时目录）
+		}
 		if e.IsDir() {
 			if clip, err := loadEmotionDir(filepath.Join(dir, name)); err == nil && len(clip.Frames) > 0 {
 				out[name] = clip

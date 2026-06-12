@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/kingGang/ElectronStudio/internal/display"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
@@ -297,15 +299,16 @@ func (a *app) materialKind(name string) string {
 }
 
 // sanitizeMaterialName 把用户输入的情绪名归一化为安全的文件名片段：
-// 仅允许 ASCII 字母/数字/下划线/连字符并转小写，拒绝空、过长与任何含路径分隔符者。
-// 由此素材名既可直接作文件名，又杜绝路径穿越（如 ../、绝对路径）。
+// 允许 Unicode 字母/数字（含中文）与 `_`、`-`，转小写；拒绝空、超长（>24 字）
+// 以及任何其它字符——尤其是 `.` `/` `\` `:` 空白与控制符，从而杜绝路径穿越（../、绝对路径、隐藏文件）。
+// 中文等字符作为文件名在 Windows/Linux 均安全，且不具路径意义。
 func sanitizeMaterialName(s string) (string, bool) {
 	s = strings.ToLower(strings.TrimSpace(s))
-	if s == "" || len(s) > 40 {
+	if s == "" || utf8.RuneCountInString(s) > 24 {
 		return "", false
 	}
 	for _, r := range s {
-		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-'
+		ok := r == '_' || r == '-' || unicode.IsLetter(r) || unicode.IsDigit(r)
 		if !ok {
 			return "", false
 		}

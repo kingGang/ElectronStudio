@@ -500,7 +500,7 @@
       const name = nameInp.value.trim().toLowerCase();
       const file = fileInp.files && fileInp.files[0];
       if (!name) { toast('请填写情绪名'); return; }
-      if (!/^[a-z0-9_-]{1,40}$/.test(name)) { toast('情绪名仅允许字母/数字/-/_'); return; }
+      if (!/^[\p{L}\p{N}_-]{1,24}$/u.test(name)) { toast('情绪名支持中文/字母/数字/-/_（≤24 字）'); return; }
       if (!file) { toast('请选择 GIF 或图片文件'); return; }
 
       const fd = new FormData();
