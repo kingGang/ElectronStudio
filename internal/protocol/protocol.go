@@ -57,6 +57,7 @@ const (
 	TypeRecordFrame  Type = "record_frame"  // 采集当前姿态为一帧
 	TypeRecordStop   Type = "record_stop"   // 结束录制并保存
 	TypeDeleteAction Type = "delete_action" // 删除一段动作
+	TypeCamera       Type = "camera"        // 开关屏幕显示摄像头画面
 )
 
 // Payload 是所有可被封装进 Envelope 的负载结构的统一约束。

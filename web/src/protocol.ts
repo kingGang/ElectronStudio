@@ -44,6 +44,7 @@ export const ClientType = {
   RecordFrame: 'record_frame',
   RecordStop: 'record_stop',
   DeleteAction: 'delete_action',
+  Camera: 'camera',
 } as const
 
 // ===========================================================================
@@ -101,6 +102,7 @@ export interface StatusEvent {
   tts: ServiceStatus
   llm: LLMStatus
   actions?: string[] // 可用的编排动作名（供动作编排页使用）
+  camera?: boolean   // 是否配置了摄像头
 }
 
 export interface VoiceStateEvent {

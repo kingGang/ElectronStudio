@@ -28,11 +28,20 @@ type SpeechConfig struct {
 	SidecarURL string `json:"sidecar_url,omitempty"`
 }
 
+// CameraConfig 描述摄像头采集配置（经 ffmpeg 抓取 UVC 摄像头）。
+type CameraConfig struct {
+	Enabled     bool   `json:"enabled,omitempty"`
+	FFmpeg      string `json:"ffmpeg,omitempty"`       // ffmpeg 可执行路径，默认 "ffmpeg"
+	InputFormat string `json:"input_format,omitempty"` // v4l2(Linux) | dshow(Windows) | avfoundation(macOS)
+	Input       string `json:"input,omitempty"`        // 设备规格，如 /dev/video0 或 video=Camera
+}
+
 // Config 是应用的完整配置。
 type Config struct {
 	Addr   string        `json:"addr"`
 	Robot  string        `json:"robot,omitempty"` // auto | electronbot | mock
 	Speech SpeechConfig  `json:"speech"`
+	Camera CameraConfig  `json:"camera"`
 	Models []ModelConfig `json:"models"`
 	Active string        `json:"active,omitempty"`
 }

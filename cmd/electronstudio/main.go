@@ -101,8 +101,9 @@ type app struct {
 	chor    *choreography.Engine
 	llm     *llm.Router
 	bot     robot.Transport
-	driver  *device.Driver // 统一设备驱动（拥有 Sync）
-	emotion display.Face   // 屏幕画面源（程序动画脸 + 可选素材片）
+	driver  *device.Driver        // 统一设备驱动（拥有 Sync）
+	screen  *display.Compositor   // 屏幕画面合成（摄像头 / 素材片 / 程序动画脸）
+	camera  *display.CameraSource // 摄像头采集（可为 nil）
 	speech  speech.Service
 	tools   *tools.Registry
 	log     *slog.Logger
@@ -178,7 +179,7 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		},
 	})
 
-	// 画面源：程序实时动画脸（眨眼/口型）+ 可选离线素材片（emotions/<情绪>/*.png）。
+	// 画面源：摄像头(可选) + 离线素材片 + 程序实时动画脸(眨眼/口型, 兜底)。
 	// 统一设备驱动以固定帧率把"姿态 + 画面"一并 Sync 给设备，并把同一帧广播给 UI，实现镜像同步。
 	face := display.NewEmotionSource()
 	clips, err := display.LoadClips(filepath.Join(filepath.Dir(cfgPath), "emotions"))
@@ -188,8 +189,11 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	if len(clips) > 0 {
 		log.Info("已加载表情素材", "情绪数", len(clips))
 	}
-	a.emotion = display.NewCompositor(display.NewClipSource(clips), face)
-	a.driver = device.NewDriver(bot, a.emotion, log, 30, a.onDriverFrame, a.onDriverJoints)
+	if cfg.Camera.Enabled {
+		a.camera = display.NewCameraSource(log)
+	}
+	a.screen = display.NewCompositor(a.camera, display.NewClipSource(clips), face)
+	a.driver = device.NewDriver(bot, a.screen, log, 30, a.onDriverFrame, a.onDriverJoints)
 
 	// 动作编排：把姿态写入驱动；注册内置动作并加载用户录制的动作（同名覆盖内置）。
 	a.chor = choreography.NewEngine(a.driver, choreography.WithLogger(log))
@@ -223,7 +227,7 @@ func (a *app) onDriverJoints(j robot.Joints) {
 
 // setEmotion 切换情绪：更新屏幕画面源、广播情绪、并播放同名动作（若有）。
 func (a *app) setEmotion(e string) {
-	a.emotion.SetEmotion(e)
+	a.screen.SetEmotion(e)
 	a.srv.Broadcast(protocol.EmotionEvent{Emotion: protocol.Emotion(e)})
 	if _, ok := a.chor.Lookup(e); ok {
 		_ = a.chor.Play(context.Background(), e, 1)
@@ -436,6 +440,11 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 			a.deleteAction(cmd.Name)
 		}
 
+	case protocol.TypeCamera:
+		if cmd, err := protocol.As[protocol.CameraCommand](in.Env); err == nil {
+			a.handleCamera(ctx, cmd.Enable)
+		}
+
 	default:
 		a.log.Debug("未处理的命令类型", "type", in.Env.Type)
 	}
@@ -474,7 +483,7 @@ func (a *app) finishAssistant(ctx context.Context, content string) {
 			a.log.Warn("语音合成失败", "err", err)
 		}
 	}
-	a.emotion.SetSpeaking(false) // 停止口型动画
+	a.screen.SetSpeaking(false) // 停止口型动画
 	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStop, Text: content})
 	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
 }
@@ -494,7 +503,7 @@ func (a *app) handleChatWithTools(ctx context.Context, text string) {
 	var pTools []protocol.ToolCall
 	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceSpeaking})
 	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStart})
-	a.emotion.SetSpeaking(true) // 驱动口型动画
+	a.screen.SetSpeaking(true) // 驱动口型动画
 
 	res, err := llm.RunToolLoop(ctx, a.llm, a.historySnapshot(), lt, a.tools.Execute, 5,
 		func(ec llm.ExecutedCall) {
@@ -539,7 +548,7 @@ func (a *app) handleChatStreaming(ctx context.Context, text string) {
 	var content string
 	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceSpeaking})
 	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStart})
-	a.emotion.SetSpeaking(true) // 驱动口型动画
+	a.screen.SetSpeaking(true) // 驱动口型动画
 
 	for chunk := range ch {
 		if chunk.Err != nil {
@@ -652,6 +661,28 @@ func (a *app) deleteAction(name string) {
 	a.srv.Broadcast(a.statusSnapshot())
 }
 
+// handleCamera 开关屏幕显示摄像头画面：开启时启动 ffmpeg 采集并切到摄像头，关闭时停采并切回表情脸。
+func (a *app) handleCamera(ctx context.Context, enable bool) {
+	if a.camera == nil {
+		a.log.Warn("未启用摄像头（config.camera.enabled=false）")
+		return
+	}
+	if enable {
+		cfg := a.cfg.Camera
+		if err := a.camera.Start(ctx, display.CameraConfig{
+			FFmpeg: cfg.FFmpeg, InputFormat: cfg.InputFormat, Input: cfg.Input,
+		}); err != nil {
+			a.log.Warn("启动摄像头失败", "err", err)
+			a.srv.Broadcast(protocol.ErrorEvent{Code: "camera_error", Message: err.Error()})
+			return
+		}
+		a.screen.SetCamera(true)
+	} else {
+		a.screen.SetCamera(false)
+		a.camera.Stop()
+	}
+}
+
 // handleAddModel 新增/编辑一个模型：更新路由、持久化配置、广播状态。
 func (a *app) handleAddModel(cmd protocol.AddModelCommand) {
 	mc := config.ModelConfig{
@@ -706,6 +737,7 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 		TTS:     protocol.ServiceStatus{Running: ss.TTSRunning, Detail: ss.Detail},
 		LLM:     protocol.LLMStatus{Active: a.llm.ActiveID(), Available: models},
 		Actions: actions,
+		Camera:  a.camera != nil,
 	}
 }
 

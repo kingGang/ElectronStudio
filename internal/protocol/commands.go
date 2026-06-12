@@ -163,3 +163,11 @@ type DeleteActionCommand struct {
 
 // Type 实现 Payload。
 func (DeleteActionCommand) Type() Type { return TypeDeleteAction }
+
+// CameraCommand 开关屏幕显示摄像头画面（开启时屏幕/UI 镜像显示实时摄像头）。
+type CameraCommand struct {
+	Enable bool `json:"enable"`
+}
+
+// Type 实现 Payload。
+func (CameraCommand) Type() Type { return TypeCamera }

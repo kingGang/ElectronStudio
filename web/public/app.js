@@ -32,7 +32,7 @@
     face: $('robot-face'), faceFallback: $('face-fallback'), mirror: $('mirror'),
     voiceState: $('voice-state'), vsText: $('vs-text'), waveform: $('waveform'),
     chat: $('chat-stream'), composer: $('composer'), input: $('composer-input'),
-    mic: $('btn-mic'), interrupt: $('btn-interrupt'), toast: $('toast'),
+    mic: $('btn-mic'), interrupt: $('btn-interrupt'), toast: $('toast'), camera: $('btn-camera'),
     // 编排页
     actionList: $('action-list'), joints: $('joints'), jogEnable: $('jog-enable'), choreoStop: $('choreo-stop'),
     // 设置页
@@ -106,8 +106,18 @@
       renderModelList(s.llm);
     }
     if (s.actions) renderActions(s.actions);
+    el.camera.style.display = s.camera ? '' : 'none'; // 配置了摄像头才显示按钮
     renderSettings(s);
   }
+
+  // 摄像头开关：切换屏幕在"表情脸 / 摄像头画面"之间。
+  let cameraOn = false;
+  el.camera.addEventListener('click', () => {
+    cameraOn = !cameraOn;
+    el.camera.classList.toggle('active', cameraOn);
+    el.camera.textContent = cameraOn ? '🙂 表情' : '📷 摄像头';
+    send(CliType.Camera, { enable: cameraOn });
+  });
   function toggleDot(node, on) { node.classList.toggle('on', !!on); }
 
   function setVoice(state) {

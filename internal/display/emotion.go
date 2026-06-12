@@ -56,6 +56,13 @@ func (s *EmotionSource) SetSpeaking(b bool) {
 	s.mu.Unlock()
 }
 
+// Invalidate 让下一次 Frame() 必定重渲染一帧（用于从摄像头切回时覆盖屏上残留）。
+func (s *EmotionSource) Invalidate() {
+	s.mu.Lock()
+	s.lastKey = ""
+	s.mu.Unlock()
+}
+
 // Frame 实现 Source：推进动画一帧，仅在画面变化时返回新帧，否则 nil。
 func (s *EmotionSource) Frame() []byte {
 	s.mu.Lock()

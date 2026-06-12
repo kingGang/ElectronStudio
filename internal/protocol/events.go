@@ -88,6 +88,7 @@ type StatusEvent struct {
 	TTS     ServiceStatus `json:"tts"`
 	LLM     LLMStatus     `json:"llm"`
 	Actions []string      `json:"actions,omitempty"` // 可用的编排动作名（供动作编排页使用）
+	Camera  bool          `json:"camera"`            // 是否配置了摄像头（前端据此显示切换按钮）
 }
 
 // Type 实现 Payload。

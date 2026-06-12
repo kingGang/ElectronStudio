@@ -52,7 +52,7 @@ func TestClipSourcePlays(t *testing.T) {
 
 // TestCompositorFallback 验证：无素材时回退到程序动画脸。
 func TestCompositorFallback(t *testing.T) {
-	comp := NewCompositor(NewClipSource(map[string][][]byte{}), NewEmotionSource())
+	comp := NewCompositor(nil, NewClipSource(map[string][][]byte{}), NewEmotionSource())
 	comp.SetEmotion("happy")
 	comp.SetSpeaking(true)
 	// 应能从程序脸拿到帧。

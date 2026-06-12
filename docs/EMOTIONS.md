@@ -44,3 +44,35 @@ emotions/
   下次自动加载——这也是接入"真·实时逐帧生成（GPU 服务器）"的同一 `Source` 接口位置。
 
 素材较大，已在 `.gitignore` 排除，不入库。
+
+## C. 摄像头画面（屏幕显示实时画面）
+
+ElectronBot 的摄像头是板载 USB Hub 上的标准 UVC 设备，主机当普通 webcam 读取（见 docs/ELECTRONBOT.md）。
+受"主程序无 cgo"约束，采集交给外部 **ffmpeg** 子进程：抓摄像头、缩放 240×240、输出 rgb24 裸帧，
+Go 侧按帧长读取后作为 `display.Source`，与表情走**同一条推屏管线**——设备屏与 UI 镜像照样同步。
+
+### 配置（`config.json`）
+
+```jsonc
+"camera": {
+  "enabled": true,
+  "ffmpeg": "ffmpeg",          // 可执行路径
+  "input_format": "v4l2",      // Linux=v4l2 / Windows=dshow / macOS=avfoundation
+  "input": "/dev/video0"       // 设备规格
+}
+```
+
+各平台 `input_format` / `input` 示例：
+
+| 平台 | input_format | input 示例 |
+|------|--------------|-----------|
+| 树莓派 / Linux | `v4l2` | `/dev/video0` |
+| Windows | `dshow` | `video=Integrated Camera`（名字用 `ffmpeg -list_devices true -f dshow -i dummy` 查） |
+| macOS | `avfoundation` | `0`（设备索引） |
+
+### 用法
+
+启用后，前端首页机器人区出现 **📷 摄像头** 按钮，点击在"表情脸 / 摄像头画面"间切换；
+开启时屏幕与 UI 镜像显示实时摄像头画面，关闭时切回表情。也可由命令 `camera {enable}` 控制。
+
+> 这同一个 `display.Source` 接口，也是将来接"AI 实时生成帧（GPU 服务器）"的位置。
