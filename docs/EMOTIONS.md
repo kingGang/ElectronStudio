@@ -46,6 +46,8 @@ emotions/
 - 帧率：TexturePacker 不导出 fps，默认 **15**；要改就在 JSON 里加一个 `"fps": 12`（顶层或 `meta` 内均可）。
 - 图集 PNG 路径取自 `meta.image`，找不到则回退同名 `<情绪>.png`。
 
+> 批量从 GIF 生成：`scripts/pack_gifs.{sh,ps1}`（GIF→抽帧→TexturePacker 打包，自动取 fps）。见 `scripts/README.md`。
+
 **(b) 自有等距网格**
 
 `emotions/<情绪>.png` + `emotions/<情绪>.json`：
