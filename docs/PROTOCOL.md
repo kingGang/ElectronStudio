@@ -44,6 +44,8 @@
 | `emotion` | `EmotionEvent` | 当前情绪变化 |
 | `joints` | `JointsEvent` | 6 轴舵机真实角度反馈 |
 | `error` | `ErrorEvent` | 面向用户的错误（含机器码 `code`） |
+| `schedule_list` | `ScheduleListEvent` | 定时任务/提醒列表（增删后广播，连接时推送一次） |
+| `materials` | `MaterialsEvent` | 屏幕表情素材列表（上传/删除后广播，连接时推送一次） |
 | `log` | `LogEvent` | 调试日志（可选） |
 
 ### 示例
@@ -85,6 +87,9 @@
 | `jog_joint` | `JogJointCommand` | 手动微调单个舵机（`joint` / `angle` / `enable`） |
 | `add_model` | `AddModelCommand` | 新增/编辑大模型（`name` / `type` / `base_url` / `api_key` / `model`），写入配置文件 |
 | `remove_model` | `RemoveModelCommand` | 删除大模型（`id`），写入配置文件 |
+| `material_delete` | `MaterialDeleteCommand` | 删除一段屏幕表情素材（`name`），删后热重载并广播 `materials` |
+
+> 注：屏幕表情素材的**上传**是二进制文件，不走 WebSocket，而走下方的 HTTP REST 接口。
 
 ### 示例
 
@@ -110,6 +115,18 @@
 | 14 | … | `pixels` | `width × height × bytesPerPixel` 字节 |
 
 ElectronBot 屏幕为 240×240。RGB888 一帧像素 = 240×240×3 = 172,800 字节。
+
+## 素材管理 REST 接口（非 WebSocket）
+
+屏幕表情素材（GIF / 图片）是二进制文件，上传与缩略图走普通 HTTP，与上面同一个监听端口：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/materials` | `multipart/form-data` 上传：字段 `name`（情绪名，仅 `[a-z0-9_-]`，≤40）+ 文件 `file`（`.gif` / `.png` / `.jpg`）。落盘到 `emotions/` 并热重载，成功返回 `{"ok":true,"name":"..."}`；非法名/无效文件返回 `400`。上限 32 MiB |
+| `GET` | `/api/material-thumb?name=<情绪>` | 返回该情绪动画**首帧**的 240×240 PNG 缩略图；无此素材返回 `404` |
+
+落盘形式（与 `display.LoadClips` 的识别规则一致）：GIF → `emotions/<情绪>.gif`（纯 Go 解码）；静态图片 → `emotions/<情绪>/0001.<ext>`。
+删除/列表则走上面的 `material_delete` 命令与 `materials` 事件。
 
 ## 版本与演进
 

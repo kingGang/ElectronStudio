@@ -252,6 +252,22 @@ type ScheduleListEvent struct {
 // Type 实现 Payload。
 func (ScheduleListEvent) Type() Type { return TypeScheduleList }
 
+// MaterialInfo 描述一段屏幕表情素材（供素材管理界面展示）。
+type MaterialInfo struct {
+	Name   string `json:"name"`   // 情绪名（= 素材文件名）
+	Frames int    `json:"frames"` // 帧数
+	FPS    int    `json:"fps"`    // 播放帧率
+	Kind   string `json:"kind"`   // 素材来源：gif | frames | atlas
+}
+
+// MaterialsEvent 是屏幕表情素材列表（上传/删除后广播，连接建立时也推送一次）。
+type MaterialsEvent struct {
+	Materials []MaterialInfo `json:"materials"`
+}
+
+// Type 实现 Payload。
+func (MaterialsEvent) Type() Type { return TypeMaterials }
+
 // MusicEvent 表示音乐播放状态变化。
 type MusicEvent struct {
 	State  string `json:"state"`            // playing | paused | stopped

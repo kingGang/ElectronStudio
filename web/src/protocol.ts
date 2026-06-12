@@ -28,6 +28,7 @@ export const ServerType = {
   Gesture: 'gesture',
   MusicState: 'music_state',
   ScheduleList: 'schedule_list',
+  Materials: 'materials',
   Log: 'log',
 } as const
 
@@ -52,6 +53,7 @@ export const ClientType = {
   Music: 'music',
   ScheduleAdd: 'schedule_add',
   ScheduleRemove: 'schedule_remove',
+  MaterialDelete: 'material_delete',
 } as const
 
 export interface ScheduleAddCommand {
@@ -177,6 +179,15 @@ export interface LogEvent {
   level: string
   message: string
 }
+export interface MaterialInfo {
+  name: string
+  frames: number
+  fps: number
+  kind: string // gif | frames | atlas
+}
+export interface MaterialsEvent {
+  materials: MaterialInfo[]
+}
 
 /** 服务端事件的可辨识联合，便于前端按 type 穷尽处理。 */
 export type ServerMessage =
@@ -190,6 +201,7 @@ export type ServerMessage =
   | (Envelope<EmotionEvent> & { type: typeof ServerType.Emotion })
   | (Envelope<JointsEvent> & { type: typeof ServerType.Joints })
   | (Envelope<ErrorEvent> & { type: typeof ServerType.Error })
+  | (Envelope<MaterialsEvent> & { type: typeof ServerType.Materials })
   | (Envelope<LogEvent> & { type: typeof ServerType.Log })
 
 // ===========================================================================
@@ -211,6 +223,7 @@ export interface PlayActionCommand {
 }
 export interface SetEmotionCommand {
   emotion: Emotion
+  preview?: boolean // 仅切屏预览、不联动同名动作（素材预览用）
 }
 export interface SelectModelCommand {
   id: string
@@ -238,6 +251,9 @@ export interface RecordStartCommand {
   name: string
 }
 export interface DeleteActionCommand {
+  name: string
+}
+export interface MaterialDeleteCommand {
   name: string
 }
 

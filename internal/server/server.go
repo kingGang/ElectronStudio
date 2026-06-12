@@ -61,6 +61,9 @@ type Options struct {
 	// OnConnect 在一个新客户端注册成功后被调用（可选），常用于向其推送初始状态快照。
 	// 回调在连接的接管 goroutine 中同步执行，应尽量轻量、避免阻塞。
 	OnConnect func(c *Client)
+	// Routes 允许调用方在内部 mux 上挂载额外的 HTTP 路由（如素材管理的 REST 接口）。
+	// 它在静态文件服务（"/"）之前注册，使具体前缀（如 "/api/"）优先匹配。可为 nil。
+	Routes func(mux *http.ServeMux)
 }
 
 // withDefaults 返回填充了默认值的 Options 副本，避免在各处重复判空。
@@ -117,6 +120,9 @@ func (s *Server) Run(ctx context.Context) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	if s.opts.Routes != nil {
+		s.opts.Routes(mux) // 业务方 REST 路由（如 /api/materials），需先于根静态服务注册
+	}
 	if s.opts.StaticFS != nil {
 		mux.Handle("/", http.FileServer(http.FS(s.opts.StaticFS)))
 	}

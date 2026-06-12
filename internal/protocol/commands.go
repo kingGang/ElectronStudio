@@ -67,6 +67,9 @@ func (PlayActionCommand) Type() Type { return TypePlayAction }
 // SetEmotionCommand 手动切换机器人情绪（同时影响表情画面）。
 type SetEmotionCommand struct {
 	Emotion Emotion `json:"emotion"`
+	// Preview 为 true 时只切换屏幕表情画面、广播情绪，不联动播放同名编排动作。
+	// 素材管理页「预览」用它，避免预览一个与动作同名的素材时让真机做出物理动作。
+	Preview bool `json:"preview,omitempty"`
 }
 
 // Type 实现 Payload。
@@ -199,6 +202,14 @@ type ScheduleRemoveCommand struct {
 
 // Type 实现 Payload。
 func (ScheduleRemoveCommand) Type() Type { return TypeScheduleRemove }
+
+// MaterialDeleteCommand 删除一段屏幕表情素材（按情绪名）。上传走 HTTP（POST /api/materials）。
+type MaterialDeleteCommand struct {
+	Name string `json:"name"`
+}
+
+// Type 实现 Payload。
+func (MaterialDeleteCommand) Type() Type { return TypeMaterialDelete }
 
 // MusicCommand 控制音乐播放。
 type MusicCommand struct {

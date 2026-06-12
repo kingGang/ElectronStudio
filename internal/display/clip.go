@@ -1,6 +1,7 @@
 package display
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -35,7 +36,7 @@ type ClipSource struct {
 	emotion string
 	clips   map[string]Clip
 	idx     int
-	tick    int
+	acc     float64 // 帧推进累加器：每个 30fps tick += fps/30，>=1 时推进一帧（精确支持任意帧率）
 }
 
 // NewClipSource 用已加载的动画集创建播放源。
@@ -44,6 +45,88 @@ func NewClipSource(clips map[string]Clip) *ClipSource {
 		clips = map[string]Clip{}
 	}
 	return &ClipSource{emotion: "neutral", clips: clips}
+}
+
+// ClipInfo 描述一段已加载的表情素材（供素材管理界面展示）。
+type ClipInfo struct {
+	Name   string // 情绪名
+	Frames int    // 帧数
+	FPS    int    // 播放帧率
+}
+
+// Replace 原子替换全部动画集（素材增删后热重载，无需重启进程）。
+// 保持当前情绪，但把播放进度重置到首帧，避免索引错位与跳帧。
+func (c *ClipSource) Replace(clips map[string]Clip) {
+	if clips == nil {
+		clips = map[string]Clip{}
+	}
+	c.mu.Lock()
+	c.clips = clips
+	c.idx = 0
+	c.acc = 0
+	c.mu.Unlock()
+}
+
+// ValidateUpload 在落盘前校验一段上传的素材字节能否解析为有效动画，并施加尺寸/帧数上限。
+// 这同时实现两个目的：① 防「解码炸弹」（小文件声明超大画布/超多帧耗尽内存）；
+// ② 让“写盘”只发生在确认有效之后，避免坏文件覆盖删除既有有效素材造成数据丢失。
+// ext 为小写扩展名（.gif/.png/.jpg/.jpeg）；通过则返回帧数，否则返回 error。
+func ValidateUpload(ext string, data []byte) (int, error) {
+	switch ext {
+	case ".gif":
+		clip, err := decodeGIFClip(data)
+		if err != nil {
+			return 0, err
+		}
+		if len(clip.Frames) == 0 {
+			return 0, fmt.Errorf("display: GIF 无有效帧")
+		}
+		return len(clip.Frames), nil
+	case ".png", ".jpg", ".jpeg":
+		cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+		if err != nil {
+			return 0, fmt.Errorf("display: 无法识别图片格式: %w", err)
+		}
+		if cfg.Width > maxImageDim || cfg.Height > maxImageDim {
+			return 0, fmt.Errorf("display: 图片尺寸过大 %dx%d（上限 %d）", cfg.Width, cfg.Height, maxImageDim)
+		}
+		if _, _, err := image.Decode(bytes.NewReader(data)); err != nil {
+			return 0, fmt.Errorf("display: 图片解码失败: %w", err)
+		}
+		return 1, nil
+	default:
+		return 0, fmt.Errorf("display: 不支持的文件类型 %q（支持 .gif / .png / .jpg）", ext)
+	}
+}
+
+// Info 返回所有已加载素材的概要（名称/帧数/帧率），按名称排序，供 UI 列表展示。
+func (c *ClipSource) Info() []ClipInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]ClipInfo, 0, len(c.clips))
+	for name, clip := range c.clips {
+		fps := clip.FPS
+		if fps <= 0 {
+			fps = clipFPS
+		}
+		out = append(out, ClipInfo{Name: name, Frames: len(clip.Frames), FPS: fps})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// FirstFrame 返回某情绪动画的首帧副本（240×240 RGB888），供 UI 生成缩略图；无则返回 nil。
+func (c *ClipSource) FirstFrame(emotion string) []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	clip := c.clips[emotion]
+	if len(clip.Frames) == 0 {
+		return nil
+	}
+	f := clip.Frames[0]
+	out := make([]byte, len(f))
+	copy(out, f)
+	return out
 }
 
 // Has 报告某情绪是否有可播动画。
@@ -59,15 +142,33 @@ func (c *ClipSource) SetEmotion(e string) {
 	if e != c.emotion {
 		c.emotion = e
 		c.idx = 0
-		c.tick = 0
+		c.acc = 0
 	}
 	c.mu.Unlock()
 }
 
-// Frame 实现 Source：按该片帧率推进并返回当前帧；无动画返回 nil。
+// Frame 实现 Source：按当前情绪与该片帧率推进并返回当前帧；无动画返回 nil。
 func (c *ClipSource) Frame() []byte {
 	c.mu.Lock()
+	e := c.emotion
+	c.mu.Unlock()
+	return c.FrameFor(e)
+}
+
+// FrameFor 原子地（单次加锁内）按指定情绪推进并返回当前帧；该情绪无动画时返回 nil。
+// 供 Compositor 调用，避免 Has()+Frame() 两次加锁之间的竞态（情绪切换/热重载瞬间取错帧）。
+//
+// 帧推进用浮点累加器而非整数“每隔 N tick”：驱动固定 30fps，每次调用 acc += fps/30，
+// acc>=1 时推进一帧并扣减。这样任意源帧率（如 20/25fps）都能按真实速率播放，
+// 不会被整数除法截断成 30fps（曾导致动画明显比原图快）。
+func (c *ClipSource) FrameFor(emotion string) []byte {
+	c.mu.Lock()
 	defer c.mu.Unlock()
+	if emotion != c.emotion {
+		c.emotion = emotion
+		c.idx = 0
+		c.acc = 0
+	}
 	clip := c.clips[c.emotion]
 	if len(clip.Frames) == 0 {
 		return nil
@@ -76,13 +177,10 @@ func (c *ClipSource) Frame() []byte {
 	if fps <= 0 {
 		fps = clipFPS
 	}
-	everyN := driverFrameRate / fps
-	if everyN < 1 {
-		everyN = 1
-	}
-	c.tick++
-	if c.tick%everyN == 0 {
+	c.acc += float64(fps) / driverFrameRate
+	for c.acc >= 1 {
 		c.idx = (c.idx + 1) % len(clip.Frames)
+		c.acc--
 	}
 	f := clip.Frames[c.idx%len(clip.Frames)]
 	out := make([]byte, len(f))
@@ -110,6 +208,15 @@ func LoadClips(dir string) (map[string]Clip, error) {
 		if e.IsDir() {
 			if frames, err := loadEmotionFrames(filepath.Join(dir, name)); err == nil && len(frames) > 0 {
 				out[name] = Clip{Frames: frames, FPS: clipFPS}
+			}
+			continue
+		}
+		// GIF：纯 Go 解码为动画片（情绪名=GIF 文件名），帧率取自 GIF 延时。
+		// 这是素材管理界面上传 GIF 后的默认落盘形式，无需任何外部工具。
+		if strings.EqualFold(filepath.Ext(name), ".gif") {
+			base := strings.TrimSuffix(name, filepath.Ext(name))
+			if clip, err := loadGIF(filepath.Join(dir, name)); err == nil && len(clip.Frames) > 0 {
+				out[base] = clip
 			}
 			continue
 		}
@@ -219,6 +326,15 @@ func decodeImage(path string) (image.Image, error) {
 		return nil, err
 	}
 	defer f.Close()
+	// 先按图片头校验尺寸上限（防解码炸弹），再整张解码。
+	if cfg, _, cfgErr := image.DecodeConfig(f); cfgErr == nil {
+		if cfg.Width > maxImageDim || cfg.Height > maxImageDim {
+			return nil, fmt.Errorf("display: 图片尺寸过大 %dx%d（上限 %d）", cfg.Width, cfg.Height, maxImageDim)
+		}
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		return nil, err
+	}
 	img, _, err := image.Decode(f)
 	if err != nil {
 		_, _ = f.Seek(0, 0)

@@ -2,6 +2,9 @@
 
 ## pack_gifs —— GIF 批量打包成表情图集
 
+> 日常加表情**不需要这个脚本**：直接在前端「素材」页上传 GIF 即可（纯 Go 解码、热重载，见
+> [`../docs/EMOTIONS.md`](../docs/EMOTIONS.md)）。本脚本面向**批量**离线打包成图集的进阶场景。
+
 把一堆 GIF（一个情绪一个文件）批量打包成 ElectronStudio 用的精灵图集
 （TexturePacker `JSON (Array)`），自动抽帧、取帧率、生成 `<情绪>.png` + `<情绪>.json`。
 

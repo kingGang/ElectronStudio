@@ -7,16 +7,23 @@
 (() => {
   'use strict';
 
-  // ---- 协议常量（镜像自 internal/protocol）----
+  // ---- 协议常量（镜像自 internal/protocol，须与 web/src/protocol.ts 一致）----
   const SrvType = {
     Status: 'status', VoiceState: 'voice_state', VAD: 'vad', Wake: 'wake',
     ASR: 'asr', Chat: 'chat', TTS: 'tts', Emotion: 'emotion',
-    Joints: 'joints', Error: 'error', Gesture: 'gesture', MusicState: 'music_state', Log: 'log',
+    Joints: 'joints', Error: 'error', Gesture: 'gesture', MusicState: 'music_state',
+    ScheduleList: 'schedule_list', Materials: 'materials', Log: 'log',
   };
   const CliType = {
     SendText: 'send_text', Mic: 'mic', Interrupt: 'interrupt',
     PlayAction: 'play_action', SetEmotion: 'set_emotion',
     SelectModel: 'select_model', JogJoint: 'jog_joint',
+    AddModel: 'add_model', RemoveModel: 'remove_model',
+    Follow: 'follow', RecordStart: 'record_start', RecordFrame: 'record_frame',
+    RecordStop: 'record_stop', DeleteAction: 'delete_action',
+    Camera: 'camera', Greet: 'greet', Music: 'music',
+    ScheduleAdd: 'schedule_add', ScheduleRemove: 'schedule_remove',
+    MaterialDelete: 'material_delete',
   };
 
   // 6 轴关节名称（顺序与后端 robot.JointNames / 官方 RobotController 完全一致）。
@@ -95,6 +102,7 @@
       case SrvType.Gesture: toast('识别到手势：' + (p.name || '')); break;
       case SrvType.MusicState: onMusicState(p); break;
       case SrvType.ScheduleList: renderSchedule(p.jobs || []); break;
+      case SrvType.Materials: renderMaterials(p.materials || []); break;
       case SrvType.Error: toast(p.message || '发生错误'); break;
       default: break;
     }
@@ -447,10 +455,82 @@
     });
   }
 
+  // ======================================================================
+  // 屏幕表情素材（上传 GIF/图片 → 机器人脸；列表/删除走 WS，上传/缩略图走 HTTP）
+  // ======================================================================
+  let matVersion = 0; // 每次列表更新自增，用于缩略图 URL 去缓存
+  function renderMaterials(materials) {
+    const grid = $('mat-grid'), count = $('mat-count');
+    if (count) count.textContent = materials.length ? `${materials.length} 个情绪` : '';
+    if (!grid) return;
+    matVersion++;
+    if (!materials.length) { grid.innerHTML = '<span class="muted">暂无素材，上传一段 GIF 试试</span>'; return; }
+    grid.innerHTML = '';
+    materials.forEach((m) => {
+      const card = document.createElement('div');
+      card.className = 'mat-card';
+      const kind = { gif: 'GIF', frames: '帧序列', atlas: '图集' }[m.kind] || m.kind || '';
+      card.innerHTML =
+        `<img class="mat-thumb" alt="${m.name}" src="/api/material-thumb?name=${encodeURIComponent(m.name)}&v=${matVersion}" />` +
+        `<div class="mat-meta"><b class="mat-name">${m.name}</b>` +
+        `<span class="mat-sub">${m.frames} 帧 · ${m.fps}fps · ${kind}</span></div>` +
+        `<div class="mat-ops">` +
+        `<button class="qa mat-preview">▶ 预览</button>` +
+        `<button class="mr-rm" title="删除素材">✕</button>` +
+        `</div>`;
+      card.querySelector('.mat-preview').addEventListener('click', () => {
+        send(CliType.SetEmotion, { emotion: m.name, preview: true }); // preview：只切屏，不联动动作
+        toast(`预览「${m.name}」`);
+      });
+      card.querySelector('.mr-rm').addEventListener('click', () => {
+        if (confirm(`删除素材「${m.name}」？删除后该情绪回退到程序动画脸。`)) {
+          send(CliType.MaterialDelete, { name: m.name });
+        }
+      });
+      grid.appendChild(card);
+    });
+  }
+
+  function setupMaterials() {
+    const form = $('mat-upload');
+    if (!form) return;
+    const nameInp = $('mat-name'), fileInp = $('mat-file'), submit = $('mat-submit');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = nameInp.value.trim().toLowerCase();
+      const file = fileInp.files && fileInp.files[0];
+      if (!name) { toast('请填写情绪名'); return; }
+      if (!/^[a-z0-9_-]{1,40}$/.test(name)) { toast('情绪名仅允许字母/数字/-/_'); return; }
+      if (!file) { toast('请选择 GIF 或图片文件'); return; }
+
+      const fd = new FormData();
+      fd.append('name', name);
+      fd.append('file', file);
+      submit.disabled = true;
+      submit.textContent = '上传中…';
+      try {
+        const res = await fetch('/api/materials', { method: 'POST', body: fd });
+        if (res.ok) {
+          toast(`已上传「${name}」`);
+          form.reset();
+        } else {
+          toast('上传失败：' + (await res.text()).trim());
+        }
+      } catch (err) {
+        toast('上传失败：' + err);
+      } finally {
+        submit.disabled = false;
+        submit.textContent = '⬆ 上传';
+      }
+      // 列表由后端 materials 事件刷新，无需手动拉取。
+    });
+  }
+
   // 启动。
   buildJoints();
   setupAddModelForm();
   setupSchedule();
   setupRecord();
+  setupMaterials();
   connect();
 })();

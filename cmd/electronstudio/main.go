@@ -118,7 +118,11 @@ type app struct {
 	bot     robot.Transport
 	driver  *device.Driver        // 统一设备驱动（拥有 Sync）
 	screen  *display.Compositor   // 屏幕画面合成（摄像头 / 素材片 / 程序动画脸）
+	clips   *display.ClipSource   // 离线表情素材片（支持界面上传/删除后热重载）
 	camera  *display.CameraSource // 摄像头采集（可为 nil）
+
+	emotionsDir string     // 表情素材目录（与 config.json 同目录的 emotions/）
+	matMu       sync.Mutex // 串行化素材上传/删除，避免并发改写同一情绪文件
 	speech  speech.Service
 	gesture gesture.Service
 	music   *music.Service
@@ -201,19 +205,22 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	// 新客户端连上时，推送一次状态快照，让前端立即渲染。
 	a.srv = server.New(server.Options{
 		Logger:   log,
-		StaticFS: web.FS(), // 内嵌前端单页应用，访问 http://addr/ 即是界面
+		StaticFS: web.FS(),        // 内嵌前端单页应用，访问 http://addr/ 即是界面
+		Routes:   a.materialRoutes, // 素材管理 REST 接口（上传/缩略图）
 		OnConnect: func(c *server.Client) {
 			if err := c.Send(a.statusSnapshot()); err != nil {
 				log.Warn("推送初始状态失败", "err", err)
 			}
 			_ = c.Send(a.scheduleListEvent()) // 推送当前定时任务列表
+			_ = c.Send(a.materialsEvent())    // 推送当前屏幕表情素材列表
 		},
 	})
 
 	// 画面源：摄像头(可选) + 离线素材片 + 程序实时动画脸(眨眼/口型, 兜底)。
 	// 统一设备驱动以固定帧率把"姿态 + 画面"一并 Sync 给设备，并把同一帧广播给 UI，实现镜像同步。
 	face := display.NewEmotionSource()
-	clips, err := display.LoadClips(filepath.Join(filepath.Dir(cfgPath), "emotions"))
+	a.emotionsDir = filepath.Join(filepath.Dir(cfgPath), "emotions")
+	clips, err := display.LoadClips(a.emotionsDir)
 	if err != nil {
 		log.Warn("加载表情素材失败，使用程序动画脸", "err", err)
 	}
@@ -223,7 +230,8 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	if cfg.Camera.Enabled {
 		a.camera = display.NewCameraSource(log)
 	}
-	a.screen = display.NewCompositor(a.camera, display.NewClipSource(clips), face)
+	a.clips = display.NewClipSource(clips)
+	a.screen = display.NewCompositor(a.camera, a.clips, face)
 	a.driver = device.NewDriver(bot, a.screen, log, 30, a.onDriverFrame, a.onDriverJoints)
 
 	// 动作编排：把姿态写入驱动；注册内置动作并加载用户录制的动作（同名覆盖内置）。
@@ -325,6 +333,13 @@ func (a *app) setEmotion(e string) {
 	if _, ok := a.chor.Lookup(e); ok {
 		_ = a.chor.Play(context.Background(), e, 1)
 	}
+}
+
+// previewEmotion 仅切换屏幕表情画面并广播情绪，不联动播放同名动作。
+// 供素材管理页「预览」使用：预览一个与某动作同名的素材时，真机不应做出物理动作。
+func (a *app) previewEmotion(e string) {
+	a.screen.SetEmotion(e)
+	a.srv.Broadcast(protocol.EmotionEvent{Emotion: protocol.Emotion(e)})
 }
 
 // connectRobot 依据配置选择并连接机器人传输：
@@ -523,7 +538,11 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 
 	case protocol.TypeSetEmotion:
 		if cmd, err := protocol.As[protocol.SetEmotionCommand](in.Env); err == nil {
-			a.setEmotion(string(cmd.Emotion)) // 更新屏幕画面 + 广播 + 同名动作
+			if cmd.Preview {
+				a.previewEmotion(string(cmd.Emotion)) // 仅切屏 + 广播，不联动动作（素材预览）
+			} else {
+				a.setEmotion(string(cmd.Emotion)) // 更新屏幕画面 + 广播 + 同名动作
+			}
 		}
 
 	case protocol.TypeSelectModel:
@@ -611,6 +630,11 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 		if cmd, err := protocol.As[protocol.ScheduleRemoveCommand](in.Env); err == nil {
 			a.sched.Remove(cmd.ID)
 			a.srv.Broadcast(a.scheduleListEvent())
+		}
+
+	case protocol.TypeMaterialDelete:
+		if cmd, err := protocol.As[protocol.MaterialDeleteCommand](in.Env); err == nil {
+			go a.handleMaterialDelete(cmd.Name) // 涉及磁盘+重载，放后台，避免阻塞命令分发循环
 		}
 
 	default:

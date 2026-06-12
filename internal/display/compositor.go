@@ -57,8 +57,11 @@ func (c *Compositor) Frame() []byte {
 	if cam && c.camera != nil {
 		return c.camera.Frame()
 	}
-	if c.clip != nil && c.clip.Has(e) {
-		return c.clip.Frame()
+	// 单次调用原子地判定“该情绪有无素材”并取帧，避免 Has()+Frame() 之间的竞态。
+	if c.clip != nil {
+		if f := c.clip.FrameFor(e); f != nil {
+			return f
+		}
 	}
 	return c.fallback.Frame()
 }

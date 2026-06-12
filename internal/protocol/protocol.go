@@ -39,6 +39,7 @@ const (
 	TypeGesture      Type = "gesture"       // 识别到手势
 	TypeMusicState   Type = "music_state"   // 音乐播放状态变化
 	TypeScheduleList Type = "schedule_list" // 定时任务列表
+	TypeMaterials    Type = "materials"     // 屏幕表情素材列表
 	TypeLog          Type = "log"           // 调试日志（可选，供前端日志面板使用）
 )
 
@@ -65,6 +66,7 @@ const (
 	TypeMusic          Type = "music"           // 音乐控制（播放/暂停/停止/音量）
 	TypeScheduleAdd    Type = "schedule_add"    // 新增定时任务/提醒
 	TypeScheduleRemove Type = "schedule_remove" // 删除定时任务
+	TypeMaterialDelete Type = "material_delete" // 删除一段屏幕表情素材（上传走 HTTP）
 )
 
 // Payload 是所有可被封装进 Envelope 的负载结构的统一约束。

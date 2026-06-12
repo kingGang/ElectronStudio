@@ -160,6 +160,38 @@ body {
 }
 .add-model input:focus, .add-model select:focus { border-color: var(--accent); outline: none; }
 
+/* ---------- 素材管理 ---------- */
+.mat-upload { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 14px 0; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.mat-upload input[type="text"], .mat-upload #mat-name {
+  flex: 1; min-width: 160px; background: var(--card); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px;
+}
+.mat-upload #mat-name:focus { border-color: var(--accent); outline: none; }
+.mat-upload input[type="file"] { font-size: 12px; color: var(--text-dim); max-width: 220px; }
+.mat-upload input[type="file"]::file-selector-button {
+  background: var(--card); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 6px 10px; margin-right: 8px; cursor: pointer;
+}
+.mat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.mat-card {
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px; display: flex; flex-direction: column; gap: 8px;
+}
+.mat-thumb {
+  width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 50%;
+  background: #05080c; border: 1px solid var(--border);
+}
+.mat-meta { display: flex; flex-direction: column; gap: 2px; }
+.mat-name { font-size: 14px; }
+.mat-sub { font-size: 11px; color: var(--text-dim); font-family: var(--mono); }
+.mat-ops { display: flex; align-items: center; gap: 6px; }
+.mat-ops .mat-preview { flex: 1; padding: 5px 8px; font-size: 12px; }
+.mat-ops .mr-rm {
+  background: transparent; border: none; color: var(--text-dim);
+  cursor: pointer; font-size: 14px; padding: 4px 8px; border-radius: 6px;
+}
+.mat-ops .mr-rm:hover { color: var(--err); background: rgba(239, 68, 68, 0.1); }
+
 /* ---------- 左栏：机器人 ---------- */
 .robot-pane {
   display: flex;
