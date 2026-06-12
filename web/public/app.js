@@ -1,8 +1,8 @@
 /*
  * ElectronStudio 前端逻辑（纯原生 JS，无依赖、无构建）。
  *
- * 职责：维护一条到后端的 WebSocket，按 internal/protocol 的契约收发消息，
- * 并据此更新界面。消息类型常量与 web/src/protocol.ts 保持一致。
+ * 维护一条到后端的 WebSocket，按 internal/protocol 契约收发消息，驱动三个视图：
+ * 对话首页 / 动作编排 / 设置。消息常量与 web/src/protocol.ts 保持一致。
  */
 (() => {
   'use strict';
@@ -19,70 +19,79 @@
     SelectModel: 'select_model', JogJoint: 'jog_joint',
   };
 
-  // ---- DOM 引用 ----
+  // 6 轴关节名称（与 ElectronBot 关节约定一致，仅作展示）。
+  const JOINT_NAMES = ['头部旋转', '头部俯仰', '左臂', '左肘', '右臂', '右肘'];
+  const JOINT_COUNT = 6;
+  const VOICE_LABEL = { idle: '待命', connecting: '连接中', listening: '聆听中…', thinking: '思考中…', speaking: '回应中…' };
+
   const $ = (id) => document.getElementById(id);
   const el = {
     conn: $('conn-state'),
     dotUSB: $('dot-usb'), dotASR: $('dot-asr'), dotTTS: $('dot-tts'),
     model: $('model-select'),
     face: $('robot-face'), faceFallback: $('face-fallback'), mirror: $('mirror'),
-    voiceState: $('voice-state'), vsText: $('vs-text'),
-    waveform: $('waveform'),
-    chat: $('chat-stream'),
-    composer: $('composer'), input: $('composer-input'),
-    mic: $('btn-mic'), interrupt: $('btn-interrupt'),
-    toast: $('toast'),
+    voiceState: $('voice-state'), vsText: $('vs-text'), waveform: $('waveform'),
+    chat: $('chat-stream'), composer: $('composer'), input: $('composer-input'),
+    mic: $('btn-mic'), interrupt: $('btn-interrupt'), toast: $('toast'),
+    // 编排页
+    actionList: $('action-list'), joints: $('joints'), jogEnable: $('jog-enable'), choreoStop: $('choreo-stop'),
+    // 设置页
+    modelList: $('model-list'), setASR: $('set-asr'), setTTS: $('set-tts'),
+    setUSB: $('set-usb'), setVidPid: $('set-vidpid'), setFPS: $('set-fps'),
   };
 
-  const VOICE_LABEL = { idle: '待命', connecting: '连接中', listening: '聆听中…', thinking: '思考中…', speaking: '回应中…' };
+  // ======================================================================
+  // 视图切换
+  // ======================================================================
+  document.querySelectorAll('.nav-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const view = btn.dataset.view;
+      document.querySelectorAll('.nav-btn').forEach((b) => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.dataset.view === view));
+    });
+  });
 
-  // ---- WebSocket 连接（带自动重连）----
-  let ws = null;
-  let reconnectTimer = null;
+  // ======================================================================
+  // WebSocket（带自动重连）
+  // ======================================================================
+  let ws = null, reconnectTimer = null;
 
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.binaryType = 'arraybuffer';
-
     ws.onopen = () => setConn('已连接', 'ok');
     ws.onclose = () => {
       setConn('已断开 · 重连中', 'off');
       clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(connect, 1500); // 简单退避重连
+      reconnectTimer = setTimeout(connect, 1500);
     };
     ws.onerror = () => ws.close();
     ws.onmessage = (e) => {
       if (typeof e.data === 'string') handleEnvelope(e.data);
-      else handleFrame(e.data); // 二进制 = 屏幕镜像帧
+      else handleFrame(e.data);
     };
   }
-
   function send(type, payload) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ type, ts: Date.now(), payload }));
   }
+  function setConn(text, cls) { el.conn.textContent = text; el.conn.className = 'conn-state ' + (cls || ''); }
 
-  function setConn(text, cls) {
-    el.conn.textContent = text;
-    el.conn.className = 'conn-state ' + (cls || '');
-  }
-
-  // ---- 入站消息分发 ----
+  // ======================================================================
+  // 入站消息分发
+  // ======================================================================
   function handleEnvelope(raw) {
-    let env;
-    try { env = JSON.parse(raw); } catch { return; }
+    let env; try { env = JSON.parse(raw); } catch { return; }
     const p = env.payload || {};
     switch (env.type) {
       case SrvType.Status: onStatus(p); break;
-      case SrvType.VoiceState: onVoiceState(p); break;
+      case SrvType.VoiceState: setVoice(p.state || 'idle'); break;
       case SrvType.VAD: onVAD(p); break;
       case SrvType.Wake: setVoice('listening'); break;
-      case SrvType.ASR: /* 可在此显示实时识别字幕，从略 */ break;
       case SrvType.Chat: onChat(p); break;
       case SrvType.Emotion: el.face.dataset.emotion = p.emotion || 'neutral'; break;
-      case SrvType.TTS: break; // 语音播放状态，当前由 voice_state 体现
-      case SrvType.Joints: break; // 舵机反馈，编排页会用到
+      case SrvType.Joints: onJoints(p); break;
       case SrvType.Error: toast(p.message || '发生错误'); break;
       default: break;
     }
@@ -92,21 +101,15 @@
     toggleDot(el.dotUSB, s.robot && s.robot.connected);
     toggleDot(el.dotASR, s.asr && s.asr.running);
     toggleDot(el.dotTTS, s.tts && s.tts.running);
-    // 模型下拉。
     if (s.llm) {
-      el.model.innerHTML = '';
-      (s.llm.available || []).forEach((m) => {
-        const opt = document.createElement('option');
-        opt.value = m.id; opt.textContent = m.name;
-        if (m.id === s.llm.active) opt.selected = true;
-        el.model.appendChild(opt);
-      });
+      renderModelPicker(s.llm);
+      renderModelList(s.llm);
     }
+    if (s.actions) renderActions(s.actions);
+    renderSettings(s);
   }
-
   function toggleDot(node, on) { node.classList.toggle('on', !!on); }
 
-  function onVoiceState(p) { setVoice(p.state || 'idle'); }
   function setVoice(state) {
     el.face.dataset.state = state;
     el.voiceState.dataset.state = state;
@@ -126,7 +129,6 @@
     }
     node.classList.toggle('streaming', p.status === 'streaming');
     node.querySelector('.content').textContent = p.content || '';
-    // 工具调用徽章。
     if (p.tools && p.tools.length) {
       node.querySelectorAll('.tool-badge').forEach((n) => n.remove());
       p.tools.forEach((t) => {
@@ -142,21 +144,14 @@
   // ---- VAD 波形 ----
   const waveCtx = el.waveform.getContext('2d');
   const waveBuf = new Array(60).fill(0);
-  function onVAD(p) {
-    waveBuf.push(p.speaking ? (p.level || 0.5) : 0);
-    waveBuf.shift();
-    drawWave();
-  }
+  function onVAD(p) { waveBuf.push(p.speaking ? (p.level || 0.5) : 0); waveBuf.shift(); drawWave(); }
   function drawWave() {
     const w = el.waveform.width, h = el.waveform.height;
     waveCtx.clearRect(0, 0, w, h);
-    waveCtx.strokeStyle = '#00e5c7';
-    waveCtx.lineWidth = 2;
-    waveCtx.beginPath();
+    waveCtx.strokeStyle = '#00e5c7'; waveCtx.lineWidth = 2; waveCtx.beginPath();
     const step = w / waveBuf.length;
     waveBuf.forEach((v, i) => {
-      const y = h / 2 - (v * h) / 2;
-      const x = i * step;
+      const y = h / 2 - (v * h) / 2, x = i * step;
       i === 0 ? waveCtx.moveTo(x, y) : waveCtx.lineTo(x, y);
     });
     waveCtx.stroke();
@@ -167,21 +162,15 @@
   function handleFrame(buf) {
     if (buf.byteLength < 14) return;
     const view = new DataView(buf);
-    // 校验魔数 "EBF1"。
     if (view.getUint8(0) !== 0x45 || view.getUint8(1) !== 0x42 ||
         view.getUint8(2) !== 0x46 || view.getUint8(3) !== 0x31) return;
-    const width = view.getUint16(4, true);
-    const height = view.getUint16(6, true);
-    const format = view.getUint8(8); // 1=RGB888 2=RGB565
-    const pixels = new Uint8Array(buf, 14);
-
+    const width = view.getUint16(4, true), height = view.getUint16(6, true);
+    const format = view.getUint8(8), pixels = new Uint8Array(buf, 14);
     const img = mirrorCtx.createImageData(width, height);
-    if (format === 1) { // RGB888 → RGBA
+    if (format === 1) {
       for (let i = 0, j = 0; i < width * height; i++) {
-        img.data[j++] = pixels[i * 3];
-        img.data[j++] = pixels[i * 3 + 1];
-        img.data[j++] = pixels[i * 3 + 2];
-        img.data[j++] = 255;
+        img.data[j++] = pixels[i * 3]; img.data[j++] = pixels[i * 3 + 1];
+        img.data[j++] = pixels[i * 3 + 2]; img.data[j++] = 255;
       }
     }
     mirrorCtx.putImageData(img, 0, 0);
@@ -189,7 +178,87 @@
     el.faceFallback.style.display = 'none';
   }
 
-  // ---- 用户交互 → 出站命令 ----
+  // ======================================================================
+  // 动作编排页
+  // ======================================================================
+  // 构建 6 轴滑块（仅一次）。
+  function buildJoints() {
+    for (let i = 0; i < JOINT_COUNT; i++) {
+      const row = document.createElement('div');
+      row.className = 'joint';
+      row.innerHTML =
+        `<label>J${i} ${JOINT_NAMES[i] || ''}</label>` +
+        `<input type="range" min="-90" max="90" step="1" value="0" data-joint="${i}" />` +
+        `<span class="readout"><span class="tgt" id="tgt-${i}">0°</span> / <span class="fb" id="fb-${i}">0°</span></span>`;
+      el.joints.appendChild(row);
+    }
+    // 拖动滑块 → 下发 jog_joint。
+    el.joints.querySelectorAll('input[type="range"]').forEach((inp) => {
+      inp.addEventListener('input', () => {
+        const j = Number(inp.dataset.joint), angle = Number(inp.value);
+        $(`tgt-${j}`).textContent = angle + '°';
+        send(CliType.JogJoint, { joint: j, angle, enable: el.jogEnable.checked });
+      });
+    });
+  }
+  // joints 事件 → 更新反馈读数。
+  function onJoints(p) {
+    if (!Array.isArray(p.angles)) return;
+    p.angles.forEach((a, i) => {
+      const fb = $(`fb-${i}`);
+      if (fb) fb.textContent = Math.round(a) + '°';
+    });
+  }
+  // 渲染动作库按钮（数据驱动自 status.actions）。
+  function renderActions(actions) {
+    el.actionList.innerHTML = '';
+    actions.forEach((name) => {
+      const b = document.createElement('button');
+      b.className = 'qa';
+      b.textContent = name;
+      b.addEventListener('click', () => send(CliType.PlayAction, { name, loops: 1 }));
+      el.actionList.appendChild(b);
+    });
+  }
+  el.choreoStop.addEventListener('click', () => send(CliType.Interrupt, { reason: 'choreo-stop' }));
+
+  // ======================================================================
+  // 设置页
+  // ======================================================================
+  function renderModelList(llm) {
+    el.modelList.innerHTML = '';
+    (llm.available || []).forEach((m) => {
+      const row = document.createElement('div');
+      row.className = 'model-row' + (m.id === llm.active ? ' active' : '');
+      row.innerHTML = `<span class="mr-name">${m.name}</span><span class="mr-prov">${m.provider}</span>`;
+      row.addEventListener('click', () => send(CliType.SelectModel, { id: m.id }));
+      el.modelList.appendChild(row);
+    });
+  }
+  function renderSettings(s) {
+    if (s.asr) el.setASR.textContent = (s.asr.running ? '在线' : '离线') + (s.asr.detail ? ` · ${s.asr.detail}` : '');
+    if (s.tts) el.setTTS.textContent = (s.tts.running ? '在线' : '离线') + (s.tts.detail ? ` · ${s.tts.detail}` : '');
+    if (s.robot) {
+      el.setUSB.textContent = s.robot.connected ? '已连接' : '未连接';
+      el.setVidPid.textContent = `0x${(s.robot.vid || 0).toString(16)} / 0x${(s.robot.pid || 0).toString(16)}`;
+      el.setFPS.textContent = (s.robot.fps || 0) + ' fps';
+    }
+  }
+
+  // ---- 顶栏模型下拉 ----
+  function renderModelPicker(llm) {
+    el.model.innerHTML = '';
+    (llm.available || []).forEach((m) => {
+      const opt = document.createElement('option');
+      opt.value = m.id; opt.textContent = m.name;
+      if (m.id === llm.active) opt.selected = true;
+      el.model.appendChild(opt);
+    });
+  }
+
+  // ======================================================================
+  // 用户交互 → 出站命令（对话首页）
+  // ======================================================================
   el.composer.addEventListener('submit', (e) => {
     e.preventDefault();
     const text = el.input.value.trim();
@@ -197,20 +266,15 @@
     send(CliType.SendText, { text });
     el.input.value = '';
   });
-
   document.querySelectorAll('.qa[data-action]').forEach((btn) => {
     btn.addEventListener('click', () => send(CliType.PlayAction, { name: btn.dataset.action, loops: 1 }));
   });
-
   document.querySelectorAll('.chip[data-emotion]').forEach((btn) => {
     btn.addEventListener('click', () => send(CliType.SetEmotion, { emotion: btn.dataset.emotion }));
   });
-
   el.interrupt.addEventListener('click', () => send(CliType.Interrupt, { reason: 'user' }));
-
   el.model.addEventListener('change', () => send(CliType.SelectModel, { id: el.model.value }));
 
-  // 麦克风：点击切换拾音开/关。
   let micOn = false;
   el.mic.addEventListener('click', () => {
     micOn = !micOn;
@@ -228,5 +292,6 @@
   }
 
   // 启动。
+  buildJoints();
   connect();
 })();

@@ -83,10 +83,11 @@ type LLMStatus struct {
 
 // StatusEvent 是各子系统状态的一次性快照，通常在连接建立或状态变化时下发。
 type StatusEvent struct {
-	Robot RobotStatus   `json:"robot"`
-	ASR   ServiceStatus `json:"asr"`
-	TTS   ServiceStatus `json:"tts"`
-	LLM   LLMStatus     `json:"llm"`
+	Robot   RobotStatus   `json:"robot"`
+	ASR     ServiceStatus `json:"asr"`
+	TTS     ServiceStatus `json:"tts"`
+	LLM     LLMStatus     `json:"llm"`
+	Actions []string      `json:"actions,omitempty"` // 可用的编排动作名（供动作编排页使用）
 }
 
 // Type 实现 Payload。

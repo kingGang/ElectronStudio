@@ -46,6 +46,15 @@ body {
   text-shadow: 0 0 12px rgba(0, 229, 199, 0.4);
 }
 .spacer { flex: 1; }
+
+/* 导航 */
+.nav { display: flex; gap: 4px; }
+.nav-btn {
+  background: transparent; border: 1px solid transparent; color: var(--text-dim);
+  border-radius: var(--radius-sm); padding: 5px 12px; font-size: 13px; cursor: pointer; transition: all 0.15s;
+}
+.nav-btn:hover { color: var(--text); }
+.nav-btn.active { color: var(--accent); border-color: var(--border); background: var(--card); }
 .status-dots { display: flex; gap: 14px; }
 .dot {
   display: inline-flex;
@@ -76,13 +85,57 @@ body {
 .conn-state.ok { color: var(--ok); }
 .conn-state.off { color: var(--err); }
 
-/* ---------- 布局 ---------- */
+/* ---------- 视图切换 ---------- */
+.view { display: none; flex: 1; min-height: 0; }
+.view.active { display: grid; }
+
+/* ---------- 对话布局 ---------- */
 .layout {
-  flex: 1;
-  display: grid;
   grid-template-columns: 280px 1fr;
-  min-height: 0;
 }
+
+/* ---------- 通用面板（编排/设置页） ---------- */
+.choreo-view, .settings-view {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  padding: 18px;
+  align-content: start;
+  overflow-y: auto;
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+.panel h2 { margin: 0 0 14px; font-size: 15px; color: var(--accent); }
+.panel-head { display: flex; align-items: center; justify-content: space-between; }
+.muted { color: var(--text-dim); font-size: 13px; }
+.enable-toggle { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
+
+/* 动作库 */
+.action-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+
+/* 6 轴滑块 */
+.joints { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
+.joint { display: grid; grid-template-columns: 70px 1fr 96px; align-items: center; gap: 10px; }
+.joint label { font-size: 13px; color: var(--text-dim); }
+.joint input[type="range"] { width: 100%; accent-color: var(--accent); }
+.joint .readout { font-family: var(--mono); font-size: 12px; color: var(--text); text-align: right; }
+.joint .readout .fb { color: var(--accent); }
+
+/* 设置：键值 / 模型列表 */
+.kv { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.kv span { color: var(--text-dim); }
+.kv b { font-family: var(--mono); font-weight: 500; }
+.model-list { display: flex; flex-direction: column; gap: 8px; }
+.model-row {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer;
+}
+.model-row.active { border-color: var(--accent); box-shadow: 0 0 10px rgba(0, 229, 199, 0.2); }
+.model-row .mr-name { font-size: 14px; }
+.model-row .mr-prov { margin-left: auto; font-size: 11px; color: var(--text-dim); font-family: var(--mono); }
 
 /* ---------- 左栏：机器人 ---------- */
 .robot-pane {

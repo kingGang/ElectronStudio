@@ -7,9 +7,14 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- 顶栏：品牌 / 子系统状态灯 / 模型选择 -->
+  <!-- 顶栏：品牌 / 导航 / 子系统状态灯 / 模型选择 -->
   <header class="topbar">
     <div class="brand">◢ VERDUGO</div>
+    <nav class="nav" id="nav">
+      <button class="nav-btn active" data-view="home">对话</button>
+      <button class="nav-btn" data-view="choreo">动作编排</button>
+      <button class="nav-btn" data-view="settings">设置</button>
+    </nav>
     <div class="status-dots">
       <span class="dot" id="dot-usb"><i></i>USB</span>
       <span class="dot" id="dot-asr"><i></i>ASR</span>
@@ -23,25 +28,20 @@
     <div class="conn-state" id="conn-state">连接中…</div>
   </header>
 
-  <main class="layout">
-    <!-- 左栏：机器人本体 -->
+  <!-- ===== 视图：对话首页 ===== -->
+  <main class="view active layout" data-view="home">
     <section class="robot-pane">
       <div class="robot-face" id="robot-face" data-state="idle">
         <canvas id="mirror" width="240" height="240"></canvas>
-        <!-- 无真机画面时显示 CSS 表情作占位 -->
         <div class="face-fallback" id="face-fallback">
           <div class="eyes"><span class="eye"></span><span class="eye"></span></div>
           <div class="mouth"></div>
         </div>
       </div>
-
       <div class="voice-state" id="voice-state">
         <span class="vs-dot"></span><span class="vs-text" id="vs-text">待命</span>
       </div>
-
-      <!-- VAD 实时波形 -->
       <canvas class="waveform" id="waveform" width="220" height="40"></canvas>
-
       <div class="emotions" id="emotions" aria-label="情绪">
         <button class="chip" data-emotion="happy">😊</button>
         <button class="chip" data-emotion="sad">😢</button>
@@ -51,10 +51,8 @@
       </div>
     </section>
 
-    <!-- 右栏：对话 -->
     <section class="chat-pane">
       <div class="chat-stream" id="chat-stream"></div>
-
       <div class="quick-actions" id="quick-actions">
         <span class="qa-label">快捷动作</span>
         <button class="qa" data-action="wave">👋 打招呼</button>
@@ -63,17 +61,51 @@
         <button class="qa" data-action="home">↩ 归位</button>
         <button class="qa danger" id="btn-interrupt">⏹ 打断</button>
       </div>
-
       <form class="composer" id="composer">
         <input id="composer-input" type="text" placeholder="输入文字…" autocomplete="off" />
-        <button type="button" class="icon-btn" id="btn-mic" title="按住说话/切换拾音">🎤</button>
+        <button type="button" class="icon-btn" id="btn-mic" title="切换拾音">🎤</button>
         <button type="submit" class="icon-btn primary" title="发送">➤</button>
       </form>
     </section>
   </main>
 
-  <div class="toast" id="toast"></div>
+  <!-- ===== 视图：动作编排 ===== -->
+  <main class="view choreo-view" data-view="choreo">
+    <section class="panel">
+      <h2>动作库</h2>
+      <div class="action-list" id="action-list"><span class="muted">等待状态…</span></div>
+      <button class="qa danger" id="choreo-stop">⏹ 停止</button>
+    </section>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>手动调试（6 轴）</h2>
+        <label class="enable-toggle"><input type="checkbox" id="jog-enable" checked /> 舵机使能</label>
+      </div>
+      <div class="joints" id="joints"></div>
+    </section>
+  </main>
 
+  <!-- ===== 视图：设置 ===== -->
+  <main class="view settings-view" data-view="settings">
+    <section class="panel">
+      <h2>大模型</h2>
+      <div class="model-list" id="model-list"><span class="muted">等待状态…</span></div>
+    </section>
+    <section class="panel">
+      <h2>语音（本地）</h2>
+      <div class="kv"><span>ASR</span><b id="set-asr">—</b></div>
+      <div class="kv"><span>TTS</span><b id="set-tts">—</b></div>
+      <p class="muted">唤醒词 / VAD 灵敏度在语音 sidecar 内配置，见 docs/SPEECH.md。</p>
+    </section>
+    <section class="panel">
+      <h2>机器人</h2>
+      <div class="kv"><span>连接</span><b id="set-usb">—</b></div>
+      <div class="kv"><span>VID / PID</span><b id="set-vidpid">—</b></div>
+      <div class="kv"><span>帧率</span><b id="set-fps">—</b></div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast"></div>
   <script src="app.js"></script>
 </body>
 </html>

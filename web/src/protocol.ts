@@ -93,6 +93,7 @@ export interface StatusEvent {
   asr: ServiceStatus
   tts: ServiceStatus
   llm: LLMStatus
+  actions?: string[] // 可用的编排动作名（供动作编排页使用）
 }
 
 export interface VoiceStateEvent {

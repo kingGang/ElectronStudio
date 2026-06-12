@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -342,6 +343,8 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 		models = append(models, protocol.ModelInfo{ID: info.ID, Name: info.Name, Provider: info.Provider})
 	}
 	ss := a.speech.Status()
+	actions := a.chor.Names()
+	sort.Strings(actions) // 稳定排序，避免前端按钮顺序抖动
 	return protocol.StatusEvent{
 		Robot: protocol.RobotStatus{
 			Connected: a.bot.Connected(),
@@ -349,9 +352,10 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 			PID:       0x8023,
 			FPS:       30,
 		},
-		ASR: protocol.ServiceStatus{Running: ss.ASRRunning, Detail: ss.Detail},
-		TTS: protocol.ServiceStatus{Running: ss.TTSRunning, Detail: ss.Detail},
-		LLM: protocol.LLMStatus{Active: a.llm.ActiveID(), Available: models},
+		ASR:     protocol.ServiceStatus{Running: ss.ASRRunning, Detail: ss.Detail},
+		TTS:     protocol.ServiceStatus{Running: ss.TTSRunning, Detail: ss.Detail},
+		LLM:     protocol.LLMStatus{Active: a.llm.ActiveID(), Available: models},
+		Actions: actions,
 	}
 }
 
