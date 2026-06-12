@@ -35,11 +35,18 @@ type Action struct {
 	Frames  []Keyframe `json:"frames"`            // 关键帧序列（无需预先排序，引擎会按 AtMs 排序）
 }
 
+// PoseSink 接收编排引擎算出的目标姿态。由统一的设备驱动（device.Driver）实现，
+// 引擎只负责"在时间轴上算出每一刻的角度并写入"，不直接触碰传输层（避免与画面推送
+// 各自 Sync 冲突）。
+type PoseSink interface {
+	SetPose(angles robot.Joints, enable bool)
+}
+
 // Engine 负责播放动作。同一时刻只播放一个动作，新的播放会打断旧的。
 type Engine struct {
-	transport robot.Transport
-	fps       int
-	log       *slog.Logger
+	sink PoseSink
+	fps  int
+	log  *slog.Logger
 
 	mu      sync.Mutex
 	actions map[string]Action
@@ -67,13 +74,13 @@ func WithLogger(log *slog.Logger) Option {
 	}
 }
 
-// NewEngine 创建一个动作编排引擎，驱动给定的传输层。
-func NewEngine(transport robot.Transport, opts ...Option) *Engine {
+// NewEngine 创建一个动作编排引擎，把算出的姿态写入给定的 PoseSink。
+func NewEngine(sink PoseSink, opts ...Option) *Engine {
 	e := &Engine{
-		transport: transport,
-		fps:       defaultFPS,
-		log:       slog.Default(),
-		actions:   make(map[string]Action),
+		sink:    sink,
+		fps:     defaultFPS,
+		log:     slog.Default(),
+		actions: make(map[string]Action),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -207,12 +214,10 @@ func (e *Engine) playOnce(ctx context.Context, a Action) error {
 	return e.drive(a.Frames[len(a.Frames)-1].Angles)
 }
 
-// drive 把一组角度下发给机器人并执行一次同步。
+// drive 把一组角度写入姿态接收器（实际下发与同步由设备驱动统一完成）。
 func (e *Engine) drive(angles robot.Joints) error {
-	if err := e.transport.SetJointAngles(angles, true); err != nil {
-		return err
-	}
-	return e.transport.Sync()
+	e.sink.SetPose(angles, true)
+	return nil
 }
 
 // SampleAt 在已按 AtMs 升序排列的关键帧上，对时间点 tMs 做线性插值，返回该时刻的角度。

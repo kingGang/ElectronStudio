@@ -31,6 +31,8 @@ import (
 
 	"github.com/kingGang/ElectronStudio/internal/choreography"
 	"github.com/kingGang/ElectronStudio/internal/config"
+	"github.com/kingGang/ElectronStudio/internal/device"
+	"github.com/kingGang/ElectronStudio/internal/display"
 	"github.com/kingGang/ElectronStudio/internal/llm"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 	"github.com/kingGang/ElectronStudio/internal/robot"
@@ -80,6 +82,9 @@ func main() {
 	}
 	defer a.speech.Close()
 
+	// 启动设备驱动循环（统一推帧 + 同步）。
+	go a.driver.Run(ctx)
+
 	// 消费入站命令与上行语音事件。
 	go a.dispatchLoop(ctx)
 	go a.speechLoop(ctx)
@@ -92,21 +97,25 @@ func main() {
 
 // app 持有各模块依赖与少量运行时状态，并实现命令分发。
 type app struct {
-	srv    *server.Server
-	chor   *choreography.Engine
-	llm    *llm.Router
-	bot    robot.Transport
-	speech speech.Service
-	tools  *tools.Registry
-	log    *slog.Logger
+	srv     *server.Server
+	chor    *choreography.Engine
+	llm     *llm.Router
+	bot     robot.Transport
+	driver  *device.Driver         // 统一设备驱动（拥有 Sync）
+	emotion *display.EmotionSource // 屏幕画面源（表情）
+	speech  speech.Service
+	tools   *tools.Registry
+	log     *slog.Logger
+
+	frameSeq atomic.Uint32 // 屏幕镜像帧序号
 
 	cfgMu   sync.Mutex     // 保护 cfg 的读改存
 	cfg     *config.Config // 当前配置
 	cfgPath string         // 配置文件路径
 
-	actionsPath  string             // 录制动作的存盘路径
-	followMu     sync.Mutex         // 保护 followCancel
-	followCancel context.CancelFunc // 跟随设备循环的取消函数（nil=未跟随）
+	actionsPath string        // 录制动作的存盘路径
+	poseMu      sync.Mutex    // 保护 desiredPose
+	desiredPose robot.Joints  // 手动/跟随退出时保持的目标姿态
 
 	recMu     sync.Mutex             // 保护录制状态
 	recording bool                   // 是否正在录制
@@ -123,16 +132,7 @@ type app struct {
 func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) {
 	// 机器人：按配置选择传输（auto 优先尝试真机 USB，失败回退 Mock）。
 	bot := connectRobot(cfg, log)
-
-	// 动作编排：注册内置动作，再加载用户录制的动作（同名覆盖内置）。
-	chor := choreography.NewEngine(bot, choreography.WithLogger(log))
-	for _, act := range choreography.DefaultActions() {
-		chor.Register(act)
-	}
 	actionsPath := filepath.Join(filepath.Dir(cfgPath), "actions.json")
-	if err := chor.LoadActions(actionsPath); err != nil {
-		log.Warn("加载录制动作失败", "err", err)
-	}
 
 	// 大模型：从配置构建路由（至少含 Echo 兜底）。
 	router := llm.NewRouter()
@@ -157,11 +157,10 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	}
 
 	a := &app{
-		chor:    chor,
-		llm:     router,
-		bot:     bot,
-		speech:  voice,
-		log:     log,
+		llm:         router,
+		bot:         bot,
+		speech:      voice,
+		log:         log,
 		cfg:         cfg,
 		cfgPath:     cfgPath,
 		actionsPath: actionsPath,
@@ -179,9 +178,48 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		},
 	})
 
+	// 画面源（表情）+ 统一设备驱动：驱动以固定帧率把"姿态 + 画面"一并 Sync 给设备，
+	// 并把画面/反馈同步广播给 UI，实现设备屏与界面镜像同步。
+	a.emotion = display.NewEmotionSource()
+	a.driver = device.NewDriver(bot, a.emotion, log, 30, a.onDriverFrame, a.onDriverJoints)
+
+	// 动作编排：把姿态写入驱动；注册内置动作并加载用户录制的动作（同名覆盖内置）。
+	a.chor = choreography.NewEngine(a.driver, choreography.WithLogger(log))
+	for _, act := range choreography.DefaultActions() {
+		a.chor.Register(act)
+	}
+	if err := a.chor.LoadActions(actionsPath); err != nil {
+		log.Warn("加载录制动作失败", "err", err)
+	}
+
 	// 工具：注册可供大模型调用的工具（设备控制 / 情绪 / 动作 / 信息）。
 	a.tools = buildTools(a)
 	return a, nil
+}
+
+// onDriverFrame 把设备屏当前帧编码为二进制镜像帧广播给 UI（与设备屏同源 = 同步）。
+func (a *app) onDriverFrame(rgb []byte) {
+	hdr := protocol.FrameHeader{
+		Width: robot.ScreenWidth, Height: robot.ScreenHeight,
+		Format: protocol.PixelRGB888, Seq: a.frameSeq.Add(1),
+	}
+	if frame, err := protocol.EncodeFrame(hdr, rgb); err == nil {
+		a.srv.BroadcastFrame(frame)
+	}
+}
+
+// onDriverJoints 周期广播舵机真实角度（驱动统一上报）。
+func (a *app) onDriverJoints(j robot.Joints) {
+	a.srv.Broadcast(protocol.JointsEvent{Angles: j, Enabled: true})
+}
+
+// setEmotion 切换情绪：更新屏幕画面源、广播情绪、并播放同名动作（若有）。
+func (a *app) setEmotion(e string) {
+	a.emotion.SetEmotion(e)
+	a.srv.Broadcast(protocol.EmotionEvent{Emotion: protocol.Emotion(e)})
+	if _, ok := a.chor.Lookup(e); ok {
+		_ = a.chor.Play(context.Background(), e, 1)
+	}
 }
 
 // connectRobot 依据配置选择并连接机器人传输：
@@ -218,10 +256,7 @@ func buildTools(a *app) *tools.Registry {
 
 	emotions := []string{"neutral", "happy", "sad", "angry", "surprised", "confused"}
 	reg.Register(tools.EmotionTool(emotions, func(e string) error {
-		a.srv.Broadcast(protocol.EmotionEvent{Emotion: protocol.Emotion(e)})
-		if _, ok := a.chor.Lookup(e); ok {
-			_ = a.chor.Play(context.Background(), e, 1)
-		}
+		a.setEmotion(e)
 		return nil
 	}))
 
@@ -327,11 +362,7 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 
 	case protocol.TypeSetEmotion:
 		if cmd, err := protocol.As[protocol.SetEmotionCommand](in.Env); err == nil {
-			a.srv.Broadcast(protocol.EmotionEvent{Emotion: cmd.Emotion})
-			// 若存在与该情绪同名的动作，顺带播放。
-			if _, ok := a.chor.Lookup(string(cmd.Emotion)); ok {
-				_ = a.chor.Play(ctx, string(cmd.Emotion), 1)
-			}
+			a.setEmotion(string(cmd.Emotion)) // 更新屏幕画面 + 广播 + 同名动作
 		}
 
 	case protocol.TypeSelectModel:
@@ -526,59 +557,32 @@ func (a *app) handleChatStreaming(ctx context.Context, text string) {
 	a.finishAssistant(ctx, content)
 }
 
-// handleJog 手动微调单个舵机：读回当前角度→改其一→下发→反馈。
+// handleJog 手动微调单个舵机：更新目标姿态并交给驱动下发（角度反馈由驱动统一广播）。
 func (a *app) handleJog(cmd protocol.JogJointCommand) {
 	if cmd.Joint < 0 || cmd.Joint >= robot.JointCount {
 		a.log.Warn("舵机序号越界", "joint", cmd.Joint)
 		return
 	}
-	angles := a.bot.JointAngles()
-	angles[cmd.Joint] = cmd.Angle
-	if err := a.bot.SetJointAngles(angles, cmd.Enable); err != nil {
-		a.log.Warn("设置舵机失败", "err", err)
-		return
-	}
-	if err := a.bot.Sync(); err != nil {
-		a.log.Warn("同步舵机失败", "err", err)
-		return
-	}
-	a.srv.Broadcast(protocol.JointsEvent{Angles: a.bot.JointAngles(), Enabled: cmd.Enable})
+	a.poseMu.Lock()
+	a.desiredPose[cmd.Joint] = cmd.Angle
+	pose := a.desiredPose
+	a.poseMu.Unlock()
+	a.driver.SetPose(pose, cmd.Enable)
 }
 
-// handleFollow 开关"跟随设备"（实体优先）：开启时后台以 20Hz 松力 + 读回真实角度并广播，
-// 用户掰动机器人即可在界面看到关节实时跟随，配合录制实现示教编排。
-func (a *app) handleFollow(ctx context.Context, enable bool) {
-	a.followMu.Lock()
-	defer a.followMu.Unlock()
-	if a.followCancel != nil { // 先停掉旧的跟随循环
-		a.followCancel()
-		a.followCancel = nil
-	}
-	if !enable {
-		a.log.Info("跟随设备已关闭")
+// handleFollow 开关"跟随设备"（实体优先）：开启时让舵机松力（enable=false），
+// 用户掰动机器人，驱动每帧读回真实角度并广播，界面滑块随之跟随；关闭时保持当前姿态。
+func (a *app) handleFollow(_ context.Context, enable bool) {
+	if enable {
+		a.driver.SetPose(robot.Joints{}, false) // 松力，可手动摆姿
+		a.log.Info("跟随设备已开启")
 		return
 	}
-	fctx, cancel := context.WithCancel(ctx)
-	a.followCancel = cancel
-	go a.followLoop(fctx)
-	a.log.Info("跟随设备已开启")
-}
-
-// followLoop 以 20Hz 松力并读回真实角度，广播给前端。
-func (a *app) followLoop(ctx context.Context) {
-	ticker := time.NewTicker(50 * time.Millisecond) // 20Hz，与官方 FixedUpdate 一致
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			cur := a.bot.JointAngles()
-			_ = a.bot.SetJointAngles(cur, false) // enable=false：舵机松力，可手动摆姿
-			_ = a.bot.Sync()
-			a.srv.Broadcast(protocol.JointsEvent{Angles: a.bot.JointAngles(), Enabled: false})
-		}
-	}
+	a.poseMu.Lock()
+	pose := a.desiredPose
+	a.poseMu.Unlock()
+	a.driver.SetPose(pose, true) // 保持当前目标姿态
+	a.log.Info("跟随设备已关闭")
 }
 
 // recordStart 开始录制一段动作。
