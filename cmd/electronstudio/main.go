@@ -33,6 +33,7 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/robot"
 	"github.com/kingGang/ElectronStudio/internal/server"
 	"github.com/kingGang/ElectronStudio/internal/speech"
+	"github.com/kingGang/ElectronStudio/internal/tools"
 	"github.com/kingGang/ElectronStudio/web"
 )
 
@@ -82,6 +83,7 @@ type app struct {
 	llm    *llm.Router
 	bot    robot.Transport
 	speech speech.Service
+	tools  *tools.Registry
 	log    *slog.Logger
 
 	histMu  sync.Mutex
@@ -143,7 +145,34 @@ func newApp(log *slog.Logger) (*app, error) {
 			}
 		},
 	})
+
+	// 工具：注册可供大模型调用的工具（设备控制 / 情绪 / 动作 / 信息）。
+	a.tools = buildTools(a)
 	return a, nil
+}
+
+// buildTools 构造工具注册表，副作用以闭包注入（情绪/动作走机器人，台灯为内置设备）。
+func buildTools(a *app) *tools.Registry {
+	reg := tools.NewRegistry()
+
+	emotions := []string{"neutral", "happy", "sad", "angry", "surprised", "confused"}
+	reg.Register(tools.EmotionTool(emotions, func(e string) error {
+		a.srv.Broadcast(protocol.EmotionEvent{Emotion: protocol.Emotion(e)})
+		if _, ok := a.chor.Lookup(e); ok {
+			_ = a.chor.Play(context.Background(), e, 1)
+		}
+		return nil
+	}))
+
+	actionNames := a.chor.Names()
+	sort.Strings(actionNames)
+	reg.Register(tools.ActionTool(actionNames, func(name string) error {
+		return a.chor.Play(context.Background(), name, 1)
+	}))
+
+	reg.Register(tools.TimeTool())
+	reg.Register(tools.NewLamp().Tool())
+	return reg
 }
 
 // dispatchLoop 持续消费入站命令，直到 ctx 取消。
@@ -249,13 +278,21 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 	}
 }
 
-// handleChat 跑一次完整对话：用户消息回显 → 思考 → 流式生成 → 朗读(模拟)。
+// handleChat 是对话入口：当生效模型支持工具调用且已注册工具时走工具循环，
+// 否则走流式对话。
 func (a *app) handleChat(ctx context.Context, text string) {
 	if text == "" {
 		return
 	}
+	if a.tools.Count() > 0 && a.llm.ActiveSupportsTools() {
+		a.handleChatWithTools(ctx, text)
+	} else {
+		a.handleChatStreaming(ctx, text)
+	}
+}
 
-	// 1) 记录并回显用户消息。
+// emitUser 记录并回显一条用户消息，随后进入思考态。
+func (a *app) emitUser(text string) {
 	a.appendHistory(llm.Message{Role: llm.RoleUser, Content: text})
 	a.srv.Broadcast(protocol.ChatEvent{
 		ID:      a.nextMsgID(),
@@ -263,9 +300,67 @@ func (a *app) handleChat(ctx context.Context, text string) {
 		Content: text,
 		Status:  protocol.ChatFinal,
 	})
-
-	// 2) 进入思考态。
 	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceThinking})
+}
+
+// finishAssistant 完成一条助手回复：入历史、朗读、回到待命。
+func (a *app) finishAssistant(ctx context.Context, content string) {
+	if content != "" {
+		a.appendHistory(llm.Message{Role: llm.RoleAssistant, Content: content})
+		if err := a.speech.Speak(ctx, content); err != nil {
+			a.log.Warn("语音合成失败", "err", err)
+		}
+	}
+	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStop, Text: content})
+	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
+}
+
+// handleChatWithTools 走 function-calling 工具循环：模型可调用设备/动作/信息类工具。
+func (a *app) handleChatWithTools(ctx context.Context, text string) {
+	a.emitUser(text)
+
+	// tools.Spec → llm.Tool。
+	specs := a.tools.Specs()
+	lt := make([]llm.Tool, 0, len(specs))
+	for _, s := range specs {
+		lt = append(lt, llm.Tool{Name: s.Name, Description: s.Description, Parameters: s.Parameters})
+	}
+
+	id := a.nextMsgID()
+	var pTools []protocol.ToolCall
+	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceSpeaking})
+	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStart})
+
+	res, err := llm.RunToolLoop(ctx, a.llm, a.historySnapshot(), lt, a.tools.Execute, 5,
+		func(ec llm.ExecutedCall) {
+			// 每执行一个工具，实时把工具徽章推给前端。
+			status := "ok"
+			if ec.Err != "" {
+				status = "error"
+			}
+			pTools = append(pTools, protocol.ToolCall{
+				ID: ec.ID, Name: ec.Name, Arguments: ec.Arguments, Result: ec.Result, Status: status,
+			})
+			a.srv.Broadcast(protocol.ChatEvent{
+				ID: id, Role: protocol.RoleAssistant, Tools: pTools, Status: protocol.ChatStreaming,
+			})
+		})
+	if err != nil {
+		a.srv.Broadcast(protocol.ErrorEvent{Code: "llm_error", Message: err.Error()})
+		a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
+		return
+	}
+
+	a.srv.Broadcast(protocol.ChatEvent{
+		ID: id, Role: protocol.RoleAssistant, Content: res.Content, Tools: pTools, Status: protocol.ChatFinal,
+	})
+	a.finishAssistant(ctx, res.Content)
+}
+
+// handleChatStreaming 跑一次流式对话：用户消息回显 → 思考 → 流式生成 → 朗读。
+func (a *app) handleChatStreaming(ctx context.Context, text string) {
+	// 1) 记录并回显用户消息 + 进入思考态。
+	a.emitUser(text)
 
 	// 3) 流式生成助手回复。
 	ch, err := a.llm.Chat(ctx, llm.Request{Messages: a.historySnapshot()})
@@ -297,24 +392,14 @@ func (a *app) handleChat(ctx context.Context, text string) {
 		})
 	}
 
-	// 4) 收尾：最终消息 + 入历史。
+	// 收尾：最终消息 + 入历史 + 朗读 + 回到待命。
 	a.srv.Broadcast(protocol.ChatEvent{
 		ID:      id,
 		Role:    protocol.RoleAssistant,
 		Content: content,
 		Status:  protocol.ChatFinal,
 	})
-	if content != "" {
-		a.appendHistory(llm.Message{Role: llm.RoleAssistant, Content: content})
-		// 交给语音服务朗读（Mock 仅记录；Sidecar 会真正合成播放）。
-		if err := a.speech.Speak(ctx, content); err != nil {
-			a.log.Warn("语音合成失败", "err", err)
-		}
-	}
-
-	// 结束朗读，回到待命。
-	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStop, Text: content})
-	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
+	a.finishAssistant(ctx, content)
 }
 
 // handleJog 手动微调单个舵机：读回当前角度→改其一→下发→反馈。

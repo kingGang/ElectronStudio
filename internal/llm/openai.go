@@ -14,23 +14,22 @@ import (
 // OpenAICompat 是兼容 OpenAI Chat Completions 协议的 Provider。
 // 同一实现可对接：OpenAI、Ollama（/v1）、以及大量自托管的 OpenAI 兼容服务。
 //
-// 它通过 SSE（Server-Sent Events）消费流式响应，与本包的 Chunk 模型对接。
+// 流式对话（Chat）用 SSE 消费；工具调用（Complete）用非流式一次性返回。
 type OpenAICompat struct {
 	info    Info
-	baseURL string // 形如 https://api.openai.com/v1 或 http://localhost:11434/v1
-	apiKey  string // 可为空（如本地 Ollama）
-	model   string // 模型名，如 gpt-4o / qwen2.5
+	baseURL string
+	apiKey  string
+	model   string
 	client  *http.Client
 }
 
 // OpenAIConfig 配置一个 OpenAICompat Provider。
 type OpenAIConfig struct {
-	ID      string // 路由内唯一标识；为空时回退为 "openai:"+Model
-	Name    string // 展示名；为空时回退为 Model
-	BaseURL string // API 根地址（不含末尾斜杠）
-	APIKey  string // 鉴权密钥（可空）
-	Model   string // 模型名
-	// Timeout 为单次请求的整体超时；为 0 时使用默认 60s。
+	ID      string
+	Name    string
+	BaseURL string
+	APIKey  string
+	Model   string
 	Timeout time.Duration
 }
 
@@ -60,12 +59,151 @@ func NewOpenAICompat(cfg OpenAIConfig) *OpenAICompat {
 // Info 实现 Provider。
 func (p *OpenAICompat) Info() Info { return p.info }
 
-// chatRequestBody 是发送给 /chat/completions 的请求体（仅含本项目用到的字段）。
-type chatRequestBody struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Stream      bool      `json:"stream"`
-	Temperature float32   `json:"temperature,omitempty"`
+// SupportsTools 实现 Provider：OpenAI 兼容协议支持 function-calling。
+func (p *OpenAICompat) SupportsTools() bool { return true }
+
+// ---- 线上消息格式（OpenAI Chat Completions）----
+
+type oaToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"` // 固定 "function"
+	Function oaFunc `json:"function"`
+}
+type oaFunc struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+type oaMessage struct {
+	Role       string       `json:"role"`
+	Content    string       `json:"content"`
+	ToolCalls  []oaToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty"`
+	Name       string       `json:"name,omitempty"`
+}
+type oaTool struct {
+	Type     string     `json:"type"` // 固定 "function"
+	Function oaToolDecl `json:"function"`
+}
+type oaToolDecl struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+type oaRequest struct {
+	Model       string      `json:"model"`
+	Messages    []oaMessage `json:"messages"`
+	Tools       []oaTool    `json:"tools,omitempty"`
+	ToolChoice  string      `json:"tool_choice,omitempty"`
+	Stream      bool        `json:"stream"`
+	Temperature float32     `json:"temperature,omitempty"`
+}
+
+// toWireMessages 把内部 Message 转换为 OpenAI 线上格式（含工具调用编码）。
+func toWireMessages(msgs []Message) []oaMessage {
+	out := make([]oaMessage, 0, len(msgs))
+	for _, m := range msgs {
+		om := oaMessage{Role: string(m.Role), Content: m.Content}
+		for _, tc := range m.ToolCalls {
+			om.ToolCalls = append(om.ToolCalls, oaToolCall{
+				ID: tc.ID, Type: "function",
+				Function: oaFunc{Name: tc.Name, Arguments: tc.Arguments},
+			})
+		}
+		om.ToolCallID = m.ToolCallID
+		om.Name = m.Name
+		out = append(out, om)
+	}
+	return out
+}
+
+// toWireTools 把内部 Tool 转换为 OpenAI 线上格式。
+func toWireTools(tools []Tool) []oaTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]oaTool, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, oaTool{
+			Type:     "function",
+			Function: oaToolDecl{Name: t.Name, Description: t.Description, Parameters: t.Parameters},
+		})
+	}
+	return out
+}
+
+func (p *OpenAICompat) buildRequest(req Request, stream bool) oaRequest {
+	body := oaRequest{
+		Model:       p.model,
+		Messages:    toWireMessages(req.Messages),
+		Tools:       toWireTools(req.Tools),
+		Stream:      stream,
+		Temperature: req.Temperature,
+	}
+	if len(body.Tools) > 0 {
+		body.ToolChoice = "auto"
+	}
+	return body
+}
+
+// post 发送请求并返回响应（调用方负责关闭 Body）。
+func (p *OpenAICompat) post(ctx context.Context, body oaRequest) (*http.Response, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("llm: 序列化请求失败: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("llm: 构造请求失败: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if body.Stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	}
+	if p.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("llm: 请求失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		snippet := readSnippet(resp.Body, 512)
+		resp.Body.Close()
+		return nil, fmt.Errorf("llm: 服务返回 %d: %s", resp.StatusCode, snippet)
+	}
+	return resp, nil
+}
+
+// Complete 实现 Provider：非流式请求，返回内容与（可能的）工具调用。
+func (p *OpenAICompat) Complete(ctx context.Context, req Request) (Completion, error) {
+	resp, err := p.post(ctx, p.buildRequest(req, false))
+	if err != nil {
+		return Completion{}, err
+	}
+	defer resp.Body.Close()
+
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content   string       `json:"content"`
+				ToolCalls []oaToolCall `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return Completion{}, fmt.Errorf("llm: 解析响应失败: %w", err)
+	}
+	if len(parsed.Choices) == 0 {
+		return Completion{}, fmt.Errorf("llm: 响应无 choices")
+	}
+	msg := parsed.Choices[0].Message
+	comp := Completion{Content: msg.Content}
+	for _, tc := range msg.ToolCalls {
+		comp.ToolCalls = append(comp.ToolCalls, ToolCall{
+			ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
+		})
+	}
+	return comp, nil
 }
 
 // streamChunk 是 SSE 中每个 data 行的 JSON 结构（仅取所需字段）。
@@ -74,43 +212,15 @@ type streamChunk struct {
 		Delta struct {
 			Content string `json:"content"`
 		} `json:"delta"`
-		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 }
 
 // Chat 实现 Provider：发起流式请求并把增量转成 Chunk。
 func (p *OpenAICompat) Chat(ctx context.Context, req Request) (<-chan Chunk, error) {
-	body, err := json.Marshal(chatRequestBody{
-		Model:       p.model,
-		Messages:    req.Messages,
-		Stream:      true,
-		Temperature: req.Temperature,
-	})
+	resp, err := p.post(ctx, p.buildRequest(req, true))
 	if err != nil {
-		return nil, fmt.Errorf("llm: 序列化请求失败: %w", err)
+		return nil, err
 	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("llm: 构造请求失败: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	if p.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("llm: 请求失败: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		// 读取少量错误体用于诊断，随后关闭。
-		snippet := readSnippet(resp.Body, 512)
-		resp.Body.Close()
-		return nil, fmt.Errorf("llm: 服务返回 %d: %s", resp.StatusCode, snippet)
-	}
-
 	out := make(chan Chunk)
 	go p.stream(ctx, resp, out)
 	return out, nil
@@ -122,13 +232,12 @@ func (p *OpenAICompat) stream(ctx context.Context, resp *http.Response, out chan
 	defer resp.Body.Close()
 
 	scanner := bufio.NewScanner(resp.Body)
-	// 放宽单行上限，避免长 token 行被截断。
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || !strings.HasPrefix(line, "data:") {
-			continue // 忽略空行与非 data 行（如注释/事件名）
+			continue
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
@@ -137,13 +246,12 @@ func (p *OpenAICompat) stream(ctx context.Context, resp *http.Response, out chan
 		}
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			// 单行解析失败不致命，跳过即可。
 			continue
 		}
 		for _, ch := range chunk.Choices {
 			if ch.Delta.Content != "" {
 				if !emit(ctx, out, Chunk{Delta: ch.Delta.Content}) {
-					return // ctx 取消
+					return
 				}
 			}
 		}
@@ -152,7 +260,6 @@ func (p *OpenAICompat) stream(ctx context.Context, resp *http.Response, out chan
 		emit(ctx, out, Chunk{Err: fmt.Errorf("llm: 读取流失败: %w", err)})
 		return
 	}
-	// 流自然结束但未见 [DONE]，补一个结束标志。
 	emit(ctx, out, Chunk{Done: true})
 }
 

@@ -11,6 +11,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 )
@@ -22,17 +23,45 @@ const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool" // 工具执行结果（function-calling 回填）
 )
 
 // Message 是一条对话消息。
+// 工具调用相关字段（ToolCalls / ToolCallID / Name）由具体 Provider 编码到各自的
+// 线上格式，内部不直接序列化（json:"-"）。
 type Message struct {
 	Role    Role   `json:"role"`
 	Content string `json:"content"`
+
+	ToolCalls  []ToolCall `json:"-"` // 仅 assistant：本条消息发起的工具调用
+	ToolCallID string     `json:"-"` // 仅 tool：对应的调用 ID
+	Name       string     `json:"-"` // 仅 tool：工具名
+}
+
+// Tool 是提供给大模型的一个可调用工具的声明。
+type Tool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"` // JSON Schema
+}
+
+// ToolCall 是大模型发起的一次工具调用。
+type ToolCall struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON 字符串
+}
+
+// Completion 是一次非流式对话的完整结果（可能含工具调用）。
+type Completion struct {
+	Content   string
+	ToolCalls []ToolCall
 }
 
 // Request 是一次对话请求。
 type Request struct {
 	Messages    []Message `json:"messages"`
+	Tools       []Tool    `json:"tools,omitempty"`
 	Temperature float32   `json:"temperature,omitempty"`
 }
 
@@ -56,9 +85,14 @@ type Info struct {
 type Provider interface {
 	// Info 返回模型元信息。
 	Info() Info
-	// Chat 发起一次对话，返回流式增量 channel。
+	// Chat 发起一次对话，返回流式增量 channel（不处理工具调用）。
 	// 实现应在完成或出错后关闭 channel，并尊重 ctx 取消。
 	Chat(ctx context.Context, req Request) (<-chan Chunk, error)
+	// Complete 发起一次非流式对话，返回完整结果（含可能的工具调用）。
+	// 用于 function-calling 多轮循环。
+	Complete(ctx context.Context, req Request) (Completion, error)
+	// SupportsTools 报告该后端是否支持工具调用（function-calling）。
+	SupportsTools() bool
 }
 
 // Router 管理多个 Provider，并维护"当前生效"模型。并发安全。
@@ -118,13 +152,40 @@ func (r *Router) SetActive(id string) error {
 	return nil
 }
 
-// Chat 使用当前生效模型发起对话。
+// Chat 使用当前生效模型发起流式对话。
 func (r *Router) Chat(ctx context.Context, req Request) (<-chan Chunk, error) {
+	p, err := r.activeProvider()
+	if err != nil {
+		return nil, err
+	}
+	return p.Chat(ctx, req)
+}
+
+// Complete 使用当前生效模型发起非流式对话（用于工具调用循环）。
+func (r *Router) Complete(ctx context.Context, req Request) (Completion, error) {
+	p, err := r.activeProvider()
+	if err != nil {
+		return Completion{}, err
+	}
+	return p.Complete(ctx, req)
+}
+
+// ActiveSupportsTools 报告当前生效模型是否支持工具调用。
+func (r *Router) ActiveSupportsTools() bool {
+	p, err := r.activeProvider()
+	if err != nil {
+		return false
+	}
+	return p.SupportsTools()
+}
+
+// activeProvider 返回当前生效的 Provider。
+func (r *Router) activeProvider() (Provider, error) {
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 	p, ok := r.providers[r.active]
-	r.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("llm: 无可用模型")
 	}
-	return p.Chat(ctx, req)
+	return p, nil
 }

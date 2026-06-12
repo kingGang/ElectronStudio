@@ -54,6 +54,14 @@ func (e *Echo) Chat(ctx context.Context, req Request) (<-chan Chunk, error) {
 	return out, nil
 }
 
+// Complete 实现 Provider：非流式返回回显内容；Echo 不发起工具调用。
+func (e *Echo) Complete(_ context.Context, req Request) (Completion, error) {
+	return Completion{Content: "收到：" + lastUserMessage(req)}, nil
+}
+
+// SupportsTools 实现 Provider：Echo 不支持工具调用。
+func (e *Echo) SupportsTools() bool { return false }
+
 // lastUserMessage 取请求中最后一条用户消息内容；没有则返回空串。
 func lastUserMessage(req Request) string {
 	for i := len(req.Messages) - 1; i >= 0; i-- {
