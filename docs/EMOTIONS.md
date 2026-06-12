@@ -28,22 +28,33 @@ emotions/
 
 文件名按字典序即为帧序。支持 PNG / JPG；任意尺寸（非 240×240 会自动缩放）。
 
-**方式二：精灵图集（一张大图切帧，推荐）**
+**方式二：精灵图集（推荐）**
+
+`emotions/<情绪>.json` 为入口（情绪名 = json 文件名），自动识别两种图集格式：
+
+**(a) TexturePacker（推荐）**
+
+TexturePacker 导出选 **Data Format = `JSON (Array)`**（数组有序 = 帧序），一个情绪一套：
 
 ```
 emotions/
-  happy.png     # 一张大图，按网格排布多帧（左→右、上→下）
-  happy.json    # 切帧规则
+  happy.png     # 图集（TexturePacker 输出的 sheet，名字由 meta.image 指定）
+  happy.json    # TexturePacker 的 JSON(Array)
 ```
 
-`happy.json`：
+- 自动处理 `rotated`（图集里旋转打包）与 `trimmed`（去透明边）：每帧复原为正立整帧再缩放到 240×240。
+- 帧率：TexturePacker 不导出 fps，默认 **15**；要改就在 JSON 里加一个 `"fps": 12`（顶层或 `meta` 内均可）。
+- 图集 PNG 路径取自 `meta.image`，找不到则回退同名 `<情绪>.png`。
+
+**(b) 自有等距网格**
+
+`emotions/<情绪>.png` + `emotions/<情绪>.json`：
 
 ```json
 { "frame_width": 240, "frame_height": 240, "frames": 8, "fps": 12 }
 ```
 
-- `frame_width/height`：每帧像素；`frames`：帧数（省略/≤0 则取满网格）；`fps`：播放帧率。
-- 每帧按上述区域切出并缩放到 240×240。例如一张 1920×240 的图 = 8 个 240×240 帧的横向条带。
+按等距网格切（左→右、上→下），每帧缩放到 240×240。例如 1920×240 = 8 帧横向条带。
 
 ### 怎么做素材
 

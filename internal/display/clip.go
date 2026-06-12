@@ -90,9 +90,10 @@ func (c *ClipSource) Frame() []byte {
 	return out
 }
 
-// LoadClips 从 dir 加载各情绪动画：
-//   - 子目录 <情绪>/*.{png,jpg}     → 一帧一文件
-//   - 文件 <情绪>.png + <情绪>.json → 精灵图集（一张大图切帧）
+// LoadClips 从 dir 加载各情绪动画，三种来源自动识别：
+//   - 子目录 <情绪>/*.{png,jpg}             → 一帧一文件
+//   - <情绪>.json (TexturePacker JSON-Array) → 图集 + meta.image，处理 rotated/trimmed
+//   - <情绪>.json (自带网格 meta frame_width) → 网格切帧
 //
 // 目录不存在时返回空集（不报错），调用方据此回退到程序动画脸。
 func LoadClips(dir string) (map[string]Clip, error) {
@@ -112,21 +113,40 @@ func LoadClips(dir string) (map[string]Clip, error) {
 			}
 			continue
 		}
-		// 精灵图集：<情绪>.png 且同名 <情绪>.json 存在。
-		if strings.HasSuffix(strings.ToLower(name), ".png") {
+		// 以 .json 为入口（情绪名=json 文件名）。
+		if strings.EqualFold(filepath.Ext(name), ".json") {
 			base := strings.TrimSuffix(name, filepath.Ext(name))
-			meta := filepath.Join(dir, base+".json")
-			if _, err := os.Stat(meta); err == nil {
-				if clip, err := loadSheet(filepath.Join(dir, name), meta); err == nil {
-					out[base] = clip
-				}
+			if clip, err := loadAtlas(filepath.Join(dir, name), dir); err == nil && len(clip.Frames) > 0 {
+				out[base] = clip
 			}
 		}
 	}
 	return out, nil
 }
 
-// sheetMeta 描述精灵图集的切帧规则。
+// loadAtlas 读取图集 meta 并自动选择格式：TexturePacker（含 frames）或网格（含 frame_width）。
+func loadAtlas(jsonPath, dir string) (Clip, error) {
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return Clip{}, err
+	}
+	var probe struct {
+		FrameWidth int             `json:"frame_width"`
+		Frames     json.RawMessage `json:"frames"`
+	}
+	_ = json.Unmarshal(data, &probe)
+	switch {
+	case probe.FrameWidth > 0:
+		png := strings.TrimSuffix(jsonPath, filepath.Ext(jsonPath)) + ".png"
+		return loadGridSheet(png, data)
+	case len(probe.Frames) > 0:
+		return loadTexturePacker(jsonPath, dir, data)
+	default:
+		return Clip{}, fmt.Errorf("display: 未识别的图集 meta %s", jsonPath)
+	}
+}
+
+// sheetMeta 描述（本项目自有的）网格切帧规则。
 type sheetMeta struct {
 	FrameWidth  int `json:"frame_width"`
 	FrameHeight int `json:"frame_height"`
@@ -134,18 +154,14 @@ type sheetMeta struct {
 	FPS         int `json:"fps"`
 }
 
-// loadSheet 把一张精灵图集按 meta 切成帧序列（每帧缩放到 240×240 RGB888）。
-func loadSheet(pngPath, metaPath string) (Clip, error) {
-	mb, err := os.ReadFile(metaPath)
-	if err != nil {
-		return Clip{}, err
-	}
+// loadGridSheet 把一张图集按等距网格切成帧序列（每帧缩放到 240×240 RGB888）。
+func loadGridSheet(pngPath string, metaData []byte) (Clip, error) {
 	var m sheetMeta
-	if err := json.Unmarshal(mb, &m); err != nil {
+	if err := json.Unmarshal(metaData, &m); err != nil {
 		return Clip{}, err
 	}
 	if m.FrameWidth <= 0 || m.FrameHeight <= 0 {
-		return Clip{}, fmt.Errorf("display: 精灵图集 meta 缺少 frame_width/height")
+		return Clip{}, fmt.Errorf("display: 网格 meta 缺少 frame_width/height")
 	}
 	img, err := decodeImage(pngPath)
 	if err != nil {
