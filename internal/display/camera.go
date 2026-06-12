@@ -118,6 +118,19 @@ func (c *CameraSource) Frame() []byte {
 	return out
 }
 
+// Snapshot 返回最近一帧的副本（不论是否已被 Frame 取过）；无帧返回 nil。
+// 用于"看一眼"（抓帧送视觉模型），与显示用的 Frame 解耦。
+func (c *CameraSource) Snapshot() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.latest == nil {
+		return nil
+	}
+	out := make([]byte, len(c.latest))
+	copy(out, c.latest)
+	return out
+}
+
 // Running 报告采集是否在运行。
 func (c *CameraSource) Running() bool {
 	c.mu.Lock()

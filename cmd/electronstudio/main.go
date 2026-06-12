@@ -280,7 +280,42 @@ func buildTools(a *app) *tools.Registry {
 
 	reg.Register(tools.TimeTool())
 	reg.Register(tools.NewLamp().Tool())
+
+	// 视觉："看一眼"——抓摄像头帧交给视觉模型描述（仅在配置了摄像头时提供）。
+	if a.camera != nil {
+		reg.Register(tools.LookTool(a.captureJPEG, func(ctx context.Context, jpeg []byte, q string) (string, error) {
+			return a.llm.Vision(ctx, jpeg, q)
+		}))
+	}
 	return reg
+}
+
+// captureJPEG 抓取当前摄像头画面并编码为 JPEG（必要时临时启动采集）。
+func (a *app) captureJPEG(ctx context.Context) ([]byte, error) {
+	if a.camera == nil {
+		return nil, fmt.Errorf("摄像头未启用")
+	}
+	if !a.camera.Running() {
+		cfg := a.cfg.Camera
+		if err := a.camera.Start(ctx, display.CameraConfig{
+			FFmpeg: cfg.FFmpeg, InputFormat: cfg.InputFormat, Input: cfg.Input,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	// 等待首帧（采集启动后约需 ~200ms）。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f := a.camera.Snapshot(); f != nil {
+			return display.EncodeJPEG(f)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return nil, fmt.Errorf("未取到摄像头画面")
 }
 
 // providerFromConfig 依据配置条目构造一个 LLM Provider。

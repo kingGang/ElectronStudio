@@ -56,6 +56,34 @@ func ActionTool(names []string, play func(name string) error) Tool {
 	}
 }
 
+// LookTool 构造"看一眼"工具：用摄像头抓一帧交给视觉模型描述/回答。
+//   - capture 抓取当前画面并返回 JPEG 字节；
+//   - describe 把图片 + 问题交给视觉模型，返回描述文本。
+// 二者由上层注入（cmd 接摄像头 + LLM 视觉）。
+func LookTool(
+	capture func(ctx context.Context) ([]byte, error),
+	describe func(ctx context.Context, jpeg []byte, question string) (string, error),
+) Tool {
+	schema := objectSchema(`{"question":{"type":"string","description":"关于画面的问题；留空则描述所见"}}`)
+	return Tool{
+		Spec: Spec{Name: "look", Description: "用机器人的摄像头看一眼，描述画面或回答关于画面的问题", Parameters: schema},
+		Handler: func(ctx context.Context, args string) (string, error) {
+			var p struct {
+				Question string `json:"question"`
+			}
+			_ = json.Unmarshal([]byte(args), &p)
+			if p.Question == "" {
+				p.Question = "请简要描述你看到的画面"
+			}
+			jpeg, err := capture(ctx)
+			if err != nil {
+				return "", err
+			}
+			return describe(ctx, jpeg, p.Question)
+		},
+	}
+}
+
 // TimeTool 构造"获取当前时间"工具（无副作用，演示信息类工具）。
 func TimeTool() Tool {
 	return Tool{

@@ -11,6 +11,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -36,6 +37,7 @@ type Message struct {
 	ToolCalls  []ToolCall `json:"-"` // 仅 assistant：本条消息发起的工具调用
 	ToolCallID string     `json:"-"` // 仅 tool：对应的调用 ID
 	Name       string     `json:"-"` // 仅 tool：工具名
+	Images     []string   `json:"-"` // 可选：图片(data URL，如 data:image/jpeg;base64,...)，用于视觉模型
 }
 
 // Tool 是提供给大模型的一个可调用工具的声明。
@@ -191,6 +193,19 @@ func (r *Router) Complete(ctx context.Context, req Request) (Completion, error) 
 		return Completion{}, err
 	}
 	return p.Complete(ctx, req)
+}
+
+// Vision 用当前生效模型对一张图片提问/描述（图片以 JPEG 字节传入）。
+// 要求生效模型支持视觉（如 gpt-4o、本地 llava / qwen2-vl）；不支持视觉的模型会忽略图片。
+func (r *Router) Vision(ctx context.Context, jpeg []byte, prompt string) (string, error) {
+	dataURL := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(jpeg)
+	comp, err := r.Complete(ctx, Request{Messages: []Message{
+		{Role: RoleUser, Content: prompt, Images: []string{dataURL}},
+	}})
+	if err != nil {
+		return "", err
+	}
+	return comp.Content, nil
 }
 
 // ActiveSupportsTools 报告当前生效模型是否支持工具调用。

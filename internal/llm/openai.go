@@ -75,10 +75,20 @@ type oaFunc struct {
 }
 type oaMessage struct {
 	Role       string       `json:"role"`
-	Content    string       `json:"content"`
+	Content    any          `json:"content"` // string，或含图片时为 []oaPart
 	ToolCalls  []oaToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string       `json:"tool_call_id,omitempty"`
 	Name       string       `json:"name,omitempty"`
+}
+
+// oaPart 是多模态消息内容的一个片段（文本或图片）。
+type oaPart struct {
+	Type     string      `json:"type"` // "text" | "image_url"
+	Text     string      `json:"text,omitempty"`
+	ImageURL *oaImageURL `json:"image_url,omitempty"`
+}
+type oaImageURL struct {
+	URL string `json:"url"`
 }
 type oaTool struct {
 	Type     string     `json:"type"` // 固定 "function"
@@ -103,6 +113,14 @@ func toWireMessages(msgs []Message) []oaMessage {
 	out := make([]oaMessage, 0, len(msgs))
 	for _, m := range msgs {
 		om := oaMessage{Role: string(m.Role), Content: m.Content}
+		// 含图片时，content 改为"文本 + 图片"多模态数组（OpenAI 视觉格式）。
+		if len(m.Images) > 0 {
+			parts := []oaPart{{Type: "text", Text: m.Content}}
+			for _, img := range m.Images {
+				parts = append(parts, oaPart{Type: "image_url", ImageURL: &oaImageURL{URL: img}})
+			}
+			om.Content = parts
+		}
 		for _, tc := range m.ToolCalls {
 			om.ToolCalls = append(om.ToolCalls, oaToolCall{
 				ID: tc.ID, Type: "function",

@@ -47,6 +47,27 @@ func TestLampTool(t *testing.T) {
 	}
 }
 
+// TestLookTool 验证"看一眼"工具：抓帧 → 交给描述函数 → 返回描述。
+func TestLookTool(t *testing.T) {
+	captured := false
+	tool := LookTool(
+		func(_ context.Context) ([]byte, error) { captured = true; return []byte{1, 2, 3}, nil },
+		func(_ context.Context, jpeg []byte, q string) (string, error) {
+			if len(jpeg) == 0 || q == "" {
+				t.Fatalf("描述函数入参错误: jpeg=%d q=%q", len(jpeg), q)
+			}
+			return "我看到一只猫", nil
+		},
+	)
+	out, err := tool.Handler(context.Background(), `{"question":"这是什么动物"}`)
+	if err != nil {
+		t.Fatalf("执行失败: %v", err)
+	}
+	if !captured || out != "我看到一只猫" {
+		t.Fatalf("结果错误: captured=%v out=%q", captured, out)
+	}
+}
+
 // TestEmotionTool 验证情绪工具会调用注入的回调。
 func TestEmotionTool(t *testing.T) {
 	var got string
