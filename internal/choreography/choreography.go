@@ -23,16 +23,16 @@ const (
 
 // Keyframe 是动作时间轴上的一个关键帧：在 AtMs 毫秒处，舵机应达到 Angles。
 type Keyframe struct {
-	AtMs   int          // 相对动作起点的时间（毫秒）
-	Angles robot.Joints // 6 轴目标角度（度）
+	AtMs   int          `json:"at_ms"`  // 相对动作起点的时间（毫秒）
+	Angles robot.Joints `json:"angles"` // 6 轴目标角度（度）
 }
 
-// Action 是一段具名动作，由若干关键帧构成。
+// Action 是一段具名动作，由若干关键帧构成。可序列化以便存盘/录制。
 type Action struct {
-	Name    string     // 动作名（唯一），如 wave / nod
-	Emotion string     // 关联情绪（可选），用于"情绪→动作"映射
-	Loops   int        // 默认循环次数；0 视为 1，-1 表示无限循环
-	Frames  []Keyframe // 关键帧序列（无需预先排序，引擎会按 AtMs 排序）
+	Name    string     `json:"name"`              // 动作名（唯一），如 wave / nod
+	Emotion string     `json:"emotion,omitempty"` // 关联情绪（可选），用于"情绪→动作"映射
+	Loops   int        `json:"loops,omitempty"`   // 默认循环次数；0 视为 1，-1 表示无限循环
+	Frames  []Keyframe `json:"frames"`            // 关键帧序列（无需预先排序，引擎会按 AtMs 排序）
 }
 
 // Engine 负责播放动作。同一时刻只播放一个动作，新的播放会打断旧的。
@@ -92,6 +92,25 @@ func (e *Engine) Register(a Action) {
 	e.mu.Lock()
 	e.actions[a.Name] = a
 	e.mu.Unlock()
+}
+
+// Unregister 删除一个已注册动作。
+func (e *Engine) Unregister(name string) {
+	e.mu.Lock()
+	delete(e.actions, name)
+	e.mu.Unlock()
+}
+
+// All 返回当前全部动作的副本（按名排序），用于存盘。
+func (e *Engine) All() []Action {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]Action, 0, len(e.actions))
+	for _, a := range e.actions {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // Names 返回已注册的全部动作名（无序）。

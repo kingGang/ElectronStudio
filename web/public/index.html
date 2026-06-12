@@ -75,6 +75,21 @@
       <h2>动作库</h2>
       <div class="action-list" id="action-list"><span class="muted">等待状态…</span></div>
       <button class="qa danger" id="choreo-stop">⏹ 停止</button>
+
+      <div class="record-box">
+        <div class="panel-head">
+          <h2>示教录制</h2>
+          <label class="enable-toggle"><input type="checkbox" id="follow-toggle" /> 跟随设备（松力可手掰）</label>
+        </div>
+        <p class="muted">开启“跟随设备”后掰动机器人，左侧滑块会实时跟随真实角度；点“采帧”逐个记录姿态，停止即保存为新动作。</p>
+        <div class="am-row">
+          <input id="rec-name" placeholder="动作名，如 my_dance" />
+          <button class="qa" id="rec-start">● 开始</button>
+          <button class="qa" id="rec-frame">📸 采帧</button>
+          <button class="qa danger" id="rec-stop">■ 停止保存</button>
+        </div>
+        <span class="muted" id="rec-status">未在录制</span>
+      </div>
     </section>
     <section class="panel">
       <div class="panel-head">

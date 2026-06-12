@@ -115,6 +115,14 @@ body {
 
 /* 动作库 */
 .action-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.action-item { display: inline-flex; align-items: center; background: var(--card); border: 1px solid var(--border); border-radius: 999px; }
+.action-item .qa { border: none; background: transparent; }
+.action-item .mr-rm { padding: 4px 8px; }
+
+/* 示教录制 */
+.record-box { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.record-box .am-row { margin-top: 8px; }
+#rec-status { display: inline-block; margin-top: 8px; font-family: var(--mono); }
 
 /* 6 轴滑块 */
 .joints { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }

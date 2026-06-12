@@ -39,6 +39,11 @@ export const ClientType = {
   JogJoint: 'jog_joint',
   AddModel: 'add_model',
   RemoveModel: 'remove_model',
+  Follow: 'follow',
+  RecordStart: 'record_start',
+  RecordFrame: 'record_frame',
+  RecordStop: 'record_stop',
+  DeleteAction: 'delete_action',
 } as const
 
 // ===========================================================================
@@ -200,6 +205,15 @@ export interface AddModelCommand {
 }
 export interface RemoveModelCommand {
   id: string
+}
+export interface FollowCommand {
+  enable: boolean
+}
+export interface RecordStartCommand {
+  name: string
+}
+export interface DeleteActionCommand {
+  name: string
 }
 
 // ===========================================================================

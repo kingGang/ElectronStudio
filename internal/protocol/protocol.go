@@ -50,6 +50,13 @@ const (
 	TypeJogJoint    Type = "jog_joint"    // 手动微调单个舵机角度
 	TypeAddModel    Type = "add_model"    // 新增/编辑一个大模型（设置页）
 	TypeRemoveModel Type = "remove_model" // 删除一个大模型（设置页）
+
+	// 动作编排 / 示教录制
+	TypeFollow       Type = "follow"        // 开关"跟随设备"（实体优先：松力 + 读回角度）
+	TypeRecordStart  Type = "record_start"  // 开始录制一段动作
+	TypeRecordFrame  Type = "record_frame"  // 采集当前姿态为一帧
+	TypeRecordStop   Type = "record_stop"   // 结束录制并保存
+	TypeDeleteAction Type = "delete_action" // 删除一段动作
 )
 
 // Payload 是所有可被封装进 Envelope 的负载结构的统一约束。

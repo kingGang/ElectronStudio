@@ -23,9 +23,11 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/kingGang/ElectronStudio/internal/choreography"
 	"github.com/kingGang/ElectronStudio/internal/config"
@@ -102,6 +104,16 @@ type app struct {
 	cfg     *config.Config // 当前配置
 	cfgPath string         // 配置文件路径
 
+	actionsPath  string             // 录制动作的存盘路径
+	followMu     sync.Mutex         // 保护 followCancel
+	followCancel context.CancelFunc // 跟随设备循环的取消函数（nil=未跟随）
+
+	recMu     sync.Mutex             // 保护录制状态
+	recording bool                   // 是否正在录制
+	recName   string                 // 当前录制动作名
+	recFrames []choreography.Keyframe // 已采集的关键帧
+	recStart  time.Time              // 录制起点
+
 	histMu  sync.Mutex
 	history []llm.Message  // 对话历史（含系统提示）
 	msgSeq  atomic.Uint64  // 对话消息 ID 自增源
@@ -112,10 +124,14 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	// 机器人：按配置选择传输（auto 优先尝试真机 USB，失败回退 Mock）。
 	bot := connectRobot(cfg, log)
 
-	// 动作编排：注册内置动作。
+	// 动作编排：注册内置动作，再加载用户录制的动作（同名覆盖内置）。
 	chor := choreography.NewEngine(bot, choreography.WithLogger(log))
 	for _, act := range choreography.DefaultActions() {
 		chor.Register(act)
+	}
+	actionsPath := filepath.Join(filepath.Dir(cfgPath), "actions.json")
+	if err := chor.LoadActions(actionsPath); err != nil {
+		log.Warn("加载录制动作失败", "err", err)
 	}
 
 	// 大模型：从配置构建路由（至少含 Echo 兜底）。
@@ -146,9 +162,10 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		bot:     bot,
 		speech:  voice,
 		log:     log,
-		cfg:     cfg,
-		cfgPath: cfgPath,
-		history: []llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}},
+		cfg:         cfg,
+		cfgPath:     cfgPath,
+		actionsPath: actionsPath,
+		history:     []llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}},
 	}
 
 	// 新客户端连上时，推送一次状态快照，让前端立即渲染。
@@ -359,6 +376,27 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 		a.speech.Stop() // 打断正在播放的语音
 		a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
 
+	case protocol.TypeFollow:
+		if cmd, err := protocol.As[protocol.FollowCommand](in.Env); err == nil {
+			a.handleFollow(ctx, cmd.Enable)
+		}
+
+	case protocol.TypeRecordStart:
+		if cmd, err := protocol.As[protocol.RecordStartCommand](in.Env); err == nil {
+			a.recordStart(cmd.Name)
+		}
+
+	case protocol.TypeRecordFrame:
+		a.recordFrame()
+
+	case protocol.TypeRecordStop:
+		a.recordStop()
+
+	case protocol.TypeDeleteAction:
+		if cmd, err := protocol.As[protocol.DeleteActionCommand](in.Env); err == nil {
+			a.deleteAction(cmd.Name)
+		}
+
 	default:
 		a.log.Debug("未处理的命令类型", "type", in.Env.Type)
 	}
@@ -505,6 +543,98 @@ func (a *app) handleJog(cmd protocol.JogJointCommand) {
 		return
 	}
 	a.srv.Broadcast(protocol.JointsEvent{Angles: a.bot.JointAngles(), Enabled: cmd.Enable})
+}
+
+// handleFollow 开关"跟随设备"（实体优先）：开启时后台以 20Hz 松力 + 读回真实角度并广播，
+// 用户掰动机器人即可在界面看到关节实时跟随，配合录制实现示教编排。
+func (a *app) handleFollow(ctx context.Context, enable bool) {
+	a.followMu.Lock()
+	defer a.followMu.Unlock()
+	if a.followCancel != nil { // 先停掉旧的跟随循环
+		a.followCancel()
+		a.followCancel = nil
+	}
+	if !enable {
+		a.log.Info("跟随设备已关闭")
+		return
+	}
+	fctx, cancel := context.WithCancel(ctx)
+	a.followCancel = cancel
+	go a.followLoop(fctx)
+	a.log.Info("跟随设备已开启")
+}
+
+// followLoop 以 20Hz 松力并读回真实角度，广播给前端。
+func (a *app) followLoop(ctx context.Context) {
+	ticker := time.NewTicker(50 * time.Millisecond) // 20Hz，与官方 FixedUpdate 一致
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cur := a.bot.JointAngles()
+			_ = a.bot.SetJointAngles(cur, false) // enable=false：舵机松力，可手动摆姿
+			_ = a.bot.Sync()
+			a.srv.Broadcast(protocol.JointsEvent{Angles: a.bot.JointAngles(), Enabled: false})
+		}
+	}
+}
+
+// recordStart 开始录制一段动作。
+func (a *app) recordStart(name string) {
+	a.recMu.Lock()
+	a.recording = true
+	a.recName = name
+	a.recFrames = nil
+	a.recStart = time.Now()
+	a.recMu.Unlock()
+	a.log.Info("开始录制动作", "name", name)
+}
+
+// recordFrame 把当前姿态采集为一个关键帧（时间戳相对录制起点）。
+func (a *app) recordFrame() {
+	a.recMu.Lock()
+	defer a.recMu.Unlock()
+	if !a.recording {
+		return
+	}
+	at := int(time.Since(a.recStart) / time.Millisecond)
+	a.recFrames = append(a.recFrames, choreography.Keyframe{AtMs: at, Angles: a.bot.JointAngles()})
+	a.log.Debug("采集关键帧", "序号", len(a.recFrames), "at_ms", at)
+}
+
+// recordStop 结束录制：注册为动作、存盘、广播更新后的动作列表。
+func (a *app) recordStop() {
+	a.recMu.Lock()
+	if !a.recording {
+		a.recMu.Unlock()
+		return
+	}
+	a.recording = false
+	name, frames := a.recName, a.recFrames
+	a.recMu.Unlock()
+
+	if name == "" || len(frames) == 0 {
+		a.log.Warn("录制为空，已丢弃", "name", name, "frames", len(frames))
+		a.srv.Broadcast(a.statusSnapshot())
+		return
+	}
+	a.chor.Register(choreography.Action{Name: name, Loops: 1, Frames: frames})
+	if err := a.chor.SaveActions(a.actionsPath); err != nil {
+		a.log.Warn("保存动作失败", "err", err)
+	}
+	a.log.Info("动作已录制保存", "name", name, "frames", len(frames))
+	a.srv.Broadcast(a.statusSnapshot())
+}
+
+// deleteAction 删除一段动作并存盘。
+func (a *app) deleteAction(name string) {
+	a.chor.Unregister(name)
+	if err := a.chor.SaveActions(a.actionsPath); err != nil {
+		a.log.Warn("保存动作失败", "err", err)
+	}
+	a.srv.Broadcast(a.statusSnapshot())
 }
 
 // handleAddModel 新增/编辑一个模型：更新路由、持久化配置、广播状态。

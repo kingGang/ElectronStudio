@@ -19,8 +19,8 @@
     SelectModel: 'select_model', JogJoint: 'jog_joint',
   };
 
-  // 6 轴关节名称（与 ElectronBot 关节约定一致，仅作展示）。
-  const JOINT_NAMES = ['头部旋转', '头部俯仰', '左臂', '左肘', '右臂', '右肘'];
+  // 6 轴关节名称（顺序与后端 robot.JointNames / 官方 RobotController 完全一致）。
+  const JOINT_NAMES = ['左臂横滚', '左臂俯仰', '右臂横滚', '右臂俯仰', '头部俯仰', '身体旋转'];
   const JOINT_COUNT = 6;
   const VOICE_LABEL = { idle: '待命', connecting: '连接中', listening: '聆听中…', thinking: '思考中…', speaking: '回应中…' };
 
@@ -201,26 +201,69 @@
       });
     });
   }
-  // joints 事件 → 更新反馈读数。
+  // joints 事件 → 更新反馈读数；跟随设备时同步移动滑块。
+  let followActive = false;
   function onJoints(p) {
     if (!Array.isArray(p.angles)) return;
     p.angles.forEach((a, i) => {
       const fb = $(`fb-${i}`);
       if (fb) fb.textContent = Math.round(a) + '°';
+      if (followActive) {
+        const slider = el.joints.querySelector(`input[data-joint="${i}"]`);
+        const tgt = $(`tgt-${i}`);
+        if (slider) slider.value = Math.round(a);
+        if (tgt) tgt.textContent = Math.round(a) + '°';
+      }
     });
   }
-  // 渲染动作库按钮（数据驱动自 status.actions）。
+  // 渲染动作库按钮（数据驱动自 status.actions），每个带删除。
   function renderActions(actions) {
     el.actionList.innerHTML = '';
     actions.forEach((name) => {
+      const wrap = document.createElement('span');
+      wrap.className = 'action-item';
       const b = document.createElement('button');
       b.className = 'qa';
       b.textContent = name;
       b.addEventListener('click', () => send(CliType.PlayAction, { name, loops: 1 }));
-      el.actionList.appendChild(b);
+      const del = document.createElement('button');
+      del.className = 'mr-rm';
+      del.textContent = '✕';
+      del.title = '删除动作';
+      del.addEventListener('click', () => { if (confirm(`删除动作「${name}」？`)) send(CliType.DeleteAction, { name }); });
+      wrap.appendChild(b);
+      wrap.appendChild(del);
+      el.actionList.appendChild(wrap);
     });
   }
   el.choreoStop.addEventListener('click', () => send(CliType.Interrupt, { reason: 'choreo-stop' }));
+
+  // 跟随设备 + 示教录制。
+  function setupRecord() {
+    const follow = $('follow-toggle'), recName = $('rec-name'), recStatus = $('rec-status');
+    if (!follow) return;
+    follow.addEventListener('change', () => {
+      followActive = follow.checked;
+      send(CliType.Follow, { enable: follow.checked });
+    });
+    $('rec-start').addEventListener('click', () => {
+      const name = recName.value.trim();
+      if (!name) { toast('请填写动作名'); return; }
+      send(CliType.RecordStart, { name });
+      recStatus.textContent = `录制中：${name}（采帧 0）`;
+      recStatus.dataset.count = '0';
+    });
+    $('rec-frame').addEventListener('click', () => {
+      send(CliType.RecordFrame, {});
+      const n = (parseInt(recStatus.dataset.count || '0', 10) + 1);
+      recStatus.dataset.count = String(n);
+      recStatus.textContent = `录制中：${recName.value.trim()}（采帧 ${n}）`;
+    });
+    $('rec-stop').addEventListener('click', () => {
+      send(CliType.RecordStop, {});
+      recStatus.textContent = '已保存';
+    });
+  }
 
   // ======================================================================
   // 设置页
@@ -337,5 +380,6 @@
   // 启动。
   buildJoints();
   setupAddModelForm();
+  setupRecord();
   connect();
 })();

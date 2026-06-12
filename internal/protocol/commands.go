@@ -123,3 +123,43 @@ type RemoveModelCommand struct {
 
 // Type 实现 Payload。
 func (RemoveModelCommand) Type() Type { return TypeRemoveModel }
+
+// ---------------------------------------------------------------------------
+// 动作编排 / 示教录制
+// ---------------------------------------------------------------------------
+
+// FollowCommand 开关"跟随设备"：开启时机器人舵机松力，可手动摆姿，后端持续读回真实角度。
+type FollowCommand struct {
+	Enable bool `json:"enable"`
+}
+
+// Type 实现 Payload。
+func (FollowCommand) Type() Type { return TypeFollow }
+
+// RecordStartCommand 开始录制一段以 Name 命名的动作。
+type RecordStartCommand struct {
+	Name string `json:"name"`
+}
+
+// Type 实现 Payload。
+func (RecordStartCommand) Type() Type { return TypeRecordStart }
+
+// RecordFrameCommand 把当前姿态采集为一个关键帧（无参数）。
+type RecordFrameCommand struct{}
+
+// Type 实现 Payload。
+func (RecordFrameCommand) Type() Type { return TypeRecordFrame }
+
+// RecordStopCommand 结束录制并保存（无参数）。
+type RecordStopCommand struct{}
+
+// Type 实现 Payload。
+func (RecordStopCommand) Type() Type { return TypeRecordStop }
+
+// DeleteActionCommand 删除一段已存在的动作。
+type DeleteActionCommand struct {
+	Name string `json:"name"`
+}
+
+// Type 实现 Payload。
+func (DeleteActionCommand) Type() Type { return TypeDeleteAction }

@@ -15,6 +15,20 @@ const (
 	ImageBytesRGB888 = ScreenWidth * ScreenHeight * 3
 )
 
+// 6 轴关节索引，顺序与官方 ElectronStudio 的 RobotController 完全一致。
+// 注意：ElectronBot 为 6 自由度，每臂 2 个（横滚 + 俯仰），头 1 个（俯仰），身体 1 个（偏航）——没有肘关节。
+const (
+	JointArmRollLeft   = 0 // 左臂横滚（Z 轴）
+	JointArmPitchLeft  = 1 // 左臂俯仰（X 轴）
+	JointArmRollRight  = 2 // 右臂横滚（Z 轴，模型中取反）
+	JointArmPitchRight = 3 // 右臂俯仰（X 轴）
+	JointHead          = 4 // 头部俯仰（X 轴）
+	JointBody          = 5 // 身体旋转 / 偏航（Y 轴）
+)
+
+// JointNames 是 6 轴的中文名，下标与 Joints 一致。
+var JointNames = [JointCount]string{"左臂横滚", "左臂俯仰", "右臂横滚", "右臂俯仰", "头部俯仰", "身体旋转"}
+
 // Joints 是 6 轴舵机角度（单位：度）。使用定长数组以避免误用和堆分配。
 type Joints = [JointCount]float32
 
