@@ -46,7 +46,7 @@ func TestCompositorCameraPriority(t *testing.T) {
 	f := bytes.Repeat([]byte{0x33}, robot.ImageBytesRGB888)
 	cam.readFrames(bytes.NewReader(f)) // 读入一帧后返回
 
-	comp := NewCompositor(cam, NewClipSource(map[string][][]byte{}), NewEmotionSource())
+	comp := NewCompositor(cam, NewClipSource(map[string]Clip{}), NewEmotionSource())
 	comp.SetCamera(true)
 	got := comp.Frame()
 	if got == nil || got[0] != 0x33 {
