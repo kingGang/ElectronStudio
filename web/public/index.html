@@ -63,12 +63,11 @@
         <button class="qa" id="btn-greet">👋 看一眼打招呼</button>
         <button class="qa danger" id="btn-interrupt">⏹ 打断</button>
       </div>
-      <div class="music-bar" id="music-bar">
-        <input id="music-query" placeholder="搜歌名/歌手…" />
-        <button class="icon-btn" id="music-play" title="播放">▶</button>
+      <div class="music-bar" id="music-bar" style="display:none">
+        <span class="music-icon">♪</span>
+        <span class="music-now" id="music-now">未播放</span>
         <button class="icon-btn" id="music-pause" title="暂停/继续">⏸</button>
         <button class="icon-btn" id="music-stop" title="停止">⏹</button>
-        <span class="music-now muted" id="music-now">未播放</span>
       </div>
       <form class="composer" id="composer">
         <input id="composer-input" type="text" placeholder="输入文字…" autocomplete="off" />

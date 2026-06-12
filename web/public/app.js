@@ -391,22 +391,20 @@
     toastTimer = setTimeout(() => el.toast.classList.remove('show'), 3000);
   }
 
-  // ---- 音乐控制条 ----
+  // ---- 音乐播放控制条（搜歌走 AI 对话框：直接说"放首XXX"）----
   let musicPlaying = false;
   function onMusicState(p) {
-    const now = $('music-now');
-    if (p.state === 'stopped' || !p.state) { now.textContent = '未播放'; musicPlaying = false; return; }
+    const bar = $('music-bar'), now = $('music-now');
+    if (p.state === 'stopped' || !p.state) {
+      bar.style.display = 'none';
+      musicPlaying = false;
+      return;
+    }
+    bar.style.display = 'flex';
     musicPlaying = p.state === 'playing';
-    now.textContent = (p.state === 'paused' ? '⏸ ' : '♪ ') + (p.name || '') + (p.artist ? ' - ' + p.artist : '');
+    now.textContent = (p.state === 'paused' ? '⏸ ' : '') + (p.name || '') + (p.artist ? ' - ' + p.artist : '');
   }
-  $('music-play').addEventListener('click', () => {
-    const q = $('music-query').value.trim();
-    if (!q) { toast('请输入歌名'); return; }
-    send(CliType.Music, { action: 'play', query: q });
-  });
-  $('music-pause').addEventListener('click', () => {
-    send(CliType.Music, { action: musicPlaying ? 'pause' : 'resume' });
-  });
+  $('music-pause').addEventListener('click', () => send(CliType.Music, { action: musicPlaying ? 'pause' : 'resume' }));
   $('music-stop').addEventListener('click', () => send(CliType.Music, { action: 'stop' }));
 
   // ---- 提醒 / 定时任务 ----
