@@ -1,0 +1,40 @@
+{
+  "ws_host": "127.0.0.1",
+  "ws_port": 7800,
+  "sample_rate": 16000,
+
+  "asr": {
+    "_comment": "离线 ASR：SenseVoice（中文效果好）。模型见 download_models 脚本。",
+    "model": "models/sense-voice/model.onnx",
+    "tokens": "models/sense-voice/tokens.txt",
+    "use_itn": true
+  },
+
+  "vad": {
+    "_comment": "Silero VAD：检测语音起止，驱动波形与分段。",
+    "model": "models/silero_vad.onnx",
+    "threshold": 0.5,
+    "min_silence_duration": 0.5,
+    "min_speech_duration": 0.25
+  },
+
+  "tts": {
+    "_comment": "VITS / Piper 风格 TTS。中文音色见 download_models 脚本。",
+    "model": "models/vits-zh/model.onnx",
+    "tokens": "models/vits-zh/tokens.txt",
+    "lexicon": "models/vits-zh/lexicon.txt",
+    "dict_dir": "models/vits-zh/dict",
+    "speaker_id": 0,
+    "speed": 1.0
+  },
+
+  "wake": {
+    "_comment": "唤醒词（可选）。enabled=false 时改为 VAD 触发的常听模式。",
+    "enabled": false,
+    "keywords_file": "models/kws/keywords.txt",
+    "tokens": "models/kws/tokens.txt",
+    "encoder": "models/kws/encoder.onnx",
+    "decoder": "models/kws/decoder.onnx",
+    "joiner": "models/kws/joiner.onnx"
+  }
+}

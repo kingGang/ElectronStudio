@@ -21,8 +21,12 @@ web/dist/
 web/.vite/
 *.local
 
-# ===== sidecar 二进制 (按平台分发, 不入库) =====
+# ===== sidecar (二进制/模型/用户配置不入库) =====
 /sidecars/**/bin/
+/sidecars/speech/models/
+/sidecars/speech/config.json
+/sidecars/speech/.venv/
+__pycache__/
 *.onnx
 *.bin
 !**/.gitkeep

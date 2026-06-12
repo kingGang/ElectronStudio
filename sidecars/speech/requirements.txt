@@ -1,0 +1,6 @@
+# 语音 sidecar 依赖（在独立 Python 环境安装；与 Go 主程序无关）。
+# 推荐 Python 3.9 ~ 3.12。
+sherpa-onnx>=1.10.0   # 唤醒(KWS) / VAD / ASR / TTS 一站式（ONNX，无需 GPU）
+sounddevice>=0.4.6    # 麦克风采集 + 扬声器播放
+websockets>=12.0      # 与 Go 主程序的 WebSocket 桥接
+numpy>=1.24
