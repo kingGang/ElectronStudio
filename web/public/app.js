@@ -559,6 +559,12 @@
     const form = $('mat-upload');
     if (!form) return;
     const nameInp = $('mat-name'), fileInp = $('mat-file'), submit = $('mat-submit');
+    // 停止预览：回到默认程序脸（neutral 一般无素材，即回退到眨眼/口型的程序动画脸）。
+    const stopBtn = $('mat-stop');
+    if (stopBtn) stopBtn.addEventListener('click', () => {
+      send(CliType.SetEmotion, { emotion: 'neutral', preview: true });
+      toast('已停止预览');
+    });
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const name = nameInp.value.trim().toLowerCase();

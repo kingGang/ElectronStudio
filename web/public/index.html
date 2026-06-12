@@ -124,7 +124,10 @@
       </p>
       <div class="mat-preview-box">
         <div class="mat-screen"><canvas id="mat-mirror" width="240" height="240"></canvas></div>
-        <span class="muted">实时预览（设备屏镜像）。点下方卡片的「▶ 预览」即可在这里和机器人屏上切换查看该情绪。</span>
+        <div class="mat-preview-info">
+          <span class="muted">实时预览（设备屏镜像）。点下方卡片的「▶ 预览」即可在这里和机器人屏上切换查看该情绪。</span>
+          <button class="qa" id="mat-stop">■ 停止预览（回到默认脸）</button>
+        </div>
       </div>
       <form class="mat-upload" id="mat-upload">
         <input id="mat-name" placeholder="情绪名，如 开心 / happy / dance" autocomplete="off" />
