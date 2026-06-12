@@ -79,4 +79,6 @@ OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_API_KEY=sk-xxx OPENAI_MODEL=gpt
 - [x] `web` 前端单页应用（对话 / 动作编排 / 设置，深色科技风，go:embed 内嵌）
 - [x] `internal/tools` 工具调用 + 设备控制（function-calling）
 - [x] `internal/config` 配置持久化（设置页可增删模型并落盘）
-- [ ] `internal/robot/electronbot` 真机 USB 传输（purego + libusb）— 最后对接
+- [x] `internal/robot/electronbot` 真机 USB 传输（purego + libusb，无 cgo）
+
+真机接入见 [`docs/ELECTRONBOT.md`](docs/ELECTRONBOT.md)。默认 `robot: auto`：装好 libusb、接上 ElectronBot，启动即自动连接；无真机则回退 Mock。

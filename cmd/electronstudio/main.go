@@ -32,6 +32,7 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/llm"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 	"github.com/kingGang/ElectronStudio/internal/robot"
+	"github.com/kingGang/ElectronStudio/internal/robot/electronbot"
 	"github.com/kingGang/ElectronStudio/internal/server"
 	"github.com/kingGang/ElectronStudio/internal/speech"
 	"github.com/kingGang/ElectronStudio/internal/tools"
@@ -108,11 +109,8 @@ type app struct {
 
 // newApp 组装所有依赖。
 func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) {
-	// 机器人：当前用 Mock；后续替换为 electronbot(USB) 实现即可，其余代码不变。
-	bot := robot.NewMock(log)
-	if err := bot.Connect(); err != nil {
-		return nil, fmt.Errorf("连接机器人失败: %w", err)
-	}
+	// 机器人：按配置选择传输（auto 优先尝试真机 USB，失败回退 Mock）。
+	bot := connectRobot(cfg, log)
 
 	// 动作编排：注册内置动作。
 	chor := choreography.NewEngine(bot, choreography.WithLogger(log))
@@ -167,6 +165,34 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	// 工具：注册可供大模型调用的工具（设备控制 / 情绪 / 动作 / 信息）。
 	a.tools = buildTools(a)
 	return a, nil
+}
+
+// connectRobot 依据配置选择并连接机器人传输：
+//   - "mock"：始终使用 Mock；
+//   - "electronbot"：连真机，失败则告警并回退 Mock；
+//   - "auto"（默认）：尝试真机，未检测到则静默回退 Mock。
+//
+// 这样真机插上即用，无真机时开发/演示照常进行。
+func connectRobot(cfg *config.Config, log *slog.Logger) robot.Transport {
+	mode := cfg.Robot
+	if mode == "" {
+		mode = "auto"
+	}
+
+	if mode != "mock" {
+		dev := electronbot.New(log)
+		if err := dev.Connect(); err == nil {
+			return dev
+		} else if mode == "electronbot" {
+			log.Warn("指定 electronbot 但连接失败，回退 Mock", "err", err)
+		} else {
+			log.Info("未检测到 ElectronBot，使用 Mock", "reason", err)
+		}
+	}
+
+	m := robot.NewMock(log)
+	_ = m.Connect()
+	return m
 }
 
 // buildTools 构造工具注册表，副作用以闭包注入（情绪/动作走机器人，台灯为内置设备）。

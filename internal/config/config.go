@@ -31,15 +31,18 @@ type SpeechConfig struct {
 // Config 是应用的完整配置。
 type Config struct {
 	Addr   string        `json:"addr"`
+	Robot  string        `json:"robot,omitempty"` // auto | electronbot | mock
 	Speech SpeechConfig  `json:"speech"`
 	Models []ModelConfig `json:"models"`
 	Active string        `json:"active,omitempty"`
 }
 
 // Default 返回内置默认配置（仅含本地 Echo 模型，保证开箱即跑）。
+// Robot 默认 auto：插上真机即自动连接，否则回退 Mock。
 func Default() *Config {
 	return &Config{
 		Addr:   ":8080",
+		Robot:  "auto",
 		Models: []ModelConfig{{ID: "echo", Name: "本地回声", Type: "echo"}},
 		Active: "echo",
 	}
