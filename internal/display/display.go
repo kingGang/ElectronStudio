@@ -15,3 +15,11 @@ package display
 type Source interface {
 	Frame() []byte
 }
+
+// Face 是"会表达情绪的画面源"：在 Source 之上，可被上层设置情绪与说话状态，
+// 由实现自己决定如何实时渲染（程序动画脸 EmotionSource、素材片 Compositor 等）。
+type Face interface {
+	Source
+	SetEmotion(emotion string) // AI / 用户设定当前情绪
+	SetSpeaking(speaking bool)  // TTS 播放期间为 true，用于口型动画
+}

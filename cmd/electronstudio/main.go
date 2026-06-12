@@ -101,8 +101,8 @@ type app struct {
 	chor    *choreography.Engine
 	llm     *llm.Router
 	bot     robot.Transport
-	driver  *device.Driver         // 统一设备驱动（拥有 Sync）
-	emotion *display.EmotionSource // 屏幕画面源（表情）
+	driver  *device.Driver // 统一设备驱动（拥有 Sync）
+	emotion display.Face   // 屏幕画面源（程序动画脸 + 可选素材片）
 	speech  speech.Service
 	tools   *tools.Registry
 	log     *slog.Logger
@@ -178,9 +178,17 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		},
 	})
 
-	// 画面源（表情）+ 统一设备驱动：驱动以固定帧率把"姿态 + 画面"一并 Sync 给设备，
-	// 并把画面/反馈同步广播给 UI，实现设备屏与界面镜像同步。
-	a.emotion = display.NewEmotionSource()
+	// 画面源：程序实时动画脸（眨眼/口型）+ 可选离线素材片（emotions/<情绪>/*.png）。
+	// 统一设备驱动以固定帧率把"姿态 + 画面"一并 Sync 给设备，并把同一帧广播给 UI，实现镜像同步。
+	face := display.NewEmotionSource()
+	clips, err := display.LoadClips(filepath.Join(filepath.Dir(cfgPath), "emotions"))
+	if err != nil {
+		log.Warn("加载表情素材失败，使用程序动画脸", "err", err)
+	}
+	if len(clips) > 0 {
+		log.Info("已加载表情素材", "情绪数", len(clips))
+	}
+	a.emotion = display.NewCompositor(display.NewClipSource(clips), face)
 	a.driver = device.NewDriver(bot, a.emotion, log, 30, a.onDriverFrame, a.onDriverJoints)
 
 	// 动作编排：把姿态写入驱动；注册内置动作并加载用户录制的动作（同名覆盖内置）。
@@ -466,6 +474,7 @@ func (a *app) finishAssistant(ctx context.Context, content string) {
 			a.log.Warn("语音合成失败", "err", err)
 		}
 	}
+	a.emotion.SetSpeaking(false) // 停止口型动画
 	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStop, Text: content})
 	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
 }
@@ -485,6 +494,7 @@ func (a *app) handleChatWithTools(ctx context.Context, text string) {
 	var pTools []protocol.ToolCall
 	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceSpeaking})
 	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStart})
+	a.emotion.SetSpeaking(true) // 驱动口型动画
 
 	res, err := llm.RunToolLoop(ctx, a.llm, a.historySnapshot(), lt, a.tools.Execute, 5,
 		func(ec llm.ExecutedCall) {
@@ -529,6 +539,7 @@ func (a *app) handleChatStreaming(ctx context.Context, text string) {
 	var content string
 	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceSpeaking})
 	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStart})
+	a.emotion.SetSpeaking(true) // 驱动口型动画
 
 	for chunk := range ch {
 		if chunk.Err != nil {
