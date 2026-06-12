@@ -22,11 +22,12 @@
 后端用**纯 Go**（标准库 `image/gif`，无 cgo、无 ffmpeg/TexturePacker）解码 GIF，按其逐帧处置方式正确合成整帧、帧率自动取自 GIF，
 落盘到 `emotions/` 并**立即热重载**——设备屏与 UI 镜像同步生效。每张卡片可「▶ 预览」（让机器人切到该情绪）或「✕ 删除」（回退程序脸）。
 
-- **视频**（`.mp4/.webm/.mov/.mkv/.avi/.m4v`）：受「主程序无 cgo」约束，视频解码交给外部 **ffmpeg** 子进程
-  （与摄像头采集同一依赖；服务器需装有 ffmpeg）。上传后按约 **20fps** 重采样、等比缩放并**居中裁剪**到 240×240，
-  抽帧落盘为帧序列；抽帧在锁外完成，仅“替换+热重载”持锁，且**抽帧成功后才动旧素材**（失败不丢数据）。
-- 上传走 HTTP `POST /api/materials`，列表/删除走 WebSocket（`materials` 事件 / `material_delete` 命令）。
-- 落盘形式：GIF → `emotions/<情绪>.gif`；视频 → `emotions/<情绪>/`（帧序列 + `clip.json` 记 fps）；静态图片 → `emotions/<情绪>/0001.<ext>`。
+- **视频**（`.mp4/.webm/.mov/.mkv/.avi/.m4v`）：**在浏览器内抽帧，不依赖 ffmpeg**。前端用 `<video>`
+  （浏览器自带的 H.264/VP9/AV1 等解码器）+ `<canvas>` 把每帧等比缩放并**居中裁剪**到 240×240、抽成 PNG（约 15fps，
+  上限 300 帧），再 `POST /api/material-frames` 上传；服务器纯 Go 校验并存帧。支持的格式 = 用户浏览器能播放的一切。
+  （另：直接 `POST /api/materials` 上传**原始**视频会走服务端 ffmpeg 抽帧，供 VerdiBot 等非浏览器 API 客户端用，可选、缺 ffmpeg 时报错。）
+- 上传走 HTTP（`POST /api/materials` 单文件 / `POST /api/material-frames` 帧序列），列表/删除走 WebSocket（`materials` 事件 / `material_delete` 命令）。
+- 落盘形式：GIF → `emotions/<情绪>.gif`；视频/帧序列 → `emotions/<情绪>/`（帧序列 + `clip.json` 记 fps）；静态图片 → `emotions/<情绪>/0001.<ext>`。
 - 下面「方式一/二」是给已有帧序列或图集的进阶用户/批量场景；日常加表情用界面上传即可。
 
 > 已知行为（圆屏取舍，非缺陷）：① 屏幕是 **240×240 圆形黑底**，GIF 的透明/背景区域一律渲染为黑；

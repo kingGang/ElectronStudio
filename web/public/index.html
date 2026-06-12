@@ -120,7 +120,7 @@
         为每个情绪上传一段 <b>GIF / 视频</b>（或一张静态图片），机器人屏幕会用它替代程序动画脸。
         上传后立即生效并镜像到设备屏；没有素材的情绪自动回退到程序脸。
         情绪名支持中文/字母/数字/<code>-</code>/<code>_</code>（如 <code>开心</code>、<code>happy</code>、<code>dance</code>）。
-        <br>视频走 ffmpeg 抽帧（需服务器装有 ffmpeg），按约 20fps 重采样、居中裁剪到圆屏。
+        <br>视频在<b>浏览器内</b>抽帧（用浏览器自带解码器，无需服务器装 ffmpeg），自动缩放并居中裁剪到圆屏。
       </p>
       <form class="mat-upload" id="mat-upload">
         <input id="mat-name" placeholder="情绪名，如 开心 / happy / dance" autocomplete="off" />

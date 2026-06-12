@@ -122,7 +122,8 @@ ElectronBot 屏幕为 240×240。RGB888 一帧像素 = 240×240×3 = 172,800 字
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `POST` | `/api/materials` | `multipart/form-data` 上传：字段 `name`（情绪名，Unicode 字母/数字含中文与 `_` `-`，≤24 字；拒绝 `.` `/` `\` 等路径字符）+ 文件 `file`（`.gif` / `.png` / `.jpg` / 视频 `.mp4/.webm/.mov/.mkv/.avi/.m4v`）。落盘到 `emotions/` 并热重载，成功返回 `{"ok":true,"name":"..."}`；非法名/无效文件返回 `400`。上限 64 MiB。视频经 ffmpeg 抽帧（服务器需装 ffmpeg，否则该类型返回 400 提示） |
+| `POST` | `/api/materials` | `multipart/form-data` 上传单个文件：字段 `name`（情绪名，Unicode 字母/数字含中文与 `_` `-`，≤24 字；拒绝 `.` `/` `\` 等路径字符）+ 文件 `file`（`.gif` / `.png` / `.jpg`；或原始视频 `.mp4/...`，仅此情况走服务端 ffmpeg，可选）。落盘到 `emotions/` 并热重载，成功返回 `{"ok":true,"name":"..."}`；非法名/无效文件返回 `400`。上限 64 MiB |
+| `POST` | `/api/material-frames` | `multipart/form-data` 上传**帧序列**（前端浏览器对视频抽帧的结果，无需 ffmpeg）：字段 `name` + `fps`（整数）+ 多个 `frame`（PNG/JPEG，按上传顺序为帧序，≤600 帧）。落盘为 `emotions/<情绪>/` 帧序列 + `clip.json`，热重载并广播 `materials` |
 | `GET` | `/api/material-thumb?name=<情绪>` | 返回该情绪动画**首帧**的 240×240 PNG 缩略图；无此素材返回 `404` |
 
 落盘形式（与 `display.LoadClips` 的识别规则一致）：GIF → `emotions/<情绪>.gif`（纯 Go 解码）；静态图片 → `emotions/<情绪>/0001.<ext>`。

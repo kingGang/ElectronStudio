@@ -491,6 +491,67 @@
     });
   }
 
+  // 视频在浏览器内抽帧：用 <video>（浏览器自带任意编解码器解码）+ <canvas> 等比缩放居中裁剪到
+  // 240×240，抽成 PNG 帧后上传——服务器纯 Go 收帧，无需 ffmpeg，支持的格式 = 浏览器能播放的一切。
+  const VIDEO_RE = /\.(mp4|webm|mov|mkv|avi|m4v)$/i;
+  function isVideoFile(file) { return /^video\//.test(file.type) || VIDEO_RE.test(file.name); }
+
+  function seekTo(video, t) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (done) return; done = true; video.removeEventListener('seeked', finish); resolve(); };
+      video.addEventListener('seeked', finish);
+      try { video.currentTime = t; } catch { finish(); }
+      setTimeout(finish, 3000); // 兜底：个别浏览器/编码不触发 seeked 时不卡死
+    });
+  }
+
+  async function extractVideoFrames(file, size = 240, fps = 15, maxFrames = 300) {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    video.muted = true; video.playsInline = true; video.preload = 'auto'; video.src = url;
+    try {
+      await new Promise((res, rej) => {
+        video.onloadedmetadata = () => res();
+        video.onerror = () => rej(new Error('浏览器无法解码该视频'));
+      });
+      const dur = video.duration;
+      if (!isFinite(dur) || dur <= 0) throw new Error('视频时长无效');
+      const n = Math.max(1, Math.min(maxFrames, Math.round(dur * fps)));
+      const canvas = document.createElement('canvas');
+      canvas.width = size; canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      const frames = [];
+      for (let i = 0; i < n; i++) {
+        const t = Math.min(dur - 0.001, (i + 0.5) * dur / n);
+        await seekTo(video, t);
+        const vw = video.videoWidth || size, vh = video.videoHeight || size;
+        const scale = Math.max(size / vw, size / vh); // cover：放大填满后居中裁剪
+        const dw = vw * scale, dh = vh * scale;
+        ctx.clearRect(0, 0, size, size);
+        ctx.drawImage(video, (size - dw) / 2, (size - dh) / 2, dw, dh);
+        const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+        if (blob) frames.push(blob);
+      }
+      return { frames, fps };
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function uploadVideo(name, file, submit) {
+    submit.textContent = '抽帧中…';
+    const { frames, fps } = await extractVideoFrames(file);
+    if (!frames.length) throw new Error('未能从视频抽取到帧');
+    submit.textContent = `上传 ${frames.length} 帧…`;
+    const fd = new FormData();
+    fd.append('name', name);
+    fd.append('fps', String(fps));
+    frames.forEach((b, i) => fd.append('frame', b, String(i + 1).padStart(4, '0') + '.png'));
+    const res = await fetch('/api/material-frames', { method: 'POST', body: fd });
+    if (!res.ok) throw new Error((await res.text()).trim());
+  }
+
   function setupMaterials() {
     const form = $('mat-upload');
     if (!form) return;
@@ -501,23 +562,25 @@
       const file = fileInp.files && fileInp.files[0];
       if (!name) { toast('请填写情绪名'); return; }
       if (!/^[\p{L}\p{N}_-]{1,24}$/u.test(name)) { toast('情绪名支持中文/字母/数字/-/_（≤24 字）'); return; }
-      if (!file) { toast('请选择 GIF 或图片文件'); return; }
+      if (!file) { toast('请选择 GIF / 视频 / 图片文件'); return; }
 
-      const fd = new FormData();
-      fd.append('name', name);
-      fd.append('file', file);
       submit.disabled = true;
       submit.textContent = '上传中…';
       try {
-        const res = await fetch('/api/materials', { method: 'POST', body: fd });
-        if (res.ok) {
+        if (isVideoFile(file)) {
+          await uploadVideo(name, file, submit); // 浏览器抽帧 → /api/material-frames（无 ffmpeg）
           toast(`已上传「${name}」`);
           form.reset();
         } else {
-          toast('上传失败：' + (await res.text()).trim());
+          const fd = new FormData();
+          fd.append('name', name);
+          fd.append('file', file);
+          const res = await fetch('/api/materials', { method: 'POST', body: fd });
+          if (res.ok) { toast(`已上传「${name}」`); form.reset(); }
+          else { toast('上传失败：' + (await res.text()).trim()); }
         }
       } catch (err) {
-        toast('上传失败：' + err);
+        toast('上传失败：' + (err.message || err));
       } finally {
         submit.disabled = false;
         submit.textContent = '⬆ 上传';

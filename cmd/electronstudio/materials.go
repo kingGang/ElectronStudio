@@ -15,6 +15,7 @@ package main
 // 上传/删除后调用 reloadClips 热重载，立即生效并镜像到设备屏。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,9 +23,11 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -36,12 +39,14 @@ import (
 )
 
 const (
-	maxUploadBytes = 64 << 20          // 单次素材上传大小上限（视频偏大，放宽到 64 MiB）
-	videoFPS       = 20                // 视频抽帧的目标帧率（兼顾流畅与体积；上限 maxGIFFrames 帧）
-	videoTimeout   = 90 * time.Second  // ffmpeg 抽帧超时，防异常输入卡死
+	maxUploadBytes    = 64 << 20         // 单次素材上传大小上限（视频/帧序列偏大，放宽到 64 MiB）
+	maxMaterialFrames = 600              // 帧序列素材的帧数上限（与 GIF/视频一致）
+	videoFPS          = 20               // 服务端 ffmpeg 抽帧的目标帧率（前端浏览器抽帧自带 fps）
+	videoTimeout      = 90 * time.Second // ffmpeg 抽帧超时，防异常输入卡死
 )
 
-// videoExts 是支持的视频扩展名（经 ffmpeg 抽帧）。
+// videoExts 是服务端 ffmpeg 抽帧支持的视频扩展名（直接 POST 原始视频到 /api/materials 时用，可选）。
+// 注意：前端 UI 的视频走「浏览器抽帧 → /api/material-frames」，不需要 ffmpeg。
 var videoExts = map[string]bool{
 	".mp4": true, ".webm": true, ".mov": true, ".mkv": true, ".avi": true, ".m4v": true,
 }
@@ -49,7 +54,110 @@ var videoExts = map[string]bool{
 // materialRoutes 在 HTTP mux 上挂载素材管理的 REST 接口。
 func (a *app) materialRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/materials", a.handleMaterialUpload)
+	mux.HandleFunc("/api/material-frames", a.handleMaterialFrames)
 	mux.HandleFunc("/api/material-thumb", a.handleMaterialThumb)
+}
+
+// handleMaterialFrames 接收「前端已抽好的帧序列」并落盘为 emotions/<情绪>/ 帧序列。
+//
+// 视频由浏览器自带解码器抽帧（见前端：<video>+<canvas> 抽成 240×240 PNG），服务器只需纯 Go
+// 校验并存帧——彻底不依赖 ffmpeg，且支持的视频格式 = 用户浏览器能播放的一切。
+// multipart 字段：name（情绪名）、fps（整数）、frame（多个 PNG/JPEG 帧，按上传顺序为帧序）。
+func (a *app) handleMaterialFrames(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "仅支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		http.Error(w, "上传过大或格式错误", http.StatusBadRequest)
+		return
+	}
+	name, ok := sanitizeMaterialName(r.FormValue("name"))
+	if !ok {
+		http.Error(w, "情绪名非法（支持中文/字母/数字/-/_，≤24 字）", http.StatusBadRequest)
+		return
+	}
+	fps, _ := strconv.Atoi(r.FormValue("fps"))
+	if fps <= 0 {
+		fps = videoFPS
+	}
+	if fps > 30 {
+		fps = 30 // 设备驱动 30fps，clip 帧率不超过它即可
+	}
+
+	var files []*multipart.FileHeader
+	if r.MultipartForm != nil {
+		files = r.MultipartForm.File["frame"]
+	}
+	if len(files) == 0 {
+		http.Error(w, "未收到任何帧", http.StatusBadRequest)
+		return
+	}
+	if len(files) > maxMaterialFrames {
+		http.Error(w, fmt.Sprintf("帧数过多（上限 %d）", maxMaterialFrames), http.StatusBadRequest)
+		return
+	}
+
+	if err := os.MkdirAll(a.emotionsDir, 0o755); err != nil {
+		a.log.Warn("创建素材目录失败", "err", err)
+		http.Error(w, "保存失败", http.StatusInternalServerError)
+		return
+	}
+	// 落盘到暂存目录，全部成功后再原子替换旧素材（失败不丢数据）。
+	stage := filepath.Join(a.emotionsDir, ".staging-"+name)
+	_ = os.RemoveAll(stage)
+	defer os.RemoveAll(stage)
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		http.Error(w, "保存失败", http.StatusInternalServerError)
+		return
+	}
+	for i, fh := range files {
+		if err := saveFrame(stage, i+1, fh); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	_ = os.WriteFile(filepath.Join(stage, "clip.json"), []byte(fmt.Sprintf(`{"fps":%d}`, fps)), 0o644)
+
+	a.matMu.Lock()
+	defer a.matMu.Unlock()
+	a.removeMaterialFiles(name)
+	if err := os.Rename(stage, filepath.Join(a.emotionsDir, name)); err != nil {
+		a.log.Warn("替换素材失败", "name", name, "err", err)
+		http.Error(w, "保存失败", http.StatusInternalServerError)
+		return
+	}
+	if err := a.reloadClips(); err != nil {
+		a.log.Warn("素材热重载失败", "err", err)
+	}
+	a.broadcastMaterials()
+	writeJSON(w, map[string]any{"ok": true, "name": name, "frames": len(files)})
+}
+
+// saveFrame 校验单帧为合理尺寸的 PNG/JPEG 并写入暂存目录（编号 %04d，决定帧序）。
+func saveFrame(stage string, idx int, fh *multipart.FileHeader) error {
+	f, err := fh.Open()
+	if err != nil {
+		return fmt.Errorf("读取帧失败")
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 8<<20)) // 单帧 ≤8MiB（240×240 PNG 远小于此）
+	if err != nil {
+		return fmt.Errorf("读取帧失败")
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || (format != "png" && format != "jpeg") {
+		return fmt.Errorf("帧不是有效的 PNG/JPEG")
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > 4096 || cfg.Height > 4096 {
+		return fmt.Errorf("帧尺寸异常")
+	}
+	ext := ".png"
+	if format == "jpeg" {
+		ext = ".jpg"
+	}
+	return os.WriteFile(filepath.Join(stage, fmt.Sprintf("%04d%s", idx, ext)), data, 0o644)
 }
 
 // handleMaterialUpload 接收 multipart 上传（字段 name + 文件 file），落盘并热重载。
