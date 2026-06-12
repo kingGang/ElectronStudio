@@ -197,6 +197,9 @@
     mirrorCtx.putImageData(img, 0, 0);
     el.mirror.style.display = 'block';
     el.faceFallback.style.display = 'none';
+    // 同步到素材页的实时预览画布（若存在）——点「▶ 预览」即可在素材页看到该情绪。
+    const mc = $('mat-mirror');
+    if (mc) mc.getContext('2d').putImageData(img, 0, 0);
   }
 
   // ======================================================================

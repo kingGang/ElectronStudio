@@ -122,6 +122,10 @@
         情绪名支持中文/字母/数字/<code>-</code>/<code>_</code>（如 <code>开心</code>、<code>happy</code>、<code>dance</code>）。
         <br>视频在<b>浏览器内</b>抽帧（用浏览器自带解码器，无需服务器装 ffmpeg），自动缩放并居中裁剪到圆屏。
       </p>
+      <div class="mat-preview-box">
+        <div class="mat-screen"><canvas id="mat-mirror" width="240" height="240"></canvas></div>
+        <span class="muted">实时预览（设备屏镜像）。点下方卡片的「▶ 预览」即可在这里和机器人屏上切换查看该情绪。</span>
+      </div>
       <form class="mat-upload" id="mat-upload">
         <input id="mat-name" placeholder="情绪名，如 开心 / happy / dance" autocomplete="off" />
         <input id="mat-file" type="file" accept="image/gif,image/png,image/jpeg,video/mp4,video/webm,video/quicktime,video/x-matroska,.mp4,.webm,.mov,.mkv,.avi,.m4v" />
