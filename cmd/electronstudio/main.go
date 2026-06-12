@@ -33,6 +33,7 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/config"
 	"github.com/kingGang/ElectronStudio/internal/device"
 	"github.com/kingGang/ElectronStudio/internal/display"
+	"github.com/kingGang/ElectronStudio/internal/gesture"
 	"github.com/kingGang/ElectronStudio/internal/llm"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 	"github.com/kingGang/ElectronStudio/internal/robot"
@@ -82,12 +83,19 @@ func main() {
 	}
 	defer a.speech.Close()
 
+	// 启动手势服务（Mock 为空操作；Sidecar 连接外部识别进程）。
+	if err := a.gesture.Start(ctx); err != nil {
+		log.Warn("手势服务启动失败", "err", err)
+	}
+	defer a.gesture.Close()
+
 	// 启动设备驱动循环（统一推帧 + 同步）。
 	go a.driver.Run(ctx)
 
-	// 消费入站命令与上行语音事件。
+	// 消费入站命令、上行语音事件与手势事件。
 	go a.dispatchLoop(ctx)
 	go a.speechLoop(ctx)
+	go a.gestureLoop(ctx)
 
 	if err := a.srv.Serve(ctx, cfg.Addr); err != nil {
 		log.Error("服务退出", "err", err)
@@ -105,6 +113,7 @@ type app struct {
 	screen  *display.Compositor   // 屏幕画面合成（摄像头 / 素材片 / 程序动画脸）
 	camera  *display.CameraSource // 摄像头采集（可为 nil）
 	speech  speech.Service
+	gesture gesture.Service
 	tools   *tools.Registry
 	log     *slog.Logger
 
@@ -157,10 +166,20 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		voice = speech.NewMock(log)
 	}
 
+	// 手势：默认 Mock；配置了 sidecar 地址则对接真实手势识别（MediaPipe 等）。
+	var ges gesture.Service
+	if url := cfg.Gesture.SidecarURL; url != "" {
+		ges = gesture.NewSidecar(url, log)
+		log.Info("已配置手势 sidecar", "url", url)
+	} else {
+		ges = gesture.NewMock(log)
+	}
+
 	a := &app{
 		llm:         router,
 		bot:         bot,
 		speech:      voice,
+		gesture:     ges,
 		log:         log,
 		cfg:         cfg,
 		cfgPath:     cfgPath,
@@ -697,6 +716,46 @@ func (a *app) deleteAction(name string) {
 		a.log.Warn("保存动作失败", "err", err)
 	}
 	a.srv.Broadcast(a.statusSnapshot())
+}
+
+// gestureLoop 消费手势事件并映射为机器人行为。
+func (a *app) gestureLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-a.gesture.Events():
+			if !ok {
+				return
+			}
+			a.handleGesture(ctx, ev)
+		}
+	}
+}
+
+// handleGesture 把一个手势映射为行为，并广播给 UI。
+func (a *app) handleGesture(ctx context.Context, ev gesture.Event) {
+	a.log.Info("识别到手势", "name", ev.Name, "conf", ev.Confidence)
+	a.srv.Broadcast(protocol.GestureEvent{Name: ev.Name, Confidence: ev.Confidence})
+
+	switch ev.Name {
+	case "wave": // 挥手 → 看一眼打招呼
+		a.handleGreet(ctx)
+	case "thumbs_up": // 点赞 → 开心 + 点头
+		a.setEmotion("happy")
+		_ = a.chor.Play(ctx, "nod", 1)
+	case "victory": // 比耶 → 庆祝
+		a.setEmotion("happy")
+		_ = a.chor.Play(ctx, "cheer", 1)
+	case "open_palm", "stop": // 张开手掌 → 停止当前动作/语音
+		a.chor.Stop()
+		a.speech.Stop()
+		a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
+	case "fist": // 握拳 → 摇头
+		_ = a.chor.Play(ctx, "shake", 1)
+	default:
+		a.log.Debug("未映射的手势", "name", ev.Name)
+	}
 }
 
 // handleGreet 看一眼打招呼：笑脸 + 挥手 + （有摄像头则看一眼）+ 说一句招呼。

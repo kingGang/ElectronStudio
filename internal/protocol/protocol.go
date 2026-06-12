@@ -36,6 +36,7 @@ const (
 	TypeEmotion    Type = "emotion"     // 当前情绪变化
 	TypeJoints     Type = "joints"      // 6 轴舵机真实角度反馈
 	TypeError      Type = "error"       // 错误通知
+	TypeGesture    Type = "gesture"     // 识别到手势
 	TypeLog        Type = "log"         // 调试日志（可选，供前端日志面板使用）
 )
 

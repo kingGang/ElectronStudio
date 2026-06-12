@@ -1,0 +1,5 @@
+# 手势 sidecar 依赖（独立 Python 环境）。推荐 Python 3.9 ~ 3.12。
+mediapipe>=0.10.9    # 手势识别（GestureRecognizer，内置手势分类）
+opencv-python>=4.8   # 摄像头采集
+websockets>=12.0     # 与 Go 主程序桥接
+numpy>=1.24

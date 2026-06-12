@@ -11,7 +11,7 @@
   const SrvType = {
     Status: 'status', VoiceState: 'voice_state', VAD: 'vad', Wake: 'wake',
     ASR: 'asr', Chat: 'chat', TTS: 'tts', Emotion: 'emotion',
-    Joints: 'joints', Error: 'error', Log: 'log',
+    Joints: 'joints', Error: 'error', Gesture: 'gesture', Log: 'log',
   };
   const CliType = {
     SendText: 'send_text', Mic: 'mic', Interrupt: 'interrupt',
@@ -92,6 +92,7 @@
       case SrvType.Chat: onChat(p); break;
       case SrvType.Emotion: el.face.dataset.emotion = p.emotion || 'neutral'; break;
       case SrvType.Joints: onJoints(p); break;
+      case SrvType.Gesture: toast('识别到手势：' + (p.name || '')); break;
       case SrvType.Error: toast(p.message || '发生错误'); break;
       default: break;
     }

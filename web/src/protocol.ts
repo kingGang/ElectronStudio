@@ -25,6 +25,7 @@ export const ServerType = {
   Emotion: 'emotion',
   Joints: 'joints',
   Error: 'error',
+  Gesture: 'gesture',
   Log: 'log',
 } as const
 

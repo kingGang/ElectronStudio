@@ -28,6 +28,11 @@ type SpeechConfig struct {
 	SidecarURL string `json:"sidecar_url,omitempty"`
 }
 
+// GestureConfig 描述手势 sidecar 配置。
+type GestureConfig struct {
+	SidecarURL string `json:"sidecar_url,omitempty"`
+}
+
 // CameraConfig 描述摄像头采集配置（经 ffmpeg 抓取 UVC 摄像头）。
 type CameraConfig struct {
 	Enabled     bool   `json:"enabled,omitempty"`
@@ -40,8 +45,9 @@ type CameraConfig struct {
 type Config struct {
 	Addr   string        `json:"addr"`
 	Robot  string        `json:"robot,omitempty"` // auto | electronbot | mock
-	Speech SpeechConfig  `json:"speech"`
-	Camera CameraConfig  `json:"camera"`
+	Speech  SpeechConfig  `json:"speech"`
+	Gesture GestureConfig `json:"gesture"`
+	Camera  CameraConfig  `json:"camera"`
 	Models []ModelConfig `json:"models"`
 	Active string        `json:"active,omitempty"`
 }

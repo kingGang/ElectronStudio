@@ -23,9 +23,10 @@ web/.vite/
 
 # ===== sidecar (二进制/模型/用户配置不入库) =====
 /sidecars/**/bin/
+/sidecars/**/.venv/
 /sidecars/speech/models/
 /sidecars/speech/config.json
-/sidecars/speech/.venv/
+/sidecars/gesture/*.task
 __pycache__/
 *.onnx
 *.bin

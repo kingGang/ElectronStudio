@@ -233,6 +233,15 @@ type ErrorEvent struct {
 // Type 实现 Payload。
 func (ErrorEvent) Type() Type { return TypeError }
 
+// GestureEvent 表示识别到一个手势（来自手势 sidecar）。
+type GestureEvent struct {
+	Name       string  `json:"name"`
+	Confidence float32 `json:"confidence,omitempty"`
+}
+
+// Type 实现 Payload。
+func (GestureEvent) Type() Type { return TypeGesture }
+
 // LogEvent 向前端调试面板推送一条日志（可选功能）。
 type LogEvent struct {
 	Level   string `json:"level"` // debug | info | warn | error
