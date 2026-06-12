@@ -369,6 +369,7 @@
     btn.addEventListener('click', () => send(CliType.SetEmotion, { emotion: btn.dataset.emotion }));
   });
   el.interrupt.addEventListener('click', () => send(CliType.Interrupt, { reason: 'user' }));
+  $('btn-greet').addEventListener('click', () => send(CliType.Greet, {}));
   el.model.addEventListener('change', () => send(CliType.SelectModel, { id: el.model.value }));
 
   let micOn = false;

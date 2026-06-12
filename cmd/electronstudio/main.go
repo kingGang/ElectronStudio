@@ -480,6 +480,9 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 			a.handleCamera(ctx, cmd.Enable)
 		}
 
+	case protocol.TypeGreet:
+		go a.handleGreet(ctx) // 看一眼打招呼，放后台
+
 	default:
 		a.log.Debug("未处理的命令类型", "type", in.Env.Type)
 	}
@@ -694,6 +697,37 @@ func (a *app) deleteAction(name string) {
 		a.log.Warn("保存动作失败", "err", err)
 	}
 	a.srv.Broadcast(a.statusSnapshot())
+}
+
+// handleGreet 看一眼打招呼：笑脸 + 挥手 + （有摄像头则看一眼）+ 说一句招呼。
+func (a *app) handleGreet(ctx context.Context) {
+	a.setEmotion("happy")
+	_ = a.chor.Play(ctx, "wave", 1)
+
+	text := a.greetingText(ctx)
+
+	id := a.nextMsgID()
+	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceSpeaking})
+	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStart})
+	a.screen.SetSpeaking(true)
+	a.srv.Broadcast(protocol.ChatEvent{
+		ID: id, Role: protocol.RoleAssistant, Content: text, Status: protocol.ChatFinal,
+	})
+	a.finishAssistant(ctx, text)
+}
+
+// greetingText 生成招呼语：有摄像头则让视觉模型"看一眼"后打招呼，否则用友好问候兜底。
+func (a *app) greetingText(ctx context.Context) string {
+	if a.camera != nil {
+		if jpeg, err := a.captureJPEG(ctx); err == nil {
+			if t, err := a.llm.Vision(ctx, jpeg,
+				"你是桌面机器人小电。看一眼面前的画面，用一句友好、简短的中文主动跟对方打招呼（不超过20字）。"); err == nil && t != "" {
+				return t
+			}
+		}
+	}
+	greetings := []string{"你好呀，我是小电！", "嗨，见到你真高兴！", "你好，今天过得怎么样？"}
+	return greetings[int(time.Now().UnixNano())%len(greetings)]
 }
 
 // handleCamera 开关屏幕显示摄像头画面：开启时启动 ffmpeg 采集并切到摄像头，关闭时停采并切回表情脸。

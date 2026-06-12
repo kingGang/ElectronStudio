@@ -45,6 +45,7 @@ export const ClientType = {
   RecordStop: 'record_stop',
   DeleteAction: 'delete_action',
   Camera: 'camera',
+  Greet: 'greet',
 } as const
 
 // ===========================================================================

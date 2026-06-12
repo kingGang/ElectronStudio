@@ -171,3 +171,9 @@ type CameraCommand struct {
 
 // Type 实现 Payload。
 func (CameraCommand) Type() Type { return TypeCamera }
+
+// GreetCommand 触发"看一眼打招呼"（无参数）。
+type GreetCommand struct{}
+
+// Type 实现 Payload。
+func (GreetCommand) Type() Type { return TypeGreet }
