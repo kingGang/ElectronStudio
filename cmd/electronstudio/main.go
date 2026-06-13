@@ -131,6 +131,7 @@ type app struct {
 	mm      *minimax.Client    // MiniMax 多模态(图片/语音)客户端；nil=未配置
 	player  *audioout.Player   // 设备侧 mp3 播放(mpg123)
 	genimg  *genImgStore       // 生成图暂存(供页面 HTTP 取回)
+	genaudio *genImgStore      // 生成音频(音乐)暂存(供页面 HTTP 取回)
 	weather *weather.Client
 
 	speakMu     sync.Mutex         // 保护 speakCancel
@@ -277,6 +278,7 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	}
 	a.player = audioout.New(cfg.Music.Mpg123, log) // 设备侧 mp3 播放复用 mpg123 路径
 	a.genimg = newGenImgStore()
+	a.genaudio = newGenImgStore()
 
 	// 工具：注册可供大模型调用的工具（设备控制 / 情绪 / 动作 / 信息 / 音乐 / 天气 / 提醒 / 图片）。
 	a.tools = buildTools(a)
@@ -433,10 +435,13 @@ func buildTools(a *app) *tools.Registry {
 		}))
 	}
 
-	// 文生图：配置了 MiniMax 才提供（大模型可"画一张…"，按 image_out 路由到设备屏/页面）。
+	// 文生图 / 音乐生成：配置了 MiniMax 才提供。
 	if a.mm != nil {
 		reg.Register(tools.ImageTool(func(ctx context.Context, prompt string) (string, error) {
 			return a.handleGenerateImage(ctx, prompt)
+		}))
+		reg.Register(tools.MusicGenTool(func(ctx context.Context, prompt, lyrics string) (string, error) {
+			return a.handleGenerateMusic(ctx, prompt, lyrics)
 		}))
 	}
 	return reg

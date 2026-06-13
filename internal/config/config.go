@@ -55,6 +55,7 @@ type MiniMaxConfig struct {
 	VoiceID    string `json:"voice_id,omitempty"`    // T2A 音色，默认 male-qn-qingse
 	TTSModel   string `json:"tts_model,omitempty"`   // 语音模型，默认 speech-02-hd
 	ImageModel string `json:"image_model,omitempty"` // 文生图模型，默认 image-01
+	MusicModel string `json:"music_model,omitempty"` // 音乐模型，默认 music-1.5
 }
 
 // IOConfig 配置输入/输出的去向（设备 vs 页面）。设备=ElectronBot 外设(主)，页面=调试镜像。

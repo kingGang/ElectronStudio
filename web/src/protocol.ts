@@ -162,9 +162,11 @@ export interface ChatEvent {
   status: ChatStatus
 }
 export interface AudioEvent {
-  format: string // mp3 | wav ...
-  data: string   // base64 音频
+  format?: string // mp3 | wav ...
+  data?: string   // base64 音频（小段语音）
+  url?: string    // 或 HTTP 取回地址（较大音频如音乐）
   text?: string
+  stop?: boolean  // true=停止页面当前播放（barge-in）
 }
 export interface TTSEvent {
   state: TTSState

@@ -24,10 +24,11 @@ import (
 
 // 默认模型与音色（可被调用方覆盖）。
 const (
-	DefaultTTSModel   = "speech-02-hd"     // 语音合成模型
-	DefaultImageModel = "image-01"         // 文生图模型
-	DefaultVoiceID    = "male-qn-qingse"   // 青涩青年音（系统音色）
-	defaultTimeout    = 60 * time.Second
+	DefaultTTSModel   = "speech-02-hd"      // 语音合成模型
+	DefaultImageModel = "image-01"          // 文生图模型
+	DefaultMusicModel = "music-1.5"         // 音乐生成模型（已实测可用）
+	DefaultVoiceID    = "male-qn-qingse"    // 青涩青年音（系统音色）
+	defaultTimeout    = 120 * time.Second   // 含图片/音乐等较慢的同步生成
 )
 
 // Client 是一个 MiniMax 开放平台客户端。并发安全（无可变状态）。
@@ -225,6 +226,75 @@ func (c *Client) GenerateImage(ctx context.Context, prompt string, opt ImageOpti
 		return nil, err
 	}
 	return c.download(ctx, urls[0])
+}
+
+// ---------------------------------------------------------------------------
+// 音乐生成（Music Generation）
+// ---------------------------------------------------------------------------
+
+// MusicOptions 配置一次音乐生成。零值字段使用默认。
+type MusicOptions struct {
+	Model      string // 默认 DefaultMusicModel
+	Lyrics     string // 可选歌词（含 [verse]/[chorus] 等标记）；为空则倾向纯音乐
+	Format     string // 音频格式，默认 mp3
+	SampleRate int    // 默认 44100
+}
+
+type musicAudioSetting struct {
+	SampleRate int    `json:"sample_rate,omitempty"`
+	Bitrate    int    `json:"bitrate,omitempty"`
+	Format     string `json:"format,omitempty"`
+}
+type musicRequest struct {
+	Model        string            `json:"model"`
+	Prompt       string            `json:"prompt"`
+	Lyrics       string            `json:"lyrics,omitempty"`
+	OutputFormat string            `json:"output_format"`
+	AudioSetting musicAudioSetting `json:"audio_setting,omitempty"`
+}
+type musicResponse struct {
+	Data struct {
+		Audio string `json:"audio"` // hex 编码音频
+	} `json:"data"`
+	BaseResp baseResp `json:"base_resp"`
+}
+
+// GenerateMusic 按 prompt（风格/情绪/主题）生成一段音乐，返回音频字节（默认 mp3）。
+// lyrics 可选；同步返回（data.audio 为 hex，解码即音频）。
+func (c *Client) GenerateMusic(ctx context.Context, prompt string, opt MusicOptions) ([]byte, error) {
+	if prompt == "" {
+		return nil, fmt.Errorf("minimax: 音乐提示词为空")
+	}
+	sr := opt.SampleRate
+	if sr <= 0 {
+		sr = 44100
+	}
+	reqBody := musicRequest{
+		Model:        orDefault(opt.Model, DefaultMusicModel),
+		Prompt:       prompt,
+		Lyrics:       opt.Lyrics,
+		OutputFormat: "hex",
+		AudioSetting: musicAudioSetting{SampleRate: sr, Bitrate: 256000, Format: orDefault(opt.Format, "mp3")},
+	}
+	data, err := c.post(ctx, "/music_generation", reqBody)
+	if err != nil {
+		return nil, err
+	}
+	var r musicResponse
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("minimax: 解析音乐响应失败: %w", err)
+	}
+	if r.BaseResp.StatusCode != 0 {
+		return nil, fmt.Errorf("minimax: 音乐生成失败 (%d): %s", r.BaseResp.StatusCode, r.BaseResp.StatusMsg)
+	}
+	if r.Data.Audio == "" {
+		return nil, fmt.Errorf("minimax: 音乐响应无音频数据")
+	}
+	audio, err := hex.DecodeString(r.Data.Audio)
+	if err != nil {
+		return nil, fmt.Errorf("minimax: 音乐 hex 解码失败: %w", err)
+	}
+	return audio, nil
 }
 
 // download 下载一个 URL 的内容（用于取回生成的图片字节）。

@@ -142,6 +142,29 @@ func ImageTool(gen func(ctx context.Context, prompt string) (string, error)) Too
 	}
 }
 
+// MusicGenTool 构造"生成音乐"工具：按描述（可选歌词）用 MiniMax 生成一段音乐。gen 由上层注入。
+func MusicGenTool(gen func(ctx context.Context, prompt, lyrics string) (string, error)) Tool {
+	schema := objectSchema(
+		`{"prompt":{"type":"string","description":"音乐风格/情绪/主题的描述，如『轻快治愈的电子乐』"},"lyrics":{"type":"string","description":"可选歌词；留空则生成纯音乐"}}`,
+		"prompt")
+	return Tool{
+		Spec: Spec{Name: "generate_music", Description: "用 AI 生成一段音乐（可给风格描述与可选歌词），并播放出来", Parameters: schema},
+		Handler: func(ctx context.Context, args string) (string, error) {
+			var p struct {
+				Prompt string `json:"prompt"`
+				Lyrics string `json:"lyrics"`
+			}
+			if err := json.Unmarshal([]byte(args), &p); err != nil {
+				return "", fmt.Errorf("参数解析失败: %w", err)
+			}
+			if p.Prompt == "" {
+				return "", fmt.Errorf("需提供 prompt")
+			}
+			return gen(ctx, p.Prompt, p.Lyrics)
+		},
+	}
+}
+
 // MusicTool 构造"放首歌"工具：按关键词搜索并播放。play 由上层注入（接音乐服务）。
 func MusicTool(play func(ctx context.Context, query string) (string, error)) Tool {
 	schema := objectSchema(`{"query":{"type":"string","description":"要播放的歌曲名或歌手名"}}`, "query")

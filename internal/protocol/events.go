@@ -257,7 +257,8 @@ func (ScheduleListEvent) Type() Type { return TypeScheduleList }
 // Stop=true 表示打断：让页面停止当前播放（此时 Data 为空）。
 type AudioEvent struct {
 	Format string `json:"format,omitempty"` // mp3 | wav ...
-	Data   string `json:"data,omitempty"`   // base64 编码的音频字节
+	Data   string `json:"data,omitempty"`   // base64 编码的音频字节（小段语音用）
+	URL    string `json:"url,omitempty"`    // 或给一个 HTTP 取回地址（较大音频如音乐用）
 	Text   string `json:"text,omitempty"`
 	Stop   bool   `json:"stop,omitempty"` // true=停止页面当前播放（barge-in）
 }

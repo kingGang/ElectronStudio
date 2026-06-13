@@ -410,10 +410,16 @@
     if (!p) return;
     stopAudio();              // 先停上一段（打断/新段都先停）
     if (p.stop) return;       // 仅停止（barge-in）
-    if (!p.data) return;
-    try {
+    let src = null;
+    if (p.url) {
+      src = p.url;            // 较大音频（音乐）走 HTTP URL
+    } else if (p.data) {
       const mime = (!p.format || p.format === 'mp3') ? 'mpeg' : p.format; // mp3 的标准 MIME 是 audio/mpeg
-      currentAudio = new Audio('data:audio/' + mime + ';base64,' + p.data);
+      src = 'data:audio/' + mime + ';base64,' + p.data; // 小段语音走 base64
+    }
+    if (!src) return;
+    try {
+      currentAudio = new Audio(src);
       currentAudio.play().catch(() => {}); // 自动播放被拦时静默（用户已有交互一般可播）
     } catch (_) { /* 忽略 */ }
   }

@@ -209,3 +209,49 @@ func (a *app) handleGenerateImage(ctx context.Context, prompt string) (string, e
 	}
 	return "已生成并显示图片：" + prompt, nil
 }
+
+// handleGenerateMusic 是 generate_music 工具的执行体：用 MiniMax 生成音乐并按 audio_out 路由播放。
+// 设备侧经 mpg123（可被打断）；页面侧存储后以 URL 推给浏览器播放（音乐较大，不走 base64）。
+func (a *app) handleGenerateMusic(ctx context.Context, prompt, lyrics string) (string, error) {
+	if a.mm == nil {
+		return "", fmt.Errorf("未配置 MiniMax，无法生成音乐")
+	}
+	io := a.ioSnapshot()
+	if io.AudioOut == "off" {
+		return "音频输出已关闭（audio_out=off）", nil
+	}
+	mp3, err := a.mm.GenerateMusic(ctx, prompt, minimax.MusicOptions{Model: io.MM.MusicModel, Lyrics: lyrics})
+	if err != nil {
+		return "", err
+	}
+	if io.AudioOut == "device" || io.AudioOut == "both" {
+		sctx, cancel := context.WithCancel(context.Background())
+		a.setSpeakCancel(cancel) // 复用"当前设备音频"取消槽，interrupt 可停
+		go func() {
+			if e := a.player.Play(sctx, mp3); e != nil && sctx.Err() == nil {
+				a.log.Warn("设备播放音乐失败（确认已装 mpg123）", "err", e)
+			}
+		}()
+	}
+	if io.AudioOut == "page" || io.AudioOut == "both" {
+		id := a.genaudio.put(mp3)
+		a.srv.Broadcast(protocol.AudioEvent{Format: "mp3", URL: "/api/genaudio?id=" + id, Text: "♪ " + prompt})
+	}
+	return "已生成音乐：" + prompt, nil
+}
+
+// handleGenAudio 通过 HTTP 返回某段生成音频（GET /api/genaudio?id=），供页面播放较大的音乐。
+func (a *app) handleGenAudio(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "仅支持 GET", http.StatusMethodNotAllowed)
+		return
+	}
+	data := a.genaudio.get(r.URL.Query().Get("id"))
+	if data == nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(data)
+}
