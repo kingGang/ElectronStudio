@@ -40,6 +40,7 @@ const (
 	TypeMusicState   Type = "music_state"   // 音乐播放状态变化
 	TypeScheduleList Type = "schedule_list" // 定时任务列表
 	TypeMaterials    Type = "materials"     // 屏幕表情素材列表
+	TypeAudio        Type = "audio"         // 合成语音/音频(base64) 推给页面播放(调试镜像)
 	TypeLog          Type = "log"           // 调试日志（可选，供前端日志面板使用）
 )
 

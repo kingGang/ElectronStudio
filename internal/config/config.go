@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // ModelConfig 描述一个大模型条目。
@@ -46,6 +47,31 @@ type CameraConfig struct {
 	Input       string `json:"input,omitempty"`        // 设备规格，如 /dev/video0 或 video=Camera
 }
 
+// MiniMaxConfig 是 MiniMax 多模态（文生图 / 语音合成）的凭据与默认参数。
+// BaseURL/APIKey 留空时，由 Config.ResolveMiniMax 复用 Models 里的 minimax 大模型条目。
+type MiniMaxConfig struct {
+	BaseURL    string `json:"base_url,omitempty"`
+	APIKey     string `json:"api_key,omitempty"`
+	VoiceID    string `json:"voice_id,omitempty"`    // T2A 音色，默认 male-qn-qingse
+	TTSModel   string `json:"tts_model,omitempty"`   // 语音模型，默认 speech-02-hd
+	ImageModel string `json:"image_model,omitempty"` // 文生图模型，默认 image-01
+}
+
+// IOConfig 配置输入/输出的去向（设备 vs 页面）。设备=ElectronBot 外设(主)，页面=调试镜像。
+type IOConfig struct {
+	AudioIn   string        `json:"audio_in,omitempty"`   // device | page | off（默认 device：设备麦经 sidecar）
+	AudioOut  string        `json:"audio_out,omitempty"`  // device | page | both | off（默认 device：mpg123 播到设备扬声器）
+	TTSEngine string        `json:"tts_engine,omitempty"` // minimax | sidecar（默认 minimax：云端出 mp3 直接播）
+	ImageOut  string        `json:"image_out,omitempty"`  // device | page | both（默认 both：设备屏+页面镜像）
+	MiniMax   MiniMaxConfig `json:"minimax"`
+}
+
+// 各路由的默认值（空配置时）。
+func (io IOConfig) AudioInOr() string   { return orStr(io.AudioIn, "device") }
+func (io IOConfig) AudioOutOr() string  { return orStr(io.AudioOut, "device") }
+func (io IOConfig) TTSEngineOr() string { return orStr(io.TTSEngine, "minimax") }
+func (io IOConfig) ImageOutOr() string  { return orStr(io.ImageOut, "both") }
+
 // Config 是应用的完整配置。
 type Config struct {
 	Addr   string        `json:"addr"`
@@ -54,8 +80,36 @@ type Config struct {
 	Gesture GestureConfig `json:"gesture"`
 	Camera  CameraConfig  `json:"camera"`
 	Music   MusicConfig   `json:"music"`
+	IO     IOConfig      `json:"io"`
 	Models []ModelConfig `json:"models"`
 	Active string        `json:"active,omitempty"`
+}
+
+// ResolveMiniMax 返回最终生效的 MiniMax 凭据：IO.MiniMax 优先；BaseURL/APIKey 缺失时
+// 复用 Models 里 base_url 含 "minimax" 的大模型条目（用户通常已在那里填好了 key）。
+func (c *Config) ResolveMiniMax() MiniMaxConfig {
+	m := c.IO.MiniMax
+	if m.BaseURL == "" || m.APIKey == "" {
+		for _, mc := range c.Models {
+			if strings.Contains(strings.ToLower(mc.BaseURL), "minimax") {
+				if m.BaseURL == "" {
+					m.BaseURL = mc.BaseURL
+				}
+				if m.APIKey == "" {
+					m.APIKey = mc.APIKey
+				}
+				break
+			}
+		}
+	}
+	return m
+}
+
+func orStr(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 // Default 返回内置默认配置（仅含本地 Echo 模型，保证开箱即跑）。

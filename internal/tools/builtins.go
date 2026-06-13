@@ -122,6 +122,26 @@ func ReminderTool(add func(ctx context.Context, minutes int, text string) (strin
 	}
 }
 
+// ImageTool 构造"生成图片"工具：按文字描述生成图片（如 MiniMax 文生图）。gen 由上层注入。
+func ImageTool(gen func(ctx context.Context, prompt string) (string, error)) Tool {
+	schema := objectSchema(`{"prompt":{"type":"string","description":"要生成的图片内容的详细描述"}}`, "prompt")
+	return Tool{
+		Spec: Spec{Name: "generate_image", Description: "根据文字描述生成一张图片，并显示在机器人屏幕上", Parameters: schema},
+		Handler: func(ctx context.Context, args string) (string, error) {
+			var p struct {
+				Prompt string `json:"prompt"`
+			}
+			if err := json.Unmarshal([]byte(args), &p); err != nil {
+				return "", fmt.Errorf("参数解析失败: %w", err)
+			}
+			if p.Prompt == "" {
+				return "", fmt.Errorf("需提供 prompt")
+			}
+			return gen(ctx, p.Prompt)
+		},
+	}
+}
+
 // MusicTool 构造"放首歌"工具：按关键词搜索并播放。play 由上层注入（接音乐服务）。
 func MusicTool(play func(ctx context.Context, query string) (string, error)) Tool {
 	schema := objectSchema(`{"query":{"type":"string","description":"要播放的歌曲名或歌手名"}}`, "query")

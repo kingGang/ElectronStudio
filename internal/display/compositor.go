@@ -11,9 +11,29 @@ type Compositor struct {
 	emotion    string
 	showCamera bool
 
+	still      []byte // 临时静态图（最高优先级，如 MiniMax 生成图）；nil 表示无
+	stillTicks int    // 静态图剩余显示帧数
+
 	camera   *CameraSource  // 可为 nil
 	clip     *ClipSource    // 可为 nil
 	fallback *EmotionSource // 始终存在
+}
+
+// ShowImage 在设备屏上临时显示一张静态图（240×240 RGB888）持续 seconds 秒，
+// 期间盖过摄像头/素材/程序脸；到期自动恢复。用于 MiniMax 文生图等结果上屏。
+func (c *Compositor) ShowImage(rgb []byte, seconds int) {
+	if len(rgb) == 0 {
+		return
+	}
+	if seconds <= 0 {
+		seconds = 8
+	}
+	buf := make([]byte, len(rgb))
+	copy(buf, rgb)
+	c.mu.Lock()
+	c.still = buf
+	c.stillTicks = seconds * driverFrameRate
+	c.mu.Unlock()
 }
 
 // NewCompositor 创建组合源。camera / clip 可为 nil。
@@ -52,6 +72,18 @@ func (c *Compositor) Frame() []byte {
 	c.mu.Lock()
 	e := c.emotion
 	cam := c.showCamera
+	// 静态图最高优先级：在 TTL 内每帧返回它；到期清除并让程序脸重渲染覆盖。
+	if c.still != nil && c.stillTicks > 0 {
+		c.stillTicks--
+		out := make([]byte, len(c.still))
+		copy(out, c.still)
+		if c.stillTicks == 0 {
+			c.still = nil
+			c.fallback.Invalidate()
+		}
+		c.mu.Unlock()
+		return out
+	}
 	c.mu.Unlock()
 
 	if cam && c.camera != nil {

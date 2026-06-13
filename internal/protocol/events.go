@@ -166,6 +166,7 @@ type ChatEvent struct {
 	Role    ChatRole   `json:"role"`
 	Content string     `json:"content"`
 	Tools   []ToolCall `json:"tools,omitempty"`
+	Images  []string   `json:"images,omitempty"` // 可选：随消息展示的图片 URL（如 MiniMax 生成图），页面调试镜像用
 	Status  ChatStatus `json:"status"`
 }
 
@@ -251,6 +252,18 @@ type ScheduleListEvent struct {
 
 // Type 实现 Payload。
 func (ScheduleListEvent) Type() Type { return TypeScheduleList }
+
+// AudioEvent 把一段合成语音/音频以 base64 推给页面播放（调试镜像；设备侧另经 mpg123 播放）。
+// Stop=true 表示打断：让页面停止当前播放（此时 Data 为空）。
+type AudioEvent struct {
+	Format string `json:"format,omitempty"` // mp3 | wav ...
+	Data   string `json:"data,omitempty"`   // base64 编码的音频字节
+	Text   string `json:"text,omitempty"`
+	Stop   bool   `json:"stop,omitempty"` // true=停止页面当前播放（barge-in）
+}
+
+// Type 实现 Payload。
+func (AudioEvent) Type() Type { return TypeAudio }
 
 // MaterialInfo 描述一段屏幕表情素材（供素材管理界面展示）。
 type MaterialInfo struct {

@@ -342,6 +342,22 @@ func loadEmotionFrames(dir string) ([][]byte, error) {
 	return frames, nil
 }
 
+// DecodeToScreen 把任意图片字节（PNG/JPEG）解码并缩放为 240×240 RGB888，
+// 供推送到设备屏显示（如 MiniMax 文生图结果）。带尺寸上限，防超大图。
+func DecodeToScreen(data []byte) ([]byte, error) {
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
+		if cfg.Width > maxImageDim || cfg.Height > maxImageDim {
+			return nil, fmt.Errorf("display: 图片尺寸过大 %dx%d（上限 %d）", cfg.Width, cfg.Height, maxImageDim)
+		}
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("display: 图片解码失败: %w", err)
+	}
+	b := img.Bounds()
+	return sampleRGB888(img, b.Min.X, b.Min.Y, b.Dx(), b.Dy()), nil
+}
+
 // decodeImage 解码一张图片（png/jpg）。
 func decodeImage(path string) (image.Image, error) {
 	f, err := os.Open(path)

@@ -12,7 +12,7 @@
     Status: 'status', VoiceState: 'voice_state', VAD: 'vad', Wake: 'wake',
     ASR: 'asr', Chat: 'chat', TTS: 'tts', Emotion: 'emotion',
     Joints: 'joints', Error: 'error', Gesture: 'gesture', MusicState: 'music_state',
-    ScheduleList: 'schedule_list', Materials: 'materials', Log: 'log',
+    ScheduleList: 'schedule_list', Materials: 'materials', Audio: 'audio', Log: 'log',
   };
   const CliType = {
     SendText: 'send_text', Mic: 'mic', Interrupt: 'interrupt',
@@ -103,6 +103,7 @@
       case SrvType.MusicState: onMusicState(p); break;
       case SrvType.ScheduleList: renderSchedule(p.jobs || []); break;
       case SrvType.Materials: renderMaterials(p.materials || []); break;
+      case SrvType.Audio: onAudio(p); break;
       case SrvType.Error: toast(p.message || '发生错误'); break;
       default: break;
     }
@@ -150,6 +151,15 @@
     }
     node.classList.toggle('streaming', p.status === 'streaming');
     node.querySelector('.content').textContent = p.content || '';
+    if (p.images && p.images.length) { // 生成图(页面调试镜像)
+      node.querySelectorAll('.msg-img').forEach((n) => n.remove());
+      p.images.forEach((src) => {
+        const im = document.createElement('img');
+        im.className = 'msg-img';
+        im.src = src; im.alt = '生成图';
+        node.appendChild(im);
+      });
+    }
     if (p.tools && p.tools.length) {
       node.querySelectorAll('.tool-badge').forEach((n) => n.remove());
       p.tools.forEach((t) => {
@@ -392,6 +402,21 @@
     el.mic.classList.toggle('active', micOn);
     send(CliType.Mic, { action: micOn ? 'start' : 'stop' });
   });
+
+  // ---- 音频播放（页面调试镜像：后端把合成语音 base64 推来，浏览器播放）----
+  let currentAudio = null;
+  function stopAudio() { if (currentAudio) { try { currentAudio.pause(); } catch (_) {} currentAudio = null; } }
+  function onAudio(p) {
+    if (!p) return;
+    stopAudio();              // 先停上一段（打断/新段都先停）
+    if (p.stop) return;       // 仅停止（barge-in）
+    if (!p.data) return;
+    try {
+      const mime = (!p.format || p.format === 'mp3') ? 'mpeg' : p.format; // mp3 的标准 MIME 是 audio/mpeg
+      currentAudio = new Audio('data:audio/' + mime + ';base64,' + p.data);
+      currentAudio.play().catch(() => {}); // 自动播放被拦时静默（用户已有交互一般可播）
+    } catch (_) { /* 忽略 */ }
+  }
 
   // ---- 提示条 ----
   let toastTimer = null;

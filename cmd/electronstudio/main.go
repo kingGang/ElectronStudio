@@ -29,12 +29,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kingGang/ElectronStudio/internal/audioout"
 	"github.com/kingGang/ElectronStudio/internal/choreography"
 	"github.com/kingGang/ElectronStudio/internal/config"
 	"github.com/kingGang/ElectronStudio/internal/device"
 	"github.com/kingGang/ElectronStudio/internal/display"
 	"github.com/kingGang/ElectronStudio/internal/gesture"
 	"github.com/kingGang/ElectronStudio/internal/llm"
+	"github.com/kingGang/ElectronStudio/internal/minimax"
 	"github.com/kingGang/ElectronStudio/internal/music"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 	"github.com/kingGang/ElectronStudio/internal/robot"
@@ -126,7 +128,13 @@ type app struct {
 	speech  speech.Service
 	gesture gesture.Service
 	music   *music.Service
+	mm      *minimax.Client    // MiniMax 多模态(图片/语音)客户端；nil=未配置
+	player  *audioout.Player   // 设备侧 mp3 播放(mpg123)
+	genimg  *genImgStore       // 生成图暂存(供页面 HTTP 取回)
 	weather *weather.Client
+
+	speakMu     sync.Mutex         // 保护 speakCancel
+	speakCancel context.CancelFunc // 取消进行中的一段语音(MiniMax 合成/设备播放)，用于打断 barge-in
 	sched   *scheduler.Scheduler
 	schedPath string
 	tools   *tools.Registry
@@ -262,7 +270,15 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	}
 	a.sched.SetPath(a.schedPath) // Load 后再设路径，触发/增删后自动存盘
 
-	// 工具：注册可供大模型调用的工具（设备控制 / 情绪 / 动作 / 信息 / 音乐 / 天气 / 提醒）。
+	// MiniMax 多模态（图片/语音）：凭据复用 models 里的 minimax 条目（或 io.minimax 显式配置）。
+	if mmc := cfg.ResolveMiniMax(); mmc.BaseURL != "" && mmc.APIKey != "" {
+		a.mm = minimax.New(mmc.BaseURL, mmc.APIKey)
+		log.Info("已启用 MiniMax 多模态", "base", mmc.BaseURL, "tts_engine", cfg.IO.TTSEngineOr(), "audio_out", cfg.IO.AudioOutOr(), "image_out", cfg.IO.ImageOutOr())
+	}
+	a.player = audioout.New(cfg.Music.Mpg123, log) // 设备侧 mp3 播放复用 mpg123 路径
+	a.genimg = newGenImgStore()
+
+	// 工具：注册可供大模型调用的工具（设备控制 / 情绪 / 动作 / 信息 / 音乐 / 天气 / 提醒 / 图片）。
 	a.tools = buildTools(a)
 	return a, nil
 }
@@ -414,6 +430,13 @@ func buildTools(a *app) *tools.Registry {
 	if a.camera != nil {
 		reg.Register(tools.LookTool(a.captureJPEG, func(ctx context.Context, jpeg []byte, q string) (string, error) {
 			return a.llm.Vision(ctx, jpeg, q)
+		}))
+	}
+
+	// 文生图：配置了 MiniMax 才提供（大模型可"画一张…"，按 image_out 路由到设备屏/页面）。
+	if a.mm != nil {
+		reg.Register(tools.ImageTool(func(ctx context.Context, prompt string) (string, error) {
+			return a.handleGenerateImage(ctx, prompt)
 		}))
 	}
 	return reg
@@ -584,7 +607,10 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 
 	case protocol.TypeInterrupt:
 		a.chor.Stop()
-		a.speech.Stop() // 打断正在播放的语音
+		a.speech.Stop()                              // 打断 sidecar 语音
+		a.cancelSpeak()                              // 取消进行中的 MiniMax 合成/设备播放
+		a.player.Stop()                              // 兜底再杀一次设备播放
+		a.srv.Broadcast(protocol.AudioEvent{Stop: true}) // 让页面停止播放
 		a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
 
 	case protocol.TypeFollow:
@@ -671,9 +697,7 @@ func (a *app) emitUser(text string) {
 func (a *app) finishAssistant(ctx context.Context, content string) {
 	if content != "" {
 		a.appendHistory(llm.Message{Role: llm.RoleAssistant, Content: content})
-		if err := a.speech.Speak(ctx, content); err != nil {
-			a.log.Warn("语音合成失败", "err", err)
-		}
+		a.speak(ctx, content) // 按 io.tts_engine/audio_out 路由（MiniMax 云端 / sidecar；设备/页面）
 	}
 	a.screen.SetSpeaking(false) // 停止口型动画
 	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStop, Text: content})
@@ -717,10 +741,11 @@ func (a *app) handleChatWithTools(ctx context.Context, text string) {
 		return
 	}
 
+	content := stripThink(res.Content) // 剥掉推理模型的 <think> 块，再显示/朗读
 	a.srv.Broadcast(protocol.ChatEvent{
-		ID: id, Role: protocol.RoleAssistant, Content: res.Content, Tools: pTools, Status: protocol.ChatFinal,
+		ID: id, Role: protocol.RoleAssistant, Content: content, Tools: pTools, Status: protocol.ChatFinal,
 	})
-	a.finishAssistant(ctx, res.Content)
+	a.finishAssistant(ctx, content)
 }
 
 // handleChatStreaming 跑一次流式对话：用户消息回显 → 思考 → 流式生成 → 朗读。
@@ -754,12 +779,13 @@ func (a *app) handleChatStreaming(ctx context.Context, text string) {
 		a.srv.Broadcast(protocol.ChatEvent{
 			ID:      id,
 			Role:    protocol.RoleAssistant,
-			Content: content,
+			Content: stripThink(content), // 流式期间也剥掉 <think>，避免推理过程逐字泄漏到页面
 			Status:  protocol.ChatStreaming,
 		})
 	}
 
-	// 收尾：最终消息 + 入历史 + 朗读 + 回到待命。
+	// 收尾：剥掉 <think> 推理块 → 最终消息 + 入历史 + 朗读 + 回到待命。
+	content = stripThink(content)
 	a.srv.Broadcast(protocol.ChatEvent{
 		ID:      id,
 		Role:    protocol.RoleAssistant,

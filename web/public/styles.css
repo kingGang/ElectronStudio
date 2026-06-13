@@ -278,6 +278,10 @@ body {
 .msg .role { font-size: 11px; color: var(--text-dim); margin-bottom: 2px; }
 .msg.streaming .content::after { content: "▍"; color: var(--accent); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
+.msg-img {
+  display: block; margin-top: 8px; max-width: 100%; width: 240px; max-height: 240px;
+  object-fit: contain; border-radius: var(--radius-sm); border: 1px solid var(--border); background: #05080c;
+}
 .tool-badge {
   display: inline-block; margin-top: 6px; padding: 2px 8px; font-size: 11px;
   font-family: var(--mono); color: var(--accent);

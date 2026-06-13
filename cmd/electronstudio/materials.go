@@ -56,6 +56,7 @@ func (a *app) materialRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/materials", a.handleMaterialUpload)
 	mux.HandleFunc("/api/material-frames", a.handleMaterialFrames)
 	mux.HandleFunc("/api/material-thumb", a.handleMaterialThumb)
+	mux.HandleFunc("/api/genimg", a.handleGenImg) // MiniMax 生成图(供页面展示)
 }
 
 // handleMaterialFrames 接收「前端已抽好的帧序列」并落盘为 emotions/<情绪>/ 帧序列。

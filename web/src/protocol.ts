@@ -29,6 +29,7 @@ export const ServerType = {
   MusicState: 'music_state',
   ScheduleList: 'schedule_list',
   Materials: 'materials',
+  Audio: 'audio',
   Log: 'log',
 } as const
 
@@ -157,7 +158,13 @@ export interface ChatEvent {
   role: ChatRole
   content: string
   tools?: ToolCall[]
+  images?: string[] // 随消息展示的图片 URL（如 MiniMax 生成图）
   status: ChatStatus
+}
+export interface AudioEvent {
+  format: string // mp3 | wav ...
+  data: string   // base64 音频
+  text?: string
 }
 export interface TTSEvent {
   state: TTSState
@@ -202,6 +209,7 @@ export type ServerMessage =
   | (Envelope<JointsEvent> & { type: typeof ServerType.Joints })
   | (Envelope<ErrorEvent> & { type: typeof ServerType.Error })
   | (Envelope<MaterialsEvent> & { type: typeof ServerType.Materials })
+  | (Envelope<AudioEvent> & { type: typeof ServerType.Audio })
   | (Envelope<LogEvent> & { type: typeof ServerType.Log })
 
 // ===========================================================================
