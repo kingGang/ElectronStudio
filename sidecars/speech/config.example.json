@@ -25,11 +25,13 @@
   },
 
   "tts": {
-    "_comment": "VITS / Piper 风格 TTS。中文音色见 download_models 脚本。",
+    "_comment": "VITS / Piper 风格 TTS。默认 VITS-zh(fanchen-C)。换 Piper(huayan)时改为下面注释的那组并清空 lexicon/dict_dir。",
     "model": "models/vits-zh/model.onnx",
     "tokens": "models/vits-zh/tokens.txt",
     "lexicon": "models/vits-zh/lexicon.txt",
     "dict_dir": "models/vits-zh/dict",
+    "data_dir": "",
+    "_piper": { "model": "models/vits-piper/model.onnx", "tokens": "models/vits-piper/tokens.txt", "data_dir": "models/vits-piper/espeak-ng-data", "lexicon": "", "dict_dir": "" },
     "speaker_id": 0,
     "speed": 1.0
   },

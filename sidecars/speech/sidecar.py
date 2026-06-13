@@ -109,8 +109,9 @@ class Engines:
                 vits=sherpa_onnx.OfflineTtsVitsModelConfig(
                     model=t["model"],
                     tokens=t["tokens"],
-                    lexicon=t.get("lexicon", ""),
-                    dict_dir=t.get("dict_dir", ""),
+                    lexicon=t.get("lexicon", ""),   # VITS-zh：拼音词典
+                    dict_dir=t.get("dict_dir", ""),  # VITS-zh：jieba 词典目录
+                    data_dir=t.get("data_dir", ""),  # Piper：espeak-ng-data 目录
                 ),
                 num_threads=1,
             ),
@@ -265,7 +266,11 @@ async def serve(cfg: Config, engines: Engines):
     async def handler(ws):
         print("主程序已连接", ws.remote_address, file=sys.stderr)
         session = Session(ws, engines, cfg, loop)
-        session.start_mic()
+        try:
+            session.start_mic()
+        except Exception as e:
+            # 没有可用麦克风时不应中断会话：仍可提供 TTS（合成播放），只是收不到语音输入。
+            print("麦克风打开失败，仅启用 TTS（无 ASR 输入）：", e, file=sys.stderr)
         try:
             # 并行跑"上行处理"与"下行命令"，任一结束即收尾。
             await asyncio.gather(session.process_loop(), session.handle_incoming())

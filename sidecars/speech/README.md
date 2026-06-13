@@ -15,6 +15,8 @@ pip install -r requirements.txt
 
 # 2) 下载模型（约数百 MB）
 bash download_models.sh        # Windows: pwsh ./download_models.ps1
+#   选 Piper 音色：   TTS=piper bash download_models.sh   (Win: -Tts piper)
+#   国内 GitHub 加速：MIRROR=https://ghfast.top/ bash download_models.sh   (Win: -Mirror https://ghfast.top/)
 
 # 3) 配置并运行
 cp config.example.json config.json
@@ -48,7 +50,11 @@ python sidecar.py --list-devices     # 列出所有音频设备，找到 Electro
 |------|------|------|
 | ASR | SenseVoice（中/英/日/韩/粤） | `models/sense-voice/` |
 | VAD | Silero | `models/silero_vad.onnx` |
-| TTS | VITS-zh（fanchen-C） | `models/vits-zh/` |
+| TTS（默认） | VITS-zh（fanchen-C，187 音色） | `models/vits-zh/` |
+| TTS（`-Tts piper`） | Piper zh_CN huayan-medium | `models/vits-piper/`（含 `espeak-ng-data`） |
+
+下载脚本参数：`-Tts vits-zh\|piper\|both`（Win）/ 环境变量 `TTS=`（bash）；`-Mirror <前缀>` / `MIRROR=` 给 GitHub 加镜像前缀（国内用 `https://ghfast.top/`）。
+换 Piper 时把 `config.json` 的 `tts` 段改为指向 `models/vits-piper/`（`data_dir=models/vits-piper/espeak-ng-data`，`lexicon`/`dict_dir` 留空），见 `config.example.json` 里的 `_piper` 示例。
 
 唤醒词（KWS）默认关闭（`wake.enabled=false`），此时为「VAD 触发的常听」模式：
 检测到一段语音即识别。如需自定义唤醒词，下载一个 sherpa-onnx KWS 模型，填入
