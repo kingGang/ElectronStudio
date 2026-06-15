@@ -25,6 +25,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,7 +51,21 @@ import (
 )
 
 // systemPrompt 是对话的系统提示，约束助手扮演桌面机器人小电。
-const systemPrompt = "你是桌面机器人小电，回答简洁友好。"
+// 关键：强制"动作必须调工具、不许空口承诺"——MiniMax-M3 等模型对模糊指令容易只
+// 口头回应而不实际调用工具（如说"为你放首歌"却不调 play_music），这里明确禁止。
+const systemPrompt = `你是桌面机器人小电，回答简洁友好。
+
+你能调用工具完成实际动作：播放音乐(play_music)、音乐控制(music_control)、生成音乐(generate_music)、生成图片(generate_image)、设提醒/定时(schedule)、看摄像头(look)、播放动作/表情等。
+
+铁律：
+1. 凡是用户要你"做一件事"（放歌、放点音乐、来首歌、换歌、暂停、生成音乐/图片、设提醒等），必须实际调用对应工具，绝不能只用文字说"好的我帮你放/已为你换"却不调用工具。
+2. 指令模糊时（如"随便放首歌""放点音乐""来点轻松的"），你自己定一个具体歌名或歌手直接调 play_music，不要反问用户"想听什么"。
+3. 音乐工具怎么选：
+   - "放一首X/放歌/听歌/换个歌手"→ play_music（带歌名或歌手）
+   - "换一首/下一首/切歌/换个"且没指定具体歌名 → music_control，action=next（切到当前列表下一首，不要重新搜索）
+   - "上一首"→ music_control prev；"暂停"→ pause；"继续"→ resume；"停/别放了"→ stop
+   - "生成/创作一段音乐"→ generate_music
+4. 工具执行后再用一句话简短告知结果。`
 
 // maxHistory 限制保留的对话轮数，防止上下文无限增长。
 const maxHistory = 20
@@ -146,6 +161,9 @@ type app struct {
 	cfgMu   sync.Mutex     // 保护 cfg 的读改存
 	cfg     *config.Config // 当前配置
 	cfgPath string         // 配置文件路径
+
+	qrMu    sync.Mutex      // 保护 qrLogin
+	qrLogin *music.QRLogin  // 进行中的 QQ 扫码登录会话
 
 	actionsPath string        // 录制动作的存盘路径
 	poseMu      sync.Mutex    // 保护 desiredPose
@@ -252,13 +270,23 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		log.Warn("加载录制动作失败", "err", err)
 	}
 
-	// 音乐：酷我搜索 + mpg123 播放（子进程，无 cgo），状态变化广播给 UI。
+	// 音乐：按 music.source 选音源（qq | kuwo，默认 kuwo）+ mpg123 播放（子进程，无 cgo），
+	// 状态变化广播给 UI。播放与「生成音乐」是两件事：播放失败直接提示，不自动转生成。
+	var searcher music.Searcher
+	switch cfg.Music.SourceOr() {
+	case "qq":
+		searcher = music.NewQQMusicSearcher(cfg.Music.QQ.Cookie, cfg.Music.QQ.UIN, cfg.Music.QQ.Key)
+		log.Info("音乐音源 = QQ 音乐", "hasCookie", cfg.Music.QQ.Cookie != "" || cfg.Music.QQ.Key != "")
+	default:
+		searcher = music.NewKuwoSearcher()
+		log.Info("音乐音源 = 酷我")
+	}
 	a.music = music.NewService(
-		music.NewKuwoSearcher(),
+		searcher,
 		music.NewMpg123Player(cfg.Music.Mpg123, log),
 		log,
 		func(t music.Track, st music.State) {
-			a.srv.Broadcast(protocol.MusicEvent{State: string(st), Name: t.Name, Artist: t.Artist})
+			a.srv.Broadcast(protocol.MusicEvent{State: string(st), Name: t.Name, Artist: t.Artist, URL: t.URL})
 		},
 	)
 
@@ -423,9 +451,38 @@ func buildTools(a *app) *tools.Registry {
 	reg.Register(tools.MusicTool(func(ctx context.Context, query string) (string, error) {
 		t, err := a.music.SearchAndPlay(ctx, query)
 		if err != nil {
-			return "", err
+			a.log.Warn("播放音乐失败", "query", query, "err", err)
+			return "", fmt.Errorf("没能播放《%s》：%w（在线音源可能无版权或需登录，可改用「生成音乐」）", query, err)
 		}
 		return fmt.Sprintf("正在播放：%s - %s", t.Name, t.Artist), nil
+	}))
+	// 音乐控制：换一首/下一首/上一首/暂停/继续/停止（对当前播放列表操作，不重新搜索）。
+	reg.Register(tools.MusicControlTool(func(ctx context.Context, action string) (string, error) {
+		switch action {
+		case "next":
+			t, err := a.music.Next(ctx)
+			if err != nil {
+				return "", fmt.Errorf("换歌失败：%w（先放一首再换）", err)
+			}
+			return fmt.Sprintf("已换到：%s - %s", t.Name, t.Artist), nil
+		case "prev":
+			t, err := a.music.Prev(ctx)
+			if err != nil {
+				return "", fmt.Errorf("切上一首失败：%w", err)
+			}
+			return fmt.Sprintf("已切到上一首：%s - %s", t.Name, t.Artist), nil
+		case "pause":
+			a.music.Pause()
+			return "已暂停", nil
+		case "resume":
+			a.music.Resume()
+			return "继续播放", nil
+		case "stop":
+			a.music.Stop()
+			return "已停止", nil
+		default:
+			return "", fmt.Errorf("未知操作：%s", action)
+		}
 	}))
 
 	// 视觉："看一眼"——抓摄像头帧交给视觉模型描述（仅在配置了摄像头时提供）。
@@ -530,7 +587,12 @@ func (a *app) speechLoop(ctx context.Context) {
 }
 
 // handleSpeechEvent 处理单条语音事件。
+// 仅当 audio_in=device（设备麦经 sidecar）时采纳；audio_in=page/off 时忽略 sidecar 输入，
+// 避免与网页麦克风输入重复。
 func (a *app) handleSpeechEvent(ctx context.Context, ev speech.Event) {
+	if a.cfg.IO.AudioInOr() != "device" {
+		return
+	}
 	switch ev.Kind {
 	case speech.KindWake:
 		a.srv.Broadcast(protocol.WakeEvent{Keyword: ev.Keyword})
@@ -668,6 +730,11 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 			go a.handleMaterialDelete(cmd.Name) // 涉及磁盘+重载，放后台，避免阻塞命令分发循环
 		}
 
+	case protocol.TypeSetIO:
+		if cmd, err := protocol.As[protocol.SetIOCommand](in.Env); err == nil {
+			a.handleSetIO(cmd)
+		}
+
 	default:
 		a.log.Debug("未处理的命令类型", "type", in.Env.Type)
 	}
@@ -679,11 +746,72 @@ func (a *app) handleChat(ctx context.Context, text string) {
 	if text == "" {
 		return
 	}
+	// 确定性快捷路径：音乐控制口令（换一首/暂停/继续/停…）直接执行，不经过大模型，
+	// 保证 100% 生效（大模型对这类指令偶尔会只口头回应而不调工具）。
+	if a.tryMusicShortcut(ctx, text) {
+		return
+	}
 	if a.tools.Count() > 0 && a.llm.ActiveSupportsTools() {
 		a.handleChatWithTools(ctx, text)
 	} else {
 		a.handleChatStreaming(ctx, text)
 	}
+}
+
+// musicIntents 把纯控制口令映射到动作。仅匹配"整句就是这个口令"的情况，
+// 含具体歌名（如"换一首周杰伦"）不会命中，仍交给大模型走 play_music。
+var musicIntents = map[string]string{
+	"换一首": "next", "换首": "next", "换首歌": "next", "换一首歌": "next", "换歌": "next",
+	"下一首": "next", "下一曲": "next", "下首": "next", "切歌": "next", "换个": "next",
+	"换一个": "next", "换个歌": "next", "再来一首": "next", "再换一首": "next", "换": "next",
+	"上一首": "prev", "上一曲": "prev", "上首歌": "prev", "前一首": "prev",
+	"暂停": "pause", "暂停一下": "pause", "暂停播放": "pause", "停一下": "pause", "先暂停": "pause",
+	"继续": "resume", "继续播放": "resume", "接着放": "resume", "继续放": "resume",
+	"停止": "stop", "停止播放": "stop", "别放了": "stop", "关掉音乐": "stop",
+	"关音乐": "stop", "关闭音乐": "stop", "不听了": "stop", "停掉": "stop",
+}
+
+// tryMusicShortcut 命中音乐控制口令则直接执行并返回 true；否则返回 false 走正常对话。
+func (a *app) tryMusicShortcut(ctx context.Context, text string) bool {
+	cleaned := strings.TrimRight(strings.TrimSpace(text), "吧呗啊呀嘛吗~。.!！,，、 \t")
+	action, ok := musicIntents[cleaned]
+	if !ok {
+		return false
+	}
+	// next/prev 需要已有播放列表，否则交给大模型去搜一首播。
+	if (action == "next" || action == "prev") && !a.music.HasPlaylist() {
+		return false
+	}
+	a.emitUser(text)
+	var msg string
+	switch action {
+	case "next":
+		if t, err := a.music.Next(ctx); err == nil {
+			msg = "已换一首：" + t.Name + " - " + t.Artist
+		} else {
+			msg = "暂时换不了歌：" + err.Error()
+		}
+	case "prev":
+		if t, err := a.music.Prev(ctx); err == nil {
+			msg = "已切上一首：" + t.Name + " - " + t.Artist
+		} else {
+			msg = "暂时切不了：" + err.Error()
+		}
+	case "pause":
+		a.music.Pause()
+		msg = "已暂停"
+	case "resume":
+		a.music.Resume()
+		msg = "继续播放"
+	case "stop":
+		a.music.Stop()
+		msg = "已停止播放"
+	}
+	a.appendHistory(llm.Message{Role: llm.RoleAssistant, Content: msg})
+	a.srv.Broadcast(protocol.ChatEvent{ID: a.nextMsgID(), Role: protocol.RoleAssistant, Content: msg, Status: protocol.ChatFinal})
+	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
+	a.log.Info("音乐控制快捷指令", "text", text, "action", action)
+	return true
 }
 
 // emitUser 记录并回显一条用户消息，随后进入思考态。
@@ -948,7 +1076,7 @@ func (a *app) handleMusic(ctx context.Context, cmd protocol.MusicCommand) {
 	case "play":
 		if _, err := a.music.SearchAndPlay(ctx, cmd.Query); err != nil {
 			a.log.Warn("播放音乐失败", "query", cmd.Query, "err", err)
-			a.srv.Broadcast(protocol.ErrorEvent{Code: "music_error", Message: err.Error()})
+			a.srv.Broadcast(protocol.ErrorEvent{Code: "music_error", Message: "没能播放《" + cmd.Query + "》：在线音源无版权或需登录"})
 		}
 	case "pause":
 		a.music.Pause()
@@ -956,6 +1084,14 @@ func (a *app) handleMusic(ctx context.Context, cmd protocol.MusicCommand) {
 		a.music.Resume()
 	case "stop":
 		a.music.Stop()
+	case "next": // 连续播放：上一首结束自动切，或用户手动切歌
+		if _, err := a.music.Next(ctx); err != nil {
+			a.log.Warn("切下一首失败", "err", err)
+		}
+	case "prev":
+		if _, err := a.music.Prev(ctx); err != nil {
+			a.log.Warn("切上一首失败", "err", err)
+		}
 	case "volume":
 		a.music.SetVolume(cmd.Volume)
 	default:
@@ -1071,7 +1207,49 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 		LLM:     protocol.LLMStatus{Active: a.llm.ActiveID(), Available: models},
 		Actions: actions,
 		Camera:  a.camera != nil,
+		IO: protocol.IOStatus{
+			AudioIn:   a.cfg.IO.AudioInOr(),
+			AudioOut:  a.cfg.IO.AudioOutOr(),
+			TTSEngine: a.cfg.IO.TTSEngineOr(),
+			ImageOut:  a.cfg.IO.ImageOutOr(),
+		},
+		Music: protocol.MusicStatus{Source: a.cfg.Music.SourceOr()},
 	}
+}
+
+// validIO 校验某个 I/O 路由取值是否在允许集合内。
+func validIO(field, v string) bool {
+	switch field {
+	case "audio_in":
+		return v == "device" || v == "page" || v == "off"
+	case "audio_out":
+		return v == "device" || v == "page" || v == "both" || v == "off"
+	case "tts_engine":
+		return v == "minimax" || v == "sidecar"
+	case "image_out":
+		return v == "device" || v == "page" || v == "both" || v == "off"
+	}
+	return false
+}
+
+// handleSetIO 更新 I/O 路由配置（设置页）：校验后写入并落盘，广播新状态使各端同步。
+func (a *app) handleSetIO(cmd protocol.SetIOCommand) {
+	a.cfgMu.Lock()
+	if cmd.AudioIn != "" && validIO("audio_in", cmd.AudioIn) {
+		a.cfg.IO.AudioIn = cmd.AudioIn
+	}
+	if cmd.AudioOut != "" && validIO("audio_out", cmd.AudioOut) {
+		a.cfg.IO.AudioOut = cmd.AudioOut
+	}
+	if cmd.TTSEngine != "" && validIO("tts_engine", cmd.TTSEngine) {
+		a.cfg.IO.TTSEngine = cmd.TTSEngine
+	}
+	if cmd.ImageOut != "" && validIO("image_out", cmd.ImageOut) {
+		a.cfg.IO.ImageOut = cmd.ImageOut
+	}
+	a.saveConfig()
+	a.cfgMu.Unlock()
+	a.srv.Broadcast(a.statusSnapshot())
 }
 
 // ---- 对话历史的并发安全访问 ----

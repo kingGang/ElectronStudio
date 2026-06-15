@@ -37,6 +37,10 @@ __pycache__/
 /config.json
 /actions.json
 /emotions/
+# 运行/调试日志与临时音频
+*.log
+es.err.log
+/sidecars/speech/_tts_test.wav
 
 # ===== 编辑器 / 系统 =====
 .idea/

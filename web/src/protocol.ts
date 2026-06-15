@@ -55,7 +55,15 @@ export const ClientType = {
   ScheduleAdd: 'schedule_add',
   ScheduleRemove: 'schedule_remove',
   MaterialDelete: 'material_delete',
+  SetIO: 'set_io',
 } as const
+
+export interface SetIOCommand {
+  audio_in?: string
+  audio_out?: string
+  tts_engine?: string
+  image_out?: string
+}
 
 export interface ScheduleAddCommand {
   title: string
@@ -68,7 +76,7 @@ export interface ScheduleAddCommand {
 }
 
 export interface MusicCommand {
-  action: 'play' | 'pause' | 'resume' | 'stop' | 'volume'
+  action: 'play' | 'pause' | 'resume' | 'stop' | 'next' | 'prev' | 'volume'
   query?: string
   volume?: number
 }
@@ -129,6 +137,17 @@ export interface StatusEvent {
   llm: LLMStatus
   actions?: string[] // 可用的编排动作名（供动作编排页使用）
   camera?: boolean   // 是否配置了摄像头
+  io?: IOStatus      // I/O 路由当前配置
+  music?: MusicStatus // 音乐子系统状态（音源）
+}
+export interface MusicStatus {
+  source: string // qq | kuwo
+}
+export interface IOStatus {
+  audio_in: string   // device | page | off
+  audio_out: string  // device | page | both | off
+  tts_engine: string // minimax | sidecar
+  image_out: string  // device | page | both | off
 }
 
 export interface VoiceStateEvent {
@@ -159,6 +178,7 @@ export interface ChatEvent {
   content: string
   tools?: ToolCall[]
   images?: string[] // 随消息展示的图片 URL（如 MiniMax 生成图）
+  audio?: string    // 随消息展示的音频播放器 URL（如 MiniMax 生成的音乐）
   status: ChatStatus
 }
 export interface AudioEvent {
@@ -187,6 +207,12 @@ export interface ErrorEvent {
 export interface LogEvent {
   level: string
   message: string
+}
+export interface MusicStateEvent {
+  state: 'playing' | 'paused' | 'stopped'
+  name?: string
+  artist?: string
+  url?: string // 可播放流地址；audio_out=page/both 时由浏览器 <audio> 播放
 }
 export interface MaterialInfo {
   name: string

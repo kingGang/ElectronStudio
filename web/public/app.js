@@ -23,7 +23,7 @@
     RecordStop: 'record_stop', DeleteAction: 'delete_action',
     Camera: 'camera', Greet: 'greet', Music: 'music',
     ScheduleAdd: 'schedule_add', ScheduleRemove: 'schedule_remove',
-    MaterialDelete: 'material_delete',
+    MaterialDelete: 'material_delete', SetIO: 'set_io',
   };
 
   // 6 轴关节名称（顺序与后端 robot.JointNames / 官方 RobotController 完全一致）。
@@ -119,6 +119,17 @@
     }
     if (s.actions) renderActions(s.actions);
     el.camera.style.display = s.camera ? '' : 'none'; // 配置了摄像头才显示按钮
+    if (s.io) {
+      audioInMode = s.io.audio_in || 'device';
+      audioOutMode = s.io.audio_out || 'page';
+      el.mic.title = audioInMode === 'page' ? '网页麦克风说话（浏览器识别）' : '切换设备拾音';
+      renderIO(s.io);
+    }
+    if (s.music) {
+      musicSource = s.music.source || '';
+      const lbl = $('music-source-label');
+      if (lbl) lbl.textContent = musicSource === 'qq' ? 'QQ音乐' : (musicSource === 'kuwo' ? '酷我音乐' : musicSource || '—');
+    }
     renderSettings(s);
   }
 
@@ -159,6 +170,17 @@
         im.src = src; im.alt = '生成图';
         node.appendChild(im);
       });
+    }
+    if (p.audio) { // 生成的音乐/音频：聊天里给一个带控件的播放器卡片，可重播
+      let au = node.querySelector('.msg-audio');
+      if (!au) {
+        au = document.createElement('audio');
+        au.className = 'msg-audio';
+        au.controls = true;
+        au.autoplay = true; // 尝试自动播放，被拦时用户可点控件
+        node.appendChild(au);
+      }
+      if (au.getAttribute('src') !== p.audio) au.src = p.audio;
     }
     if (p.tools && p.tools.length) {
       node.querySelectorAll('.tool-badge').forEach((n) => n.remove());
@@ -355,6 +377,23 @@
     });
   }
 
+  // ---- I/O 路由设置（设置页下拉，改动即时发 set_io）----
+  const IO_FIELDS = ['audio_in', 'audio_out', 'tts_engine', 'image_out'];
+  function renderIO(io) {
+    IO_FIELDS.forEach((f) => { const sel = $('io-' + f); if (sel && io[f]) sel.value = io[f]; });
+  }
+  function setupIO() {
+    IO_FIELDS.forEach((f) => {
+      const sel = $('io-' + f);
+      if (!sel) return;
+      sel.addEventListener('change', () => {
+        const payload = {}; payload[f] = sel.value;
+        send(CliType.SetIO, payload);
+        toast('已更新：' + f + ' = ' + sel.value);
+      });
+    });
+  }
+
   function renderSettings(s) {
     if (s.asr) el.setASR.textContent = (s.asr.running ? '在线' : '离线') + (s.asr.detail ? ` · ${s.asr.detail}` : '');
     if (s.tts) el.setTTS.textContent = (s.tts.running ? '在线' : '离线') + (s.tts.detail ? ` · ${s.tts.detail}` : '');
@@ -396,11 +435,58 @@
   $('btn-greet').addEventListener('click', () => send(CliType.Greet, {}));
   el.model.addEventListener('change', () => send(CliType.SelectModel, { id: el.model.value }));
 
+  // 麦克风按钮：audio_in=page 用浏览器内置语音识别（网页麦）；否则切换设备拾音（sidecar）。
+  let audioInMode = 'device';
+  let audioOutMode = 'page'; // 音频输出路由（来自 status.io.audio_out），决定音乐是否在浏览器播放
+  let musicSource = ''; // 当前音源（来自 status.music.source）：qq | kuwo
   let micOn = false;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recog = null, recogOn = false, recogGotFinal = false;
+
+  function ensureRecog() {
+    if (recog || !SR) return recog;
+    recog = new SR();
+    recog.lang = 'zh-CN';
+    recog.interimResults = true;
+    recog.continuous = false;
+    recog.onresult = (e) => {
+      let finalText = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) finalText += r[0].transcript;
+        else el.input.value = r[0].transcript; // 中间态显示在输入框
+      }
+      if (finalText.trim()) {
+        recogGotFinal = true;
+        el.input.value = '';
+        send(CliType.SendText, { text: finalText.trim() }); // 当作一次对话输入
+      }
+    };
+    recog.onend = () => {
+      recogOn = false;
+      el.mic.classList.remove('active');
+      if (!recogGotFinal) setVoice('idle');
+    };
+    recog.onerror = (ev) => {
+      recogOn = false;
+      el.mic.classList.remove('active');
+      if (ev.error !== 'no-speech' && ev.error !== 'aborted') toast('语音识别出错：' + ev.error);
+    };
+    return recog;
+  }
+
   el.mic.addEventListener('click', () => {
-    micOn = !micOn;
-    el.mic.classList.toggle('active', micOn);
-    send(CliType.Mic, { action: micOn ? 'start' : 'stop' });
+    if (audioInMode === 'page') {
+      if (!SR) { toast('当前浏览器不支持语音识别（建议用 Chrome/Edge）'); return; }
+      ensureRecog();
+      if (recogOn) { recog.stop(); return; }
+      try { recogGotFinal = false; recog.start(); recogOn = true; el.mic.classList.add('active'); setVoice('listening'); }
+      catch (_) { /* 已在识别中 */ }
+    } else {
+      micOn = !micOn;
+      el.mic.classList.toggle('active', micOn);
+      send(CliType.Mic, { action: micOn ? 'start' : 'stop' });
+    }
   });
 
   // ---- 音频播放（页面调试镜像：后端把合成语音 base64 推来，浏览器播放）----
@@ -434,20 +520,192 @@
   }
 
   // ---- 音乐播放控制条（搜歌走 AI 对话框：直接说"放首XXX"）----
+  // audio_out=page/both 时由浏览器 <audio> 直接播放事件里的 URL；device 时设备(mpg123)出声、页面只显示状态。
   let musicPlaying = false;
+  let musicAudio = null;        // 浏览器播放器（页面输出时）
+  let curTrack = { name: '', artist: '' }; // 当前曲目，避免从 DOM 反解
+  function sourceLabel() {
+    return musicSource === 'qq' ? 'QQ音乐' : (musicSource === 'kuwo' ? '酷我音乐' : '');
+  }
+  function fmtTime(sec) {
+    if (!isFinite(sec) || sec < 0) return '0:00';
+    sec = Math.floor(sec);
+    const m = Math.floor(sec / 60), s = sec % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+  function renderMusicLabel() {
+    const src = sourceLabel();
+    $('music-now').textContent = (musicPlaying ? '' : '⏸ ') + (curTrack.name || '') +
+      (curTrack.artist ? ' - ' + curTrack.artist : '') + (src ? '　·　来源：' + src : '');
+    $('music-pause').textContent = musicPlaying ? '⏸' : '▶';
+  }
+  function renderMusicTime() {
+    const t = $('music-time'), seek = $('music-seek');
+    if (!t) return;
+    if (musicAudio && isFinite(musicAudio.duration)) {
+      t.textContent = fmtTime(musicAudio.currentTime) + ' / ' + fmtTime(musicAudio.duration);
+      if (seek) { seek.max = musicAudio.duration || 0; if (!seek.dragging) seek.value = musicAudio.currentTime || 0; }
+    } else {
+      t.textContent = audioOutMode === 'device' ? '设备播放中' : '--:-- / --:--';
+      if (seek) { seek.max = 0; seek.value = 0; }
+    }
+  }
   function onMusicState(p) {
-    const bar = $('music-bar'), now = $('music-now');
+    const bar = $('music-bar');
     if (p.state === 'stopped' || !p.state) {
       bar.style.display = 'none';
       musicPlaying = false;
+      if (musicAudio) { musicAudio.pause(); musicAudio = null; }
       return;
     }
     bar.style.display = 'flex';
     musicPlaying = p.state === 'playing';
-    now.textContent = (p.state === 'paused' ? '⏸ ' : '') + (p.name || '') + (p.artist ? ' - ' + p.artist : '');
+    if (p.name) curTrack = { name: p.name, artist: p.artist || '' };
+    // 页面输出：用浏览器播放 URL（可读进度/可拖动/可画波形）
+    if (p.url && (audioOutMode === 'page' || audioOutMode === 'both')) {
+      if (p.state === 'playing') {
+        if (!musicAudio) bindMusicAudio(new Audio());
+        if (musicAudio._srcUrl !== p.url) {
+          musicAudio._srcUrl = p.url;
+          // 经本地代理转发=同源，浏览器 Web Audio 才能读到采样画波形（跨域会拿到全 0）。
+          musicAudio.src = '/api/music-proxy?url=' + encodeURIComponent(p.url);
+        }
+        ensureViz();
+        musicAudio.play().then(startViz).catch(() => toast('浏览器拦截了自动播放，点 ▶ 开始'));
+      } else if (p.state === 'paused' && musicAudio) {
+        musicAudio.pause();
+      }
+    }
+    renderMusicLabel();
+    renderMusicTime();
   }
-  $('music-pause').addEventListener('click', () => send(CliType.Music, { action: musicPlaying ? 'pause' : 'resume' }));
-  $('music-stop').addEventListener('click', () => send(CliType.Music, { action: 'stop' }));
+  // 绑定浏览器播放器的进度/状态事件。
+  function bindMusicAudio(a) {
+    musicAudio = a;
+    a.crossOrigin = 'anonymous';
+    a.addEventListener('timeupdate', renderMusicTime);
+    a.addEventListener('loadedmetadata', renderMusicTime);
+    a.addEventListener('play', () => { musicPlaying = true; renderMusicLabel(); startViz(); });
+    a.addEventListener('pause', () => { musicPlaying = false; renderMusicLabel(); stopViz(); });
+    // 一首放完自动切下一首（连续播放），由服务端解析下一首 URL 再下发 music_state。
+    a.addEventListener('ended', () => { stopViz(); send(CliType.Music, { action: 'next' }); });
+  }
+
+  // ---- 音乐实时频谱（Web Audio AnalyserNode → 播放器内居中柱状条）----
+  const vizCanvas = $('music-viz'), vizCtx = vizCanvas.getContext('2d');
+  const VIZ_BARS = 24;
+  let audioCtx = null, vizRAF = null;
+  let vizBars = new Array(VIZ_BARS).fill(0); // 平滑后的柱高，避免抖动太硬
+  function ensureViz() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      if (musicAudio && !musicAudio._analyser) {
+        const src = audioCtx.createMediaElementSource(musicAudio);
+        const an = audioCtx.createAnalyser();
+        an.fftSize = 256;
+        an.smoothingTimeConstant = 0.8;
+        src.connect(an);
+        an.connect(audioCtx.destination); // 仍要连到输出，否则没声音
+        musicAudio._analyser = an;
+      }
+    } catch (e) { /* createMediaElementSource 每个元素只能建一次，忽略重复 */ }
+  }
+  function startViz() {
+    $('music-bar').classList.add('playing');
+    if (vizRAF) return;
+    const an = musicAudio && musicAudio._analyser;
+    if (!an) return;
+    const data = new Uint8Array(an.frequencyBinCount);
+    const loop = () => {
+      if (!musicAudio || musicAudio.paused) { vizRAF = null; return; }
+      an.getByteFrequencyData(data);
+      drawSpectrum(data);
+      vizRAF = requestAnimationFrame(loop);
+    };
+    vizRAF = requestAnimationFrame(loop);
+  }
+  function stopViz() {
+    if (vizRAF) { cancelAnimationFrame(vizRAF); vizRAF = null; }
+    $('music-bar').classList.remove('playing');
+    vizBars = new Array(VIZ_BARS).fill(0);
+  }
+  // 居中柱状频谱：低频在中间、向两侧展开，上下镜像，柱顶圆角。
+  function drawSpectrum(data) {
+    const w = vizCanvas.width, h = vizCanvas.height, mid = h / 2;
+    vizCtx.clearRect(0, 0, w, h);
+    const usable = Math.floor(data.length * 0.66); // 丢掉几乎为空的高频段
+    const per = Math.max(1, Math.floor(usable / VIZ_BARS));
+    const gap = 2, bw = (w - gap * (VIZ_BARS - 1)) / VIZ_BARS;
+    for (let b = 0; b < VIZ_BARS; b++) {
+      let sum = 0;
+      for (let k = 0; k < per; k++) sum += data[b * per + k];
+      let v = Math.pow((sum / per) / 255, 0.8); // 0..1，做点压缩让小信号更明显
+      vizBars[b] = vizBars[b] * 0.6 + v * 0.4;   // 时间平滑
+      const bh = Math.max(2, vizBars[b] * h);
+      const x = b * (bw + gap), y = mid - bh / 2;
+      const g = vizCtx.createLinearGradient(0, y, 0, y + bh);
+      g.addColorStop(0, '#26ffe0'); g.addColorStop(1, '#00b8a0');
+      vizCtx.fillStyle = g;
+      roundBar(vizCtx, x, y, bw, bh, Math.min(bw / 2, 2));
+    }
+  }
+  function roundBar(c, x, y, w, h, r) {
+    c.beginPath();
+    if (c.roundRect) c.roundRect(x, y, w, h, r);
+    else c.rect(x, y, w, h);
+    c.fill();
+  }
+  // 进度条拖动（仅浏览器播放有效）。
+  (function () {
+    const seek = $('music-seek');
+    if (!seek) return;
+    seek.addEventListener('input', () => { seek.dragging = true; if (musicAudio) $('music-time').textContent = fmtTime(seek.value) + ' / ' + fmtTime(musicAudio.duration); });
+    seek.addEventListener('change', () => { if (musicAudio) musicAudio.currentTime = parseFloat(seek.value) || 0; seek.dragging = false; });
+  })();
+  // 控制：本地有浏览器播放器时直接控制它；否则把命令发给服务端（设备侧 mpg123）。
+  $('music-pause').addEventListener('click', () => {
+    if (musicAudio) {
+      if (musicAudio.paused) { ensureViz(); musicAudio.play(); } else musicAudio.pause();
+    } else {
+      send(CliType.Music, { action: musicPlaying ? 'pause' : 'resume' });
+    }
+  });
+  // ---- QQ 音乐扫码登录 ----
+  let qqPollTimer = null;
+  function stopQQPoll() { if (qqPollTimer) { clearInterval(qqPollTimer); qqPollTimer = null; } }
+  $('qq-login-btn') && $('qq-login-btn').addEventListener('click', async () => {
+    stopQQPoll();
+    const box = $('qq-qr-box'), img = $('qq-qr-img'), st = $('qq-qr-status');
+    box.style.display = 'flex';
+    st.textContent = '正在生成二维码…';
+    // 加时间戳避免缓存，拉取二维码 PNG
+    img.src = '/api/qq-login/start?t=' + Date.now();
+    img.onload = () => { st.textContent = '请用手机 QQ 扫码并确认'; };
+    img.onerror = () => { st.textContent = '二维码获取失败，请重试'; };
+    let tries = 0;
+    qqPollTimer = setInterval(async () => {
+      tries++;
+      if (tries > 100) { stopQQPoll(); st.textContent = '二维码超时，请重新点击'; return; }
+      try {
+        const r = await fetch('/api/qq-login/poll');
+        const d = await r.json();
+        if (d.state === 'ok') { stopQQPoll(); st.textContent = '✅ ' + (d.message || '登录成功'); toast('QQ 音乐登录成功'); setTimeout(() => { box.style.display = 'none'; }, 2500); }
+        else if (d.state === 'scanned') { st.textContent = '已扫码，请在手机上点确认'; }
+        else if (d.state === 'expired') { stopQQPoll(); st.textContent = '二维码已失效，请重新点击按钮'; }
+        else if (d.state === 'error') { stopQQPoll(); st.textContent = '登录失败：' + (d.message || ''); }
+        else { st.textContent = '等待扫码…'; }
+      } catch (e) { /* 网络抖动，下次再试 */ }
+    }, 2000);
+  });
+
+  $('music-next').addEventListener('click', () => { ensureViz(); send(CliType.Music, { action: 'next' }); });
+  $('music-stop').addEventListener('click', () => {
+    if (musicAudio) { musicAudio.pause(); musicAudio = null; }
+    $('music-bar').style.display = 'none';
+    musicPlaying = false;
+    send(CliType.Music, { action: 'stop' });
+  });
 
   // ---- 提醒 / 定时任务 ----
   function renderSchedule(jobs) {
@@ -635,5 +893,6 @@
   setupSchedule();
   setupRecord();
   setupMaterials();
+  setupIO();
   connect();
 })();

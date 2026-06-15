@@ -203,6 +203,17 @@ type ScheduleRemoveCommand struct {
 // Type 实现 Payload。
 func (ScheduleRemoveCommand) Type() Type { return TypeScheduleRemove }
 
+// SetIOCommand 更新 I/O 路由配置（设置页）。空字段表示不改动。
+type SetIOCommand struct {
+	AudioIn   string `json:"audio_in,omitempty"`
+	AudioOut  string `json:"audio_out,omitempty"`
+	TTSEngine string `json:"tts_engine,omitempty"`
+	ImageOut  string `json:"image_out,omitempty"`
+}
+
+// Type 实现 Payload。
+func (SetIOCommand) Type() Type { return TypeSetIO }
+
 // MaterialDeleteCommand 删除一段屏幕表情素材（按情绪名）。上传走 HTTP（POST /api/materials）。
 type MaterialDeleteCommand struct {
 	Name string `json:"name"`

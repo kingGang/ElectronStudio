@@ -56,8 +56,11 @@ func (a *app) materialRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/materials", a.handleMaterialUpload)
 	mux.HandleFunc("/api/material-frames", a.handleMaterialFrames)
 	mux.HandleFunc("/api/material-thumb", a.handleMaterialThumb)
-	mux.HandleFunc("/api/genimg", a.handleGenImg)     // MiniMax 生成图(供页面展示)
-	mux.HandleFunc("/api/genaudio", a.handleGenAudio) // MiniMax 生成音乐(供页面播放)
+	mux.HandleFunc("/api/genimg", a.handleGenImg)          // MiniMax 生成图(供页面展示)
+	mux.HandleFunc("/api/genaudio", a.handleGenAudio)      // MiniMax 生成音乐(供页面播放)
+	mux.HandleFunc("/api/music-proxy", a.handleMusicProxy)       // 代理在线音乐流(同源，供页面画波形)
+	mux.HandleFunc("/api/qq-login/start", a.handleQQLoginStart) // QQ 音乐扫码登录：出二维码
+	mux.HandleFunc("/api/qq-login/poll", a.handleQQLoginPoll)   // QQ 音乐扫码登录：轮询状态
 }
 
 // handleMaterialFrames 接收「前端已抽好的帧序列」并落盘为 emotions/<情绪>/ 帧序列。

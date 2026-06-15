@@ -9,7 +9,9 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/config"
 	"github.com/kingGang/ElectronStudio/internal/display"
 	"github.com/kingGang/ElectronStudio/internal/minimax"
+	"github.com/kingGang/ElectronStudio/internal/music"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 )
 
@@ -234,8 +237,12 @@ func (a *app) handleGenerateMusic(ctx context.Context, prompt, lyrics string) (s
 		}()
 	}
 	if io.AudioOut == "page" || io.AudioOut == "both" {
+		// 作为聊天里的播放器卡片展示（可见、可重播），而非后台静默播放。
 		id := a.genaudio.put(mp3)
-		a.srv.Broadcast(protocol.AudioEvent{Format: "mp3", URL: "/api/genaudio?id=" + id, Text: "♪ " + prompt})
+		a.srv.Broadcast(protocol.ChatEvent{
+			ID: a.nextMsgID(), Role: protocol.RoleAssistant,
+			Content: "♪ " + prompt, Audio: "/api/genaudio?id=" + id, Status: protocol.ChatFinal,
+		})
 	}
 	return "已生成音乐：" + prompt, nil
 }
@@ -254,4 +261,86 @@ func (a *app) handleGenAudio(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "audio/mpeg")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
+}
+
+// handleQQLoginStart 开始一次 QQ 音乐扫码登录，返回二维码 PNG。
+func (a *app) handleQQLoginStart(w http.ResponseWriter, r *http.Request) {
+	q := music.NewQRLogin()
+	png, err := q.Start(r.Context())
+	if err != nil {
+		http.Error(w, "出码失败: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	a.qrMu.Lock()
+	a.qrLogin = q
+	a.qrMu.Unlock()
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(png)
+}
+
+// handleQQLoginPoll 轮询扫码状态；成功则写入 cookie、持久化并热替换音源。
+func (a *app) handleQQLoginPoll(w http.ResponseWriter, r *http.Request) {
+	a.qrMu.Lock()
+	q := a.qrLogin
+	a.qrMu.Unlock()
+	if q == nil {
+		writeJSON(w, map[string]string{"state": "error", "message": "请先获取二维码"})
+		return
+	}
+	res, _ := q.Poll(r.Context())
+	if res.State == "ok" && res.Cookie != "" {
+		a.cfgMu.Lock()
+		a.cfg.Music.Source = "qq"
+		a.cfg.Music.QQ = config.QQConfig{Cookie: res.Cookie}
+		a.saveConfig()
+		a.cfgMu.Unlock()
+		a.music.SetSearcher(music.NewQQMusicSearcher(res.Cookie, "", ""))
+		a.log.Info("QQ 音乐扫码登录成功，已更新 cookie 并切换音源")
+		a.srv.Broadcast(a.statusSnapshot())
+	}
+	writeJSON(w, map[string]string{"state": res.State, "message": res.Message})
+}
+
+// allowedMusicHost 限定可代理的音乐 CDN 域名，避免成为开放代理（SSRF）。
+func allowedMusicHost(h string) bool {
+	h = strings.ToLower(h)
+	return strings.HasSuffix(h, ".qq.com") || strings.Contains(h, "qqmusic") ||
+		strings.Contains(h, "kuwo") || strings.Contains(h, "music.126.net")
+}
+
+// handleMusicProxy 把在线音乐流以同源方式转发给页面：跨域音频在浏览器 Web Audio 的
+// AnalyserNode 里只会拿到全 0（无法画波形），经本服务代理后变为同源即可读到采样。
+// 转发 Range 头以支持页面拖动进度。
+func (a *app) handleMusicProxy(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("url")
+	if raw == "" {
+		http.Error(w, "缺少 url", http.StatusBadRequest)
+		return
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || !allowedMusicHost(u.Hostname()) {
+		http.Error(w, "不允许的地址", http.StatusForbidden)
+		return
+	}
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, raw, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Referer", "https://y.qq.com/")
+	if rng := r.Header.Get("Range"); rng != "" {
+		req.Header.Set("Range", rng)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "上游取流失败", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for _, h := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"} {
+		if v := resp.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }

@@ -37,6 +37,28 @@ type GestureConfig struct {
 // MusicConfig 描述音乐配置。
 type MusicConfig struct {
 	Mpg123 string `json:"mpg123,omitempty"` // mpg123 可执行路径，默认 "mpg123"
+	Source string `json:"source,omitempty"` // 音源：qq | kuwo，默认 kuwo
+	QQ     QQConfig `json:"qq,omitempty"`   // QQ 音乐凭据（source=qq 时用）
+}
+
+// QQConfig 是 QQ 音乐的登录凭据。匿名也能搜与放免费/试听曲；
+// 要放完整付费曲需带登录后的 cookie。
+//
+// 推荐填 Cookie：登录 y.qq.com 后在控制台执行 document.cookie 取整串，原样粘进来——
+// QQ 校验登录态需要 uin/qm_keyst/tmeLoginType 等多个 cookie，只填两三个值往往 104009。
+// 单独的 UIN/Key 仅在不方便取整串时作降级用。
+type QQConfig struct {
+	Cookie string `json:"cookie,omitempty"`      // 整串 cookie（document.cookie），最稳
+	UIN    string `json:"uin,omitempty"`         // 登录 QQ 号（数字）；Cookie 已含则可留空
+	Key    string `json:"qqmusic_key,omitempty"` // qm_keyst / qqmusic_key 值（降级用）
+}
+
+// SourceOr 返回音源，默认 kuwo。
+func (m MusicConfig) SourceOr() string {
+	if m.Source == "qq" {
+		return "qq"
+	}
+	return "kuwo"
 }
 
 // CameraConfig 描述摄像头采集配置（经 ffmpeg 抓取 UVC 摄像头）。

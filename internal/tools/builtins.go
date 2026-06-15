@@ -165,11 +165,34 @@ func MusicGenTool(gen func(ctx context.Context, prompt, lyrics string) (string, 
 	}
 }
 
+// MusicControlTool 构造"音乐控制"工具：对当前播放做下一首/上一首/暂停/继续/停止。
+// 用户说"换一首/下一首/切歌""暂停""继续""停"时用它，而不是重新搜索播放。
+func MusicControlTool(ctrl func(ctx context.Context, action string) (string, error)) Tool {
+	schema := objectSchema(
+		`{"action":{"type":"string","enum":["next","prev","pause","resume","stop"],"description":"next=下一首/换一首, prev=上一首, pause=暂停, resume=继续, stop=停止"}}`,
+		"action")
+	return Tool{
+		Spec: Spec{Name: "music_control", Description: "切换/控制正在播放的音乐。用户说『换一首/换个/下一首/切歌』(没报具体歌名时)用 action=next；『上一首』=prev；『暂停』=pause；『继续』=resume；『停/别放了』=stop。换歌优先用本工具，不要用 play_music 重新搜索。", Parameters: schema},
+		Handler: func(ctx context.Context, args string) (string, error) {
+			var p struct {
+				Action string `json:"action"`
+			}
+			if err := json.Unmarshal([]byte(args), &p); err != nil {
+				return "", fmt.Errorf("参数解析失败: %w", err)
+			}
+			if p.Action == "" {
+				return "", fmt.Errorf("需提供 action")
+			}
+			return ctrl(ctx, p.Action)
+		},
+	}
+}
+
 // MusicTool 构造"放首歌"工具：按关键词搜索并播放。play 由上层注入（接音乐服务）。
 func MusicTool(play func(ctx context.Context, query string) (string, error)) Tool {
 	schema := objectSchema(`{"query":{"type":"string","description":"要播放的歌曲名或歌手名"}}`, "query")
 	return Tool{
-		Spec: Spec{Name: "play_music", Description: "搜索并播放一首音乐", Parameters: schema},
+		Spec: Spec{Name: "play_music", Description: "按歌名或歌手搜索并播放具体歌曲（例：『放七里香』『放周杰伦的歌』）。仅在用户报了具体歌名/歌手时用；只想『换一首/下一首』而没指定歌名时改用 music_control。", Parameters: schema},
 		Handler: func(ctx context.Context, args string) (string, error) {
 			var p struct {
 				Query string `json:"query"`

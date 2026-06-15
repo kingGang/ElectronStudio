@@ -67,7 +67,11 @@
       <div class="music-bar" id="music-bar" style="display:none">
         <span class="music-icon">♪</span>
         <span class="music-now" id="music-now">未播放</span>
+        <canvas class="music-viz" id="music-viz" width="180" height="30"></canvas>
+        <input type="range" class="music-seek" id="music-seek" min="0" max="0" value="0" step="0.1" title="拖动进度" />
+        <span class="music-time" id="music-time">0:00 / 0:00</span>
         <button class="icon-btn" id="music-pause" title="暂停/继续">⏸</button>
+        <button class="icon-btn" id="music-next" title="下一首">⏭</button>
         <button class="icon-btn" id="music-stop" title="停止">⏹</button>
       </div>
       <form class="composer" id="composer">
@@ -140,6 +144,53 @@
 
   <!-- ===== 视图：设置 ===== -->
   <main class="view settings-view" data-view="settings">
+    <section class="panel">
+      <h2>输入 / 输出路由</h2>
+      <p class="muted">设备=ElectronBot 外设(主)，页面=本浏览器(调试/也可用)。改动即时生效并保存。</p>
+      <div class="io-grid">
+        <label class="io-row"><span>语音输入</span>
+          <select id="io-audio_in">
+            <option value="device">设备麦克风（sidecar 识别）</option>
+            <option value="page">网页麦克风（浏览器识别）</option>
+            <option value="off">关闭</option>
+          </select>
+        </label>
+        <label class="io-row"><span>语音/音频输出</span>
+          <select id="io-audio_out">
+            <option value="device">设备扬声器（mpg123）</option>
+            <option value="page">网页播放</option>
+            <option value="both">设备 + 网页</option>
+            <option value="off">关闭</option>
+          </select>
+        </label>
+        <label class="io-row"><span>文字转语音引擎</span>
+          <select id="io-tts_engine">
+            <option value="minimax">MiniMax 云端</option>
+            <option value="sidecar">本地 Piper（sidecar）</option>
+          </select>
+        </label>
+        <label class="io-row"><span>图像输出</span>
+          <select id="io-image_out">
+            <option value="device">设备屏</option>
+            <option value="page">网页</option>
+            <option value="both">设备屏 + 网页</option>
+            <option value="off">关闭</option>
+          </select>
+        </label>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>音乐</h2>
+      <div class="kv"><span>当前音源</span><b id="music-source-label">—</b></div>
+      <p class="muted">QQ 音乐播放完整付费曲需登录。点下方按钮用<b>手机 QQ 扫码</b>授权，自动获取登录态（无需手动复制 cookie）。登录态会过期，失效后再扫一次即可。</p>
+      <div class="qq-login" id="qq-login">
+        <button class="qa" id="qq-login-btn">📱 扫码登录 QQ 音乐</button>
+        <div class="qq-qr-box" id="qq-qr-box" style="display:none">
+          <img id="qq-qr-img" alt="QQ 登录二维码" width="160" height="160" />
+          <div class="qq-qr-status muted" id="qq-qr-status">正在生成二维码…</div>
+        </div>
+      </div>
+    </section>
     <section class="panel">
       <h2>大模型</h2>
       <div class="model-list" id="model-list"><span class="muted">等待状态…</span></div>

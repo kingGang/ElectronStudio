@@ -89,6 +89,21 @@ type StatusEvent struct {
 	LLM     LLMStatus     `json:"llm"`
 	Actions []string      `json:"actions,omitempty"` // 可用的编排动作名（供动作编排页使用）
 	Camera  bool          `json:"camera"`            // 是否配置了摄像头（前端据此显示切换按钮）
+	IO      IOStatus      `json:"io"`                // I/O 路由当前配置（供设置页展示/编辑）
+	Music   MusicStatus   `json:"music"`             // 音乐子系统状态（音源等，供前端展示）
+}
+
+// MusicStatus 是音乐子系统的当前配置（供前端展示来源）。
+type MusicStatus struct {
+	Source string `json:"source"` // qq | kuwo
+}
+
+// IOStatus 是 I/O 路由的当前生效配置（供前端设置页显示与编辑）。
+type IOStatus struct {
+	AudioIn   string `json:"audio_in"`   // device | page | off
+	AudioOut  string `json:"audio_out"`  // device | page | both | off
+	TTSEngine string `json:"tts_engine"` // minimax | sidecar
+	ImageOut  string `json:"image_out"`  // device | page | both | off
 }
 
 // Type 实现 Payload。
@@ -166,7 +181,8 @@ type ChatEvent struct {
 	Role    ChatRole   `json:"role"`
 	Content string     `json:"content"`
 	Tools   []ToolCall `json:"tools,omitempty"`
-	Images  []string   `json:"images,omitempty"` // 可选：随消息展示的图片 URL（如 MiniMax 生成图），页面调试镜像用
+	Images  []string   `json:"images,omitempty"` // 可选：随消息展示的图片 URL（如 MiniMax 生成图）
+	Audio   string     `json:"audio,omitempty"`  // 可选：随消息展示的音频播放器 URL（如 MiniMax 生成的音乐）
 	Status  ChatStatus `json:"status"`
 }
 
@@ -287,6 +303,7 @@ type MusicEvent struct {
 	State  string `json:"state"`            // playing | paused | stopped
 	Name   string `json:"name,omitempty"`   // 当前曲名
 	Artist string `json:"artist,omitempty"` // 当前歌手
+	URL    string `json:"url,omitempty"`    // 可播放流地址（供页面在 audio_out=page/both 时浏览器播放）
 }
 
 // Type 实现 Payload。

@@ -62,3 +62,28 @@ func TestKuwoParse(t *testing.T) {
 		t.Fatalf("解析错误: %+v", r.Data.List)
 	}
 }
+
+// TestQQSearchParse 验证新版 musicu.fcg 搜索响应解析（多歌手拼接）。
+func TestQQSearchParse(t *testing.T) {
+	var r qqSearchResp
+	body := `{"req_1":{"data":{"body":{"song":{"list":[{"mid":"abc123","name":"晴天","singer":[{"name":"周杰伦"},{"name":"嘉宾"}],"interval":269}]}}}}}`
+	if err := json.Unmarshal([]byte(body), &r); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	l := r.Req1.Data.Body.Song.List
+	if len(l) != 1 || l[0].Mid != "abc123" || l[0].Name != "晴天" || len(l[0].Singer) != 2 || l[0].Interval != 269 {
+		t.Fatalf("解析错误: %+v", l)
+	}
+}
+
+// TestQQVkeyParse 验证 QQ vkey 响应解析（purl 为空=无版权，需判空）。
+func TestQQVkeyParse(t *testing.T) {
+	var r qqVkeyResp
+	body := `{"req_0":{"data":{"sip":["http://cdn.qq.com/"],"midurlinfo":[{"purl":"C400abc.m4a?guid=10000&vkey=XYZ"}]}}}`
+	if err := json.Unmarshal([]byte(body), &r); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(r.Req0.Data.MidURLInfo) != 1 || r.Req0.Data.MidURLInfo[0].PURL == "" || len(r.Req0.Data.Sip) != 1 {
+		t.Fatalf("解析错误: %+v", r.Req0.Data)
+	}
+}
