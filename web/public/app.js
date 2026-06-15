@@ -491,11 +491,17 @@
 
   // ---- 音频播放（页面调试镜像：后端把合成语音 base64 推来，浏览器播放）----
   let currentAudio = null;
+  let musicDucked = false; // 因播放语音回复而临时暂停了音乐，待回复结束续播
   function stopAudio() { if (currentAudio) { try { currentAudio.pause(); } catch (_) {} currentAudio = null; } }
+  // 语音回复结束/被打断后，续播之前为让路而暂停的音乐。
+  function resumeDuckedMusic() {
+    if (musicDucked && musicAudio) { musicAudio.play().catch(() => {}); }
+    musicDucked = false;
+  }
   function onAudio(p) {
     if (!p) return;
     stopAudio();              // 先停上一段（打断/新段都先停）
-    if (p.stop) return;       // 仅停止（barge-in）
+    if (p.stop) { resumeDuckedMusic(); return; } // 仅停止（barge-in）→ 续播音乐
     let src = null;
     if (p.url) {
       src = p.url;            // 较大音频（音乐）走 HTTP URL
@@ -504,10 +510,14 @@
       src = 'data:audio/' + mime + ';base64,' + p.data; // 小段语音走 base64
     }
     if (!src) return;
+    // 让路：放语音回复前，先暂停正在播放的音乐，回复结束再自动续播。
+    if (musicAudio && !musicAudio.paused) { try { musicAudio.pause(); } catch (_) {} musicDucked = true; }
     try {
       currentAudio = new Audio(src);
-      currentAudio.play().catch(() => {}); // 自动播放被拦时静默（用户已有交互一般可播）
-    } catch (_) { /* 忽略 */ }
+      currentAudio.addEventListener('ended', resumeDuckedMusic);
+      currentAudio.addEventListener('error', resumeDuckedMusic);
+      currentAudio.play().catch(() => { resumeDuckedMusic(); }); // 播不了也别把音乐一直卡停
+    } catch (_) { resumeDuckedMusic(); }
   }
 
   // ---- 提示条 ----
@@ -597,25 +607,31 @@
   let audioCtx = null, vizRAF = null;
   let vizBars = new Array(VIZ_BARS).fill(0); // 平滑后的柱高，避免抖动太硬
   function ensureViz() {
+    // 关键：绝不为波形牺牲声音。只有 AudioContext 确实在 running 时才把 <audio> 接入
+    // 分析图——否则音频会被导进挂起的 Web Audio 图里导致 play() 成功却无声。
+    // 挂起时只尝试 resume，不建 source，音频照常从元素直接出声（暂时无波形）。
     try {
       if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      if (musicAudio && !musicAudio._analyser) {
+      if (audioCtx.state === 'suspended') { audioCtx.resume(); return; }
+      if (audioCtx.state === 'running' && musicAudio && !musicAudio._analyser) {
         const src = audioCtx.createMediaElementSource(musicAudio);
         const an = audioCtx.createAnalyser();
         an.fftSize = 256;
         an.smoothingTimeConstant = 0.8;
         src.connect(an);
-        an.connect(audioCtx.destination); // 仍要连到输出，否则没声音
+        an.connect(audioCtx.destination); // 接入图后必须连到输出，否则没声音
         musicAudio._analyser = an;
       }
     } catch (e) { /* createMediaElementSource 每个元素只能建一次，忽略重复 */ }
   }
+  // 全局手势兜底：任何点击/按键都尝试唤醒被浏览器策略挂起的 AudioContext。
+  ['pointerdown', 'keydown', 'touchstart'].forEach((ev) =>
+    document.addEventListener(ev, () => { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); }, { passive: true }));
   function startViz() {
-    $('music-bar').classList.add('playing');
     if (vizRAF) return;
     const an = musicAudio && musicAudio._analyser;
-    if (!an) return;
+    if (!an) return; // 没接上分析图（AudioContext 挂起）→ 不显示波形，但音频照常播放
+    $('music-bar').classList.add('playing');
     const data = new Uint8Array(an.frequencyBinCount);
     const loop = () => {
       if (!musicAudio || musicAudio.paused) { vizRAF = null; return; }
