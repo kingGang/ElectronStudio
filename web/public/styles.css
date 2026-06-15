@@ -311,6 +311,13 @@ body {
 .music-bar .icon-btn { width: 34px; height: 30px; font-size: 13px; }
 .music-icon { color: var(--accent); }
 .music-now { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link-btn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px; padding: 0 4px; }
+.dev-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; font-size: 13px; }
+.dev-row select { padding: 6px 8px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); font: inherit; }
+.dev-clone { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.dev-clone h3 { font-size: 14px; margin: 0; }
+.dev-row > span { color: var(--muted); }
+.dev-row textarea, .dev-row input { width: 100%; padding: 6px 8px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); font: inherit; resize: vertical; }
 .qq-qr-box { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 10px; padding: 12px; background: #fff; border-radius: var(--radius-sm); width: fit-content; }
 .qq-qr-box img { display: block; image-rendering: pixelated; }
 .qq-qr-status { color: #333; font-size: 13px; }

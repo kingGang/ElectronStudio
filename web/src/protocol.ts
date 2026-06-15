@@ -56,6 +56,7 @@ export const ClientType = {
   ScheduleRemove: 'schedule_remove',
   MaterialDelete: 'material_delete',
   SetIO: 'set_io',
+  SetDevice: 'set_device',
 } as const
 
 export interface SetIOCommand {
@@ -141,14 +142,20 @@ export interface StatusEvent {
   camera?: boolean   // 是否配置了摄像头
   io?: IOStatus      // I/O 路由当前配置
   music?: MusicStatus // 音乐子系统状态（音源）
+  persona?: string   // 设备角色/人设
+  voice?: string     // 声音音色
+}
+export interface SetDeviceCommand {
+  persona?: string
+  voice?: string
 }
 export interface MusicStatus {
   source: string // qq | kuwo
 }
 export interface IOStatus {
-  audio_in: string   // device | page | off
+  audio_in: string   // device | page | network | off
   audio_out: string  // device | page | both | off
-  tts_engine: string // minimax | sidecar
+  tts_engine: string // minimax | openai | sidecar
   image_out: string  // device | page | both | off
 }
 

@@ -23,7 +23,7 @@
     RecordStop: 'record_stop', DeleteAction: 'delete_action',
     Camera: 'camera', Greet: 'greet', Music: 'music',
     ScheduleAdd: 'schedule_add', ScheduleRemove: 'schedule_remove',
-    MaterialDelete: 'material_delete', SetIO: 'set_io',
+    MaterialDelete: 'material_delete', SetIO: 'set_io', SetDevice: 'set_device',
   };
 
   // 6 轴关节名称（顺序与后端 robot.JointNames / 官方 RobotController 完全一致）。
@@ -122,7 +122,9 @@
     if (s.io) {
       audioInMode = s.io.audio_in || 'device';
       audioOutMode = s.io.audio_out || 'page';
-      el.mic.title = audioInMode === 'page' ? '网页麦克风说话（浏览器识别）' : '切换设备拾音';
+      el.mic.title = audioInMode === 'page' ? '网页麦克风说话（浏览器识别）'
+        : audioInMode === 'network' ? '网页录音（网络 ASR 识别）：点开始、再点结束'
+        : '切换设备拾音';
       renderIO(s.io);
     }
     if (s.music) {
@@ -130,6 +132,11 @@
       const lbl = $('music-source-label');
       if (lbl) lbl.textContent = musicSource === 'qq' ? 'QQ音乐' : (musicSource === 'kuwo' ? '酷我音乐' : musicSource || '—');
     }
+    // 设备角色/音色：仅在用户未正在编辑时回填，避免打断输入。
+    const pa = $('dev-persona');
+    if (pa && document.activeElement !== pa) pa.value = s.persona || '';
+    devVoice = s.voice || '';
+    reconcileVoiceSelect();
     renderSettings(s);
   }
 
@@ -397,7 +404,115 @@
         const payload = {}; payload[f] = sel.value;
         send(CliType.SetIO, payload);
         toast('已更新：' + f + ' = ' + sel.value);
+        if (f === 'tts_engine') setTimeout(loadVoices, 300); // 引擎变了，刷新音色列表
       });
+    });
+    // 设备角色/音色
+    const vsel = $('dev-voice-select');
+    if (vsel) vsel.addEventListener('change', () => {
+      $('dev-voice-custom-row').style.display = (vsel.value === '__custom__') ? '' : 'none';
+    });
+    const vref = $('dev-voice-refresh');
+    if (vref) vref.addEventListener('click', (e) => { e.preventDefault(); loadVoices(); });
+    setupVoicePreview();
+    setupVoiceClone();
+    const save = $('dev-save');
+    if (save) save.addEventListener('click', () => {
+      const v = vsel.value === '__custom__' ? ($('dev-voice').value || '').trim() : vsel.value;
+      send(CliType.SetDevice, { persona: ($('dev-persona').value || '').trim(), voice: v });
+      toast('已保存设备角色与音色');
+    });
+    loadVoices(); // 初次加载当前引擎的音色列表
+  }
+
+  // 音色下拉：从 /api/voices 拉当前引擎可用音色，含"默认/自定义"项。
+  let devVoice = '';
+  function reconcileVoiceSelect() {
+    const sel = $('dev-voice-select');
+    if (!sel) return;
+    const inList = Array.from(sel.options).some((o) => o.value === devVoice && o.value !== '__custom__' && o.value !== '');
+    if (devVoice && !inList) {
+      sel.value = '__custom__';
+      $('dev-voice-custom-row').style.display = '';
+      if (document.activeElement !== $('dev-voice')) $('dev-voice').value = devVoice;
+    } else {
+      sel.value = devVoice || '';
+      $('dev-voice-custom-row').style.display = 'none';
+    }
+  }
+  async function loadVoices() {
+    const sel = $('dev-voice-select');
+    if (!sel) return;
+    try {
+      const r = await fetch('/api/voices');
+      const d = await r.json();
+      sel.innerHTML = '<option value="">（默认）</option>';
+      (d.voices || []).forEach((v) => {
+        const o = document.createElement('option');
+        o.value = v.id; o.textContent = v.name + '（' + v.id + '）';
+        sel.appendChild(o);
+      });
+      const cust = document.createElement('option');
+      cust.value = '__custom__'; cust.textContent = '（自定义 / 手填 ID）';
+      sel.appendChild(cust);
+      if (!(d.voices || []).length) sel.title = '当前引擎无可列音色（本地 sidecar 由模型决定，可用自定义）';
+      reconcileVoiceSelect();
+    } catch (e) { /* 离线/未配置时忽略 */ }
+  }
+
+  // 试听：用当前选中的音色合成一句样例播放。
+  let previewAudio = null;
+  function setupVoicePreview() {
+    const btn = $('dev-voice-preview');
+    if (!btn) return;
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const sel = $('dev-voice-select');
+      const voice = sel.value === '__custom__' ? ($('dev-voice').value || '').trim() : sel.value;
+      if (previewAudio) { try { previewAudio.pause(); } catch (_) {} }
+      btn.textContent = '⏳ 试听中';
+      previewAudio = new Audio('/api/voice-preview?voice=' + encodeURIComponent(voice) + '&t=' + Date.now());
+      previewAudio.onended = previewAudio.onerror = () => { btn.textContent = '▶ 试听'; };
+      previewAudio.play().catch(() => { btn.textContent = '▶ 试听'; toast('试听失败（检查 TTS 引擎/凭据）'); });
+    });
+  }
+
+  // 克隆：录音或上传音频 → POST /api/voice-clone → 成功后刷新音色列表并选中新音色。
+  let cloneRec = null, cloneChunks = [];
+  function setupVoiceClone() {
+    const recBtn = $('clone-record'), subBtn = $('clone-submit'), st = $('clone-status');
+    if (!subBtn) return;
+    if (recBtn) recBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      if (cloneRec && cloneRec.state === 'recording') { cloneRec.stop(); recBtn.textContent = '● 录音'; return; }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        cloneChunks = []; cloneRec = new MediaRecorder(stream);
+        cloneRec.ondataavailable = (ev) => { if (ev.data && ev.data.size) cloneChunks.push(ev.data); };
+        cloneRec.onstop = () => { stream.getTracks().forEach((t) => t.stop()); st.textContent = '已录制 ' + cloneChunks.length + ' 段，点"克隆"提交'; };
+        cloneRec.start(); recBtn.textContent = '■ 停止'; st.textContent = '录音中…（说 10 秒以上）';
+      } catch (err) { toast('无法录音：' + err.message); }
+    });
+    subBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const name = ($('clone-name').value || '').trim();
+      if (!name) { toast('请先填音色名（字母）'); return; }
+      let blob = null, fname = 'voice.webm';
+      const f = $('clone-file').files[0];
+      if (f) { blob = f; fname = f.name; }
+      else if (cloneChunks.length) { blob = new Blob(cloneChunks, { type: cloneRec.mimeType || 'audio/webm' }); }
+      if (!blob) { toast('请先录音或选择音频文件'); return; }
+      st.textContent = '上传并克隆中…（约几十秒）';
+      try {
+        const r = await fetch('/api/voice-clone?name=' + encodeURIComponent(name) + '&file=' + encodeURIComponent(fname), { method: 'POST', body: blob });
+        if (!r.ok) { st.textContent = '克隆失败：' + (await r.text()); return; }
+        const d = await r.json();
+        st.textContent = '✅ 克隆成功：' + d.voice_id;
+        toast('音色克隆成功，已刷新列表');
+        await loadVoices();
+        const sel = $('dev-voice-select');
+        if (sel) { sel.value = d.voice_id; $('dev-voice-custom-row').style.display = 'none'; }
+      } catch (err) { st.textContent = '克隆请求失败'; }
     });
   }
 
@@ -490,12 +605,44 @@
       if (recogOn) { recog.stop(); return; }
       try { recogGotFinal = false; recog.start(); recogOn = true; el.mic.classList.add('active'); setVoice('listening'); }
       catch (_) { /* 已在识别中 */ }
+    } else if (audioInMode === 'network') {
+      toggleNetworkRecord(); // 网页录音 → 网络 ASR（点击开始/再点结束）
     } else {
       micOn = !micOn;
       el.mic.classList.toggle('active', micOn);
       send(CliType.Mic, { action: micOn ? 'start' : 'stop' });
     }
   });
+
+  // ---- 网络 ASR：网页录音(MediaRecorder) → POST /api/transcribe → 当作一次对话输入 ----
+  let mediaRec = null, recChunks = [];
+  async function toggleNetworkRecord() {
+    if (mediaRec && mediaRec.state === 'recording') { mediaRec.stop(); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recChunks = [];
+      mediaRec = new MediaRecorder(stream);
+      mediaRec.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+      mediaRec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        el.mic.classList.remove('active');
+        setVoice('thinking');
+        const blob = new Blob(recChunks, { type: mediaRec.mimeType || 'audio/webm' });
+        try {
+          const ext = (mediaRec.mimeType || 'audio/webm').includes('ogg') ? 'ogg' : 'webm';
+          const r = await fetch('/api/transcribe?name=audio.' + ext, { method: 'POST', body: blob });
+          if (!r.ok) { toast('识别失败：' + (await r.text())); setVoice('idle'); return; }
+          const d = await r.json();
+          if (d.text) { send(CliType.SendText, { text: d.text }); }
+          else { toast('没听清，请再说一遍'); setVoice('idle'); }
+        } catch (e) { toast('识别请求失败'); setVoice('idle'); }
+      };
+      mediaRec.start();
+      el.mic.classList.add('active');
+      setVoice('listening');
+      toast('录音中，再点一下麦克风结束');
+    } catch (e) { toast('无法访问麦克风：' + e.message); }
+  }
 
   // ---- 音频播放（页面调试镜像：后端把合成语音 base64 推来，浏览器播放）----
   let currentAudio = null;

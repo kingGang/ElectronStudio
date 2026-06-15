@@ -39,6 +39,7 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/llm"
 	"github.com/kingGang/ElectronStudio/internal/minimax"
 	"github.com/kingGang/ElectronStudio/internal/music"
+	"github.com/kingGang/ElectronStudio/internal/netspeech"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 	"github.com/kingGang/ElectronStudio/internal/robot"
 	"github.com/kingGang/ElectronStudio/internal/robot/electronbot"
@@ -50,10 +51,12 @@ import (
 	"github.com/kingGang/ElectronStudio/web"
 )
 
-// systemPrompt 是对话的系统提示，约束助手扮演桌面机器人小电。
-// 关键：强制"动作必须调工具、不许空口承诺"——MiniMax-M3 等模型对模糊指令容易只
-// 口头回应而不实际调用工具（如说"为你放首歌"却不调 play_music），这里明确禁止。
-const systemPrompt = `你是桌面机器人小电，回答简洁友好。
+// defaultPersona 是默认的设备角色/人设；可被 config.persona 覆盖（设置页可改）。
+const defaultPersona = "你是桌面机器人小电，回答简洁友好。"
+
+// toolRules 是固定的工具使用铁律，始终拼在人设之后——确保换了人设也不破坏"动作必须调工具"。
+// 关键：MiniMax-M3 等模型对模糊指令容易只口头回应而不实际调用工具，这里明确禁止。
+const toolRules = `
 
 你能调用工具完成实际动作：播放音乐(play_music)、音乐控制(music_control)、生成音乐(generate_music)、生成图片(generate_image)、设提醒/定时(schedule)、看摄像头(look)、播放动作/表情等。
 
@@ -66,6 +69,14 @@ const systemPrompt = `你是桌面机器人小电，回答简洁友好。
    - "上一首"→ music_control prev；"暂停"→ pause；"继续"→ resume；"停/别放了"→ stop
    - "生成/创作一段音乐"→ generate_music
 4. 工具执行后再用一句话简短告知结果。`
+
+// buildSystemPrompt 组合"人设 + 工具铁律"为完整系统提示。
+func buildSystemPrompt(persona string) string {
+	if persona == "" {
+		persona = defaultPersona
+	}
+	return persona + toolRules
+}
 
 // maxHistory 限制保留的对话轮数，防止上下文无限增长。
 const maxHistory = 20
@@ -144,6 +155,8 @@ type app struct {
 	gesture gesture.Service
 	music   *music.Service
 	mm      *minimax.Client    // MiniMax 多模态(图片/语音)客户端；nil=未配置
+	netTTS  *netspeech.TTSClient // 网络 TTS(OpenAI 兼容)；nil=未配置
+	netASR  *netspeech.ASRClient // 网络 ASR(OpenAI 兼容)；nil=未配置
 	player  *audioout.Player   // 设备侧 mp3 播放(mpg123)
 	genimg  *genImgStore       // 生成图暂存(供页面 HTTP 取回)
 	genaudio *genImgStore      // 生成音频(音乐)暂存(供页面 HTTP 取回)
@@ -226,7 +239,7 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		cfg:         cfg,
 		cfgPath:     cfgPath,
 		actionsPath: actionsPath,
-		history:     []llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}},
+		history:     []llm.Message{{Role: llm.RoleSystem, Content: buildSystemPrompt(cfg.Persona)}},
 	}
 
 	// 新客户端连上时，推送一次状态快照，让前端立即渲染。
@@ -310,6 +323,15 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	if mmc := cfg.ResolveMiniMax(); mmc.BaseURL != "" && mmc.APIKey != "" {
 		a.mm = minimax.New(mmc.BaseURL, mmc.APIKey)
 		log.Info("已启用 MiniMax 多模态", "base", mmc.BaseURL, "tts_engine", cfg.IO.TTSEngineOr(), "audio_out", cfg.IO.AudioOutOr(), "image_out", cfg.IO.ImageOutOr())
+	}
+	// 网络语音（OpenAI 兼容）：配置了 base_url 即启用，供 tts_engine=openai / audio_in=network 使用。
+	if t := cfg.Speech.TTS; t.BaseURL != "" {
+		a.netTTS = netspeech.NewTTS(t.BaseURL, t.APIKey, t.Model, t.Voice, t.Format)
+		log.Info("已启用网络 TTS", "base", t.BaseURL, "model", t.Model)
+	}
+	if r := cfg.Speech.ASR; r.BaseURL != "" {
+		a.netASR = netspeech.NewASR(r.BaseURL, r.APIKey, r.Model)
+		log.Info("已启用网络 ASR", "base", r.BaseURL, "model", r.Model)
 	}
 	a.player = audioout.New(cfg.Music.Mpg123, log) // 设备侧 mp3 播放复用 mpg123 路径
 	a.genimg = newGenImgStore()
@@ -740,6 +762,11 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 	case protocol.TypeSetIO:
 		if cmd, err := protocol.As[protocol.SetIOCommand](in.Env); err == nil {
 			a.handleSetIO(cmd)
+		}
+
+	case protocol.TypeSetDevice:
+		if cmd, err := protocol.As[protocol.SetDeviceCommand](in.Env); err == nil {
+			a.handleSetDevice(cmd)
 		}
 
 	default:
@@ -1235,7 +1262,9 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 			TTSEngine: a.cfg.IO.TTSEngineOr(),
 			ImageOut:  a.cfg.IO.ImageOutOr(),
 		},
-		Music: protocol.MusicStatus{Source: a.cfg.Music.SourceOr()},
+		Music:   protocol.MusicStatus{Source: a.cfg.Music.SourceOr()},
+		Persona: a.cfg.Persona,
+		Voice:   a.cfg.Voice,
 	}
 }
 
@@ -1243,11 +1272,11 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 func validIO(field, v string) bool {
 	switch field {
 	case "audio_in":
-		return v == "device" || v == "page" || v == "off"
+		return v == "device" || v == "page" || v == "network" || v == "off"
 	case "audio_out":
 		return v == "device" || v == "page" || v == "both" || v == "off"
 	case "tts_engine":
-		return v == "minimax" || v == "sidecar"
+		return v == "minimax" || v == "sidecar" || v == "openai"
 	case "image_out":
 		return v == "device" || v == "page" || v == "both" || v == "off"
 	}
@@ -1271,6 +1300,24 @@ func (a *app) handleSetIO(cmd protocol.SetIOCommand) {
 	}
 	a.saveConfig()
 	a.cfgMu.Unlock()
+	a.srv.Broadcast(a.statusSnapshot())
+}
+
+// handleSetDevice 设置设备角色(人设)与音色：写配置落盘；人设变化即时更新系统提示。
+func (a *app) handleSetDevice(cmd protocol.SetDeviceCommand) {
+	a.cfgMu.Lock()
+	a.cfg.Persona = cmd.Persona
+	a.cfg.Voice = cmd.Voice
+	persona := a.cfg.Persona
+	a.saveConfig()
+	a.cfgMu.Unlock()
+	// 即时生效：替换对话历史里的系统提示（人设 + 固定工具铁律）。
+	a.histMu.Lock()
+	if len(a.history) > 0 && a.history[0].Role == llm.RoleSystem {
+		a.history[0].Content = buildSystemPrompt(persona)
+	}
+	a.histMu.Unlock()
+	a.log.Info("更新设备角色与音色", "voice", cmd.Voice)
 	a.srv.Broadcast(a.statusSnapshot())
 }
 

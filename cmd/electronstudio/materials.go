@@ -61,6 +61,10 @@ func (a *app) materialRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/music-proxy", a.handleMusicProxy)       // 代理在线音乐流(同源，供页面画波形)
 	mux.HandleFunc("/api/qq-login/start", a.handleQQLoginStart) // QQ 音乐扫码登录：出二维码
 	mux.HandleFunc("/api/qq-login/poll", a.handleQQLoginPoll)   // QQ 音乐扫码登录：轮询状态
+	mux.HandleFunc("/api/transcribe", a.handleTranscribe)       // 网络 ASR：上传音频→文字
+	mux.HandleFunc("/api/voices", a.handleVoices)               // 当前 TTS 引擎可用音色列表（供下拉）
+	mux.HandleFunc("/api/voice-preview", a.handleVoicePreview)  // 试听某音色（合成一句样例）
+	mux.HandleFunc("/api/voice-clone", a.handleVoiceClone)      // 从一段音频克隆音色（MiniMax）
 }
 
 // handleMaterialFrames 接收「前端已抽好的帧序列」并落盘为 emotions/<情绪>/ 帧序列。

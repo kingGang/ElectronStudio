@@ -145,6 +145,34 @@
   <!-- ===== 视图：设置 ===== -->
   <main class="view settings-view" data-view="settings">
     <section class="panel">
+      <h2>设备角色 / 音色</h2>
+      <p class="muted">给设备设定人设（影响大模型说话风格）和声音音色（当前语音引擎的音色）。改动即时生效并保存。</p>
+      <label class="dev-row"><span>角色 / 人设</span>
+        <textarea id="dev-persona" rows="3" placeholder="例：你是桌面机器人小电，活泼可爱、回答简洁。"></textarea>
+      </label>
+      <label class="dev-row"><span>声音音色
+          <button type="button" class="link-btn" id="dev-voice-refresh">↻ 刷新</button>
+          <button type="button" class="link-btn" id="dev-voice-preview">▶ 试听</button>
+        </span>
+        <select id="dev-voice-select"><option value="">（默认）</option></select>
+      </label>
+      <label class="dev-row" id="dev-voice-custom-row" style="display:none"><span>自定义音色 ID</span>
+        <input id="dev-voice" placeholder="手填音色 ID" />
+      </label>
+      <button class="qa" id="dev-save">保存角色与音色</button>
+      <div class="dev-clone">
+        <div class="panel-head"><h3>从语音克隆音色（MiniMax）</h3></div>
+        <p class="muted">录一段或上传一段清晰人声（约 10 秒~5 分钟），克隆成一个新音色，克隆后出现在上面的列表里可选。</p>
+        <div class="am-row">
+          <input id="clone-name" placeholder="音色名（字母，如 myvoice）" />
+          <button class="qa" id="clone-record">● 录音</button>
+          <input id="clone-file" type="file" accept="audio/*" />
+          <button class="qa" id="clone-submit">克隆</button>
+        </div>
+        <span class="muted" id="clone-status"></span>
+      </div>
+    </section>
+    <section class="panel">
       <h2>输入 / 输出路由</h2>
       <p class="muted">设备=ElectronBot 外设(主)，页面=本浏览器(调试/也可用)。改动即时生效并保存。</p>
       <div class="io-grid">
@@ -152,6 +180,7 @@
           <select id="io-audio_in">
             <option value="device">设备麦克风（sidecar 识别）</option>
             <option value="page">网页麦克风（浏览器识别）</option>
+            <option value="network">网页麦克风（网络 ASR，speech.asr）</option>
             <option value="off">关闭</option>
           </select>
         </label>
@@ -166,6 +195,7 @@
         <label class="io-row"><span>文字转语音引擎</span>
           <select id="io-tts_engine">
             <option value="minimax">MiniMax 云端</option>
+            <option value="openai">网络 AI（OpenAI 兼容，speech.tts）</option>
             <option value="sidecar">本地 Piper（sidecar）</option>
           </select>
         </label>

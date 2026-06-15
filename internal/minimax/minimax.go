@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -81,6 +82,124 @@ func (c *Client) post(ctx context.Context, path string, reqBody any) ([]byte, er
 		return nil, fmt.Errorf("minimax: 服务返回 %d: %s", resp.StatusCode, snippet(data, 256))
 	}
 	return data, nil
+}
+
+// ---------------------------------------------------------------------------
+// 音色列表（get_voice）
+// ---------------------------------------------------------------------------
+
+// Voice 是一个可用音色。
+type Voice struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type getVoiceResp struct {
+	SystemVoice []struct {
+		VoiceID   string `json:"voice_id"`
+		VoiceName string `json:"voice_name"`
+	} `json:"system_voice"`
+	VoiceCloning []struct {
+		VoiceID   string `json:"voice_id"`
+		VoiceName string `json:"voice_name"`
+	} `json:"voice_cloning"`
+	BaseResp baseResp `json:"base_resp"`
+}
+
+// ListVoices 拉取可用音色（系统音色 + 克隆音色），用于前端下拉选择。
+func (c *Client) ListVoices(ctx context.Context) ([]Voice, error) {
+	data, err := c.post(ctx, "/get_voice", map[string]any{"voice_type": "all"})
+	if err != nil {
+		return nil, err
+	}
+	var r getVoiceResp
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("minimax: 解析音色列表失败: %w", err)
+	}
+	if r.BaseResp.StatusCode != 0 {
+		return nil, fmt.Errorf("minimax: 获取音色失败 (%d): %s", r.BaseResp.StatusCode, r.BaseResp.StatusMsg)
+	}
+	voices := make([]Voice, 0, len(r.SystemVoice)+len(r.VoiceCloning))
+	for _, v := range r.SystemVoice {
+		voices = append(voices, Voice{ID: v.VoiceID, Name: v.VoiceName})
+	}
+	for _, v := range r.VoiceCloning {
+		name := v.VoiceName
+		if name == "" {
+			name = v.VoiceID
+		}
+		voices = append(voices, Voice{ID: v.VoiceID, Name: "克隆·" + name})
+	}
+	return voices, nil
+}
+
+// ---------------------------------------------------------------------------
+// 音色克隆（files/upload + voice_clone）
+// ---------------------------------------------------------------------------
+
+type uploadResp struct {
+	File struct {
+		FileID int64 `json:"file_id"`
+	} `json:"file"`
+	BaseResp baseResp `json:"base_resp"`
+}
+
+// UploadFile 上传一段音频用于克隆（purpose=voice_clone），返回 file_id。
+func (c *Client) UploadFile(ctx context.Context, audio []byte, filename, purpose string) (int64, error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField("purpose", purpose)
+	fw, err := w.CreateFormFile("file", orDefault(filename, "voice.mp3"))
+	if err != nil {
+		return 0, err
+	}
+	if _, err := fw.Write(audio); err != nil {
+		return 0, err
+	}
+	_ = w.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/files/upload", &buf)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("minimax: 上传返回 %d: %s", resp.StatusCode, snippet(data, 256))
+	}
+	var r uploadResp
+	if err := json.Unmarshal(data, &r); err != nil {
+		return 0, fmt.Errorf("minimax: 解析上传响应失败: %w", err)
+	}
+	if r.BaseResp.StatusCode != 0 || r.File.FileID == 0 {
+		return 0, fmt.Errorf("minimax: 上传失败 (%d): %s", r.BaseResp.StatusCode, r.BaseResp.StatusMsg)
+	}
+	return r.File.FileID, nil
+}
+
+// CloneVoice 用已上传的 file_id 克隆出一个音色 voiceID（需满足：字母开头、含字母与数字、≥8 位）。
+func (c *Client) CloneVoice(ctx context.Context, fileID int64, voiceID string) error {
+	data, err := c.post(ctx, "/voice_clone", map[string]any{"file_id": fileID, "voice_id": voiceID})
+	if err != nil {
+		return err
+	}
+	var r struct {
+		BaseResp baseResp `json:"base_resp"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		return fmt.Errorf("minimax: 解析克隆响应失败: %w", err)
+	}
+	if r.BaseResp.StatusCode != 0 {
+		return fmt.Errorf("minimax: 克隆失败 (%d): %s", r.BaseResp.StatusCode, r.BaseResp.StatusMsg)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

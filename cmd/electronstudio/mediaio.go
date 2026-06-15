@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kingGang/ElectronStudio/internal/config"
 	"github.com/kingGang/ElectronStudio/internal/display"
@@ -94,6 +95,7 @@ type ioSnap struct {
 	AudioOut  string
 	TTSEngine string
 	ImageOut  string
+	Voice     string // 设备音色（覆盖当前引擎音色），来自 config.voice
 	MM        config.MiniMaxConfig
 }
 
@@ -107,6 +109,7 @@ func (a *app) ioSnapshot() ioSnap {
 		AudioOut:  io.AudioOutOr(),
 		TTSEngine: io.TTSEngineOr(),
 		ImageOut:  io.ImageOutOr(),
+		Voice:     a.cfg.Voice,
 		MM:        a.cfg.ResolveMiniMax(),
 	}
 }
@@ -142,10 +145,31 @@ func (a *app) speak(parent context.Context, text string) {
 	if io.AudioOut == "off" { // 别出声：不合成、不播放
 		return
 	}
+	if io.TTSEngine == "openai" && a.netTTS != nil {
+		sctx, cancel := context.WithCancel(context.Background())
+		a.setSpeakCancel(cancel)
+		audio, err := a.netTTS.Synthesize(sctx, text, io.Voice)
+		if sctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			a.log.Warn("网络 TTS 合成失败，回退 sidecar", "err", err)
+			if e := a.speech.Speak(parent, text); e != nil {
+				a.log.Warn("sidecar 语音失败", "err", e)
+			}
+			return
+		}
+		a.routeAudio(sctx, io.AudioOut, audio, text)
+		return
+	}
 	if io.TTSEngine == "minimax" && a.mm != nil {
 		sctx, cancel := context.WithCancel(context.Background())
 		a.setSpeakCancel(cancel)
-		mp3, err := a.mm.Synthesize(sctx, text, minimax.SpeakOptions{Model: io.MM.TTSModel, VoiceID: io.MM.VoiceID})
+		voiceID := io.MM.VoiceID
+		if io.Voice != "" {
+			voiceID = io.Voice // 设备音色覆盖
+		}
+		mp3, err := a.mm.Synthesize(sctx, text, minimax.SpeakOptions{Model: io.MM.TTSModel, VoiceID: voiceID})
 		if sctx.Err() != nil { // 合成期间被打断，直接放弃
 			return
 		}
@@ -300,6 +324,139 @@ func (a *app) handleQQLoginPoll(w http.ResponseWriter, r *http.Request) {
 		a.srv.Broadcast(a.statusSnapshot())
 	}
 	writeJSON(w, map[string]string{"state": res.State, "message": res.Message})
+}
+
+// handleTranscribe 网络 ASR：接收页面上传的音频，转发给配置的 OpenAI 兼容识别服务，返回文字。
+func (a *app) handleTranscribe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "仅支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.netASR == nil {
+		http.Error(w, "未配置网络 ASR（speech.asr）", http.StatusServiceUnavailable)
+		return
+	}
+	audio, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 25<<20)) // 上限 25MB
+	if err != nil || len(audio) == 0 {
+		http.Error(w, "读取音频失败", http.StatusBadRequest)
+		return
+	}
+	name := r.URL.Query().Get("name")
+	text, err := a.netASR.Transcribe(r.Context(), audio, name)
+	if err != nil {
+		a.log.Warn("网络 ASR 识别失败", "err", err)
+		http.Error(w, "识别失败: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]string{"text": text})
+}
+
+// openAIVoices 是 OpenAI 兼容 TTS 的内置音色（无列表 API，用已知集合）。
+var openAIVoices = []minimax.Voice{
+	{ID: "alloy", Name: "Alloy"}, {ID: "echo", Name: "Echo"}, {ID: "fable", Name: "Fable"},
+	{ID: "onyx", Name: "Onyx"}, {ID: "nova", Name: "Nova"}, {ID: "shimmer", Name: "Shimmer"},
+	{ID: "ash", Name: "Ash"}, {ID: "ballad", Name: "Ballad"}, {ID: "coral", Name: "Coral"},
+	{ID: "sage", Name: "Sage"}, {ID: "verse", Name: "Verse"},
+}
+
+const voiceSampleText = "你好，我是你的桌面机器人小电，很高兴为你服务～"
+
+// handleVoicePreview 用指定音色合成一句样例音频返回，供设置页试听。
+func (a *app) handleVoicePreview(w http.ResponseWriter, r *http.Request) {
+	voice := r.URL.Query().Get("voice")
+	io := a.ioSnapshot()
+	var audio []byte
+	var err error
+	switch io.TTSEngine {
+	case "openai":
+		if a.netTTS == nil {
+			http.Error(w, "未配置网络 TTS", http.StatusServiceUnavailable)
+			return
+		}
+		audio, err = a.netTTS.Synthesize(r.Context(), voiceSampleText, voice)
+	default: // minimax
+		if a.mm == nil {
+			http.Error(w, "未配置 MiniMax", http.StatusServiceUnavailable)
+			return
+		}
+		v := voice
+		if v == "" {
+			v = io.MM.VoiceID
+		}
+		audio, err = a.mm.Synthesize(r.Context(), voiceSampleText, minimax.SpeakOptions{Model: io.MM.TTSModel, VoiceID: v})
+	}
+	if err != nil {
+		a.log.Warn("音色试听合成失败", "voice", voice, "err", err)
+		http.Error(w, "试听失败: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(audio)
+}
+
+// cloneVoiceIDRe 仅保留字母数字，用于从用户名字构造合法 voice_id。
+var cloneVoiceIDRe = regexp.MustCompile(`[^a-zA-Z0-9]`)
+
+// handleVoiceClone 从上传的音频克隆出一个 MiniMax 音色，返回新 voice_id。
+func (a *app) handleVoiceClone(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "仅支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.mm == nil {
+		http.Error(w, "未配置 MiniMax（克隆音色需要 MiniMax）", http.StatusServiceUnavailable)
+		return
+	}
+	audio, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 25<<20))
+	if err != nil || len(audio) == 0 {
+		http.Error(w, "读取音频失败", http.StatusBadRequest)
+		return
+	}
+	// 构造合法 voice_id：字母开头、含字母与数字、≥8 位。
+	base := cloneVoiceIDRe.ReplaceAllString(r.URL.Query().Get("name"), "")
+	if base == "" || !((base[0] >= 'a' && base[0] <= 'z') || (base[0] >= 'A' && base[0] <= 'Z')) {
+		base = "voice" + base
+	}
+	voiceID := base + strconv.FormatInt(time.Now().Unix(), 10) // 追加数字保证含数字且唯一
+	name := r.URL.Query().Get("file")
+	fileID, err := a.mm.UploadFile(r.Context(), audio, name, "voice_clone")
+	if err != nil {
+		a.log.Warn("克隆-上传失败", "err", err)
+		http.Error(w, "上传失败: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if err := a.mm.CloneVoice(r.Context(), fileID, voiceID); err != nil {
+		a.log.Warn("克隆失败", "err", err)
+		http.Error(w, "克隆失败: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	a.log.Info("音色克隆成功", "voice_id", voiceID)
+	writeJSON(w, map[string]string{"voice_id": voiceID})
+}
+
+// handleVoices 返回当前 TTS 引擎的可用音色列表，供设置页下拉选择。
+// minimax: 调 get_voice 动态拉取(含克隆音色)；openai: 内置集合；sidecar: 由模型决定，返回空。
+func (a *app) handleVoices(w http.ResponseWriter, r *http.Request) {
+	engine := a.ioSnapshot().TTSEngine
+	type voiceList struct {
+		Engine string          `json:"engine"`
+		Voices []minimax.Voice `json:"voices"`
+	}
+	out := voiceList{Engine: engine, Voices: []minimax.Voice{}}
+	switch engine {
+	case "minimax":
+		if a.mm != nil {
+			if vs, err := a.mm.ListVoices(r.Context()); err != nil {
+				a.log.Warn("拉取 MiniMax 音色失败", "err", err)
+			} else {
+				out.Voices = vs
+			}
+		}
+	case "openai":
+		out.Voices = openAIVoices
+	}
+	writeJSON(w, out)
 }
 
 // allowedMusicHost 限定可代理的音乐 CDN 域名，避免成为开放代理（SSRF）。

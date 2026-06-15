@@ -24,9 +24,27 @@ type ModelConfig struct {
 	Model   string `json:"model,omitempty"`
 }
 
-// SpeechConfig 描述语音 sidecar 配置。
+// SpeechConfig 描述语音配置：本地 sidecar + 可选的网络 TTS/ASR（OpenAI 兼容）。
 type SpeechConfig struct {
-	SidecarURL string `json:"sidecar_url,omitempty"`
+	SidecarURL string        `json:"sidecar_url,omitempty"`
+	TTS        NetSpeechTTS  `json:"tts,omitempty"` // 网络 TTS（io.tts_engine=openai 时用）
+	ASR        NetSpeechASR  `json:"asr,omitempty"` // 网络 ASR（io.audio_in=network 时用）
+}
+
+// NetSpeechTTS 是 OpenAI 兼容的文字转语音服务配置（POST {base_url}/audio/speech）。
+type NetSpeechTTS struct {
+	BaseURL string `json:"base_url,omitempty"` // 形如 https://api.openai.com/v1
+	APIKey  string `json:"api_key,omitempty"`
+	Model   string `json:"model,omitempty"`  // 如 tts-1 / gpt-4o-mini-tts
+	Voice   string `json:"voice,omitempty"`  // 如 alloy
+	Format  string `json:"format,omitempty"` // 默认 mp3
+}
+
+// NetSpeechASR 是 OpenAI 兼容的语音识别服务配置（POST {base_url}/audio/transcriptions）。
+type NetSpeechASR struct {
+	BaseURL string `json:"base_url,omitempty"`
+	APIKey  string `json:"api_key,omitempty"`
+	Model   string `json:"model,omitempty"` // 如 whisper-1
 }
 
 // GestureConfig 描述手势 sidecar 配置。
@@ -97,15 +115,17 @@ func (io IOConfig) ImageOutOr() string  { return orStr(io.ImageOut, "both") }
 
 // Config 是应用的完整配置。
 type Config struct {
-	Addr   string        `json:"addr"`
-	Robot  string        `json:"robot,omitempty"` // auto | electronbot | mock
+	Addr    string        `json:"addr"`
+	Robot   string        `json:"robot,omitempty"`   // auto | electronbot | mock
+	Persona string        `json:"persona,omitempty"` // 设备角色/人设（作为系统提示的人设部分）
+	Voice   string        `json:"voice,omitempty"`   // 声音音色（覆盖当前 TTS 引擎的音色）
 	Speech  SpeechConfig  `json:"speech"`
 	Gesture GestureConfig `json:"gesture"`
 	Camera  CameraConfig  `json:"camera"`
 	Music   MusicConfig   `json:"music"`
-	IO     IOConfig      `json:"io"`
-	Models []ModelConfig `json:"models"`
-	Active string        `json:"active,omitempty"`
+	IO      IOConfig      `json:"io"`
+	Models  []ModelConfig `json:"models"`
+	Active  string        `json:"active,omitempty"`
 }
 
 // ResolveMiniMax 返回最终生效的 MiniMax 凭据：IO.MiniMax 优先；BaseURL/APIKey 缺失时

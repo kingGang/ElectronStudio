@@ -91,6 +91,8 @@ type StatusEvent struct {
 	Camera  bool          `json:"camera"`            // 是否配置了摄像头（前端据此显示切换按钮）
 	IO      IOStatus      `json:"io"`                // I/O 路由当前配置（供设置页展示/编辑）
 	Music   MusicStatus   `json:"music"`             // 音乐子系统状态（音源等，供前端展示）
+	Persona string        `json:"persona,omitempty"` // 设备角色/人设（供设置页展示/编辑）
+	Voice   string        `json:"voice,omitempty"`   // 声音音色（供设置页展示/编辑）
 }
 
 // MusicStatus 是音乐子系统的当前配置（供前端展示来源）。
