@@ -13,6 +13,7 @@
     <nav class="nav" id="nav">
       <button class="nav-btn active" data-view="home">对话</button>
       <button class="nav-btn" data-view="choreo">动作编排</button>
+      <button class="nav-btn" data-view="model3d">3D 模型</button>
       <button class="nav-btn" data-view="materials">素材</button>
       <button class="nav-btn" data-view="settings">设置</button>
     </nav>
@@ -110,6 +111,18 @@
         <label class="enable-toggle"><input type="checkbox" id="jog-enable" checked /> 舵机使能</label>
       </div>
       <div class="joints" id="joints"></div>
+    </section>
+  </main>
+
+  <!-- ===== 视图：3D 模型 ===== -->
+  <main class="view model3d-view" data-view="model3d">
+    <section class="panel model3d-panel">
+      <div class="panel-head">
+        <h2>ElectronBot 3D 模型</h2>
+        <span class="muted" id="model3d-status">等待加载…</span>
+      </div>
+      <div class="model3d-stage" id="model3d-stage"></div>
+      <p class="muted">鼠标拖动旋转、滚轮缩放。模型由 ElectronBot 原始 CAD(STEP) 转换为 glTF 显示。</p>
     </section>
   </main>
 
@@ -273,6 +286,9 @@
   </main>
 
   <div class="toast" id="toast"></div>
+  <script src="vendor/three.min.js"></script>
+  <script src="vendor/GLTFLoader.js"></script>
+  <script src="vendor/OrbitControls.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -55,8 +55,56 @@
       const view = btn.dataset.view;
       document.querySelectorAll('.nav-btn').forEach((b) => b.classList.toggle('active', b === btn));
       document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.dataset.view === view));
+      if (view === 'model3d') init3D(); // 首次打开才加载 11MB 模型
     });
   });
+
+  // ---- 3D 模型（three.js + GLTFLoader，懒加载）----
+  let model3dReady = false;
+  function init3D() {
+    if (model3dReady || typeof THREE === 'undefined') return;
+    model3dReady = true;
+    const stage = $('model3d-stage'), st = $('model3d-status');
+    const W = () => stage.clientWidth || 600, H = () => stage.clientHeight || 400;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0c1118);
+    const camera = new THREE.PerspectiveCamera(45, W() / H(), 0.1, 5000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    renderer.setSize(W(), H());
+    stage.appendChild(renderer.domElement);
+    // 灯光
+    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.9); dir.position.set(1, 2, 2); scene.add(dir);
+    const dir2 = new THREE.DirectionalLight(0x88aaff, 0.4); dir2.position.set(-2, 1, -1); scene.add(dir2);
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true; controls.autoRotate = true; controls.autoRotateSpeed = 1.0;
+    st.textContent = '加载模型中…';
+    new THREE.GLTFLoader().load('models/electronbot.glb', (gltf) => {
+      const root = gltf.scene;
+      // 居中并按包围盒自动调整相机距离
+      const box = new THREE.Box3().setFromObject(root);
+      const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+      root.position.sub(center);
+      const maxDim = Math.max(size.x, size.y, size.z) || 1;
+      camera.position.set(0, maxDim * 0.3, maxDim * 1.8);
+      controls.target.set(0, 0, 0); controls.update();
+      scene.add(root);
+      window.electronbotModel = root; // 供后续"驱动表情/动作"用
+      st.textContent = '拖动旋转 / 滚轮缩放';
+    }, (e) => { if (e.total) st.textContent = '加载中 ' + Math.round((e.loaded / e.total) * 100) + '%'; },
+      (err) => { st.textContent = '模型加载失败'; console.error(err); });
+    function loop() {
+      requestAnimationFrame(loop);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    loop();
+    window.addEventListener('resize', () => {
+      if (!stage.clientWidth) return;
+      camera.aspect = W() / H(); camera.updateProjectionMatrix(); renderer.setSize(W(), H());
+    });
+  }
 
   // ======================================================================
   // WebSocket（带自动重连）
