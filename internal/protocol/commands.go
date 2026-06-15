@@ -224,9 +224,11 @@ func (MaterialDeleteCommand) Type() Type { return TypeMaterialDelete }
 
 // MusicCommand 控制音乐播放。
 type MusicCommand struct {
-	Action string `json:"action"`           // play | pause | resume | stop | volume
-	Query  string `json:"query,omitempty"`  // action=play 时的搜索关键词
-	Volume int    `json:"volume,omitempty"` // action=volume 时的音量(0~100)
+	Action   string  `json:"action"`             // play | pause | resume | stop | next | prev | volume | report
+	Query    string  `json:"query,omitempty"`    // action=play 时的搜索关键词
+	Volume   int     `json:"volume,omitempty"`   // action=volume 时的音量(0~100)
+	Position float64 `json:"position,omitempty"` // action=report 时页面上报的播放进度(秒)
+	Playing  bool    `json:"playing,omitempty"`  // action=report 时页面上报的播放/暂停状态
 }
 
 // Type 实现 Payload。

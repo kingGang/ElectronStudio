@@ -76,9 +76,11 @@ export interface ScheduleAddCommand {
 }
 
 export interface MusicCommand {
-  action: 'play' | 'pause' | 'resume' | 'stop' | 'next' | 'prev' | 'volume'
+  action: 'play' | 'pause' | 'resume' | 'stop' | 'next' | 'prev' | 'volume' | 'report'
   query?: string
   volume?: number
+  position?: number // action=report：页面上报的播放进度(秒)
+  playing?: boolean // action=report：页面上报的播放/暂停
 }
 
 // ===========================================================================
@@ -213,6 +215,8 @@ export interface MusicStateEvent {
   name?: string
   artist?: string
   url?: string // 可播放流地址；audio_out=page/both 时由浏览器 <audio> 播放
+  position?: number // 起播进度(秒)；刷新/重连恢复时 seek 到该位置
+  restore?: boolean // true=重连后的状态恢复
 }
 export interface MaterialInfo {
   name: string

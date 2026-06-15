@@ -300,10 +300,12 @@ func (MaterialsEvent) Type() Type { return TypeMaterials }
 
 // MusicEvent 表示音乐播放状态变化。
 type MusicEvent struct {
-	State  string `json:"state"`            // playing | paused | stopped
-	Name   string `json:"name,omitempty"`   // 当前曲名
-	Artist string `json:"artist,omitempty"` // 当前歌手
-	URL    string `json:"url,omitempty"`    // 可播放流地址（供页面在 audio_out=page/both 时浏览器播放）
+	State    string  `json:"state"`              // playing | paused | stopped
+	Name     string  `json:"name,omitempty"`     // 当前曲名
+	Artist   string  `json:"artist,omitempty"`   // 当前歌手
+	URL      string  `json:"url,omitempty"`      // 可播放流地址（供页面在 audio_out=page/both 时浏览器播放）
+	Position float64 `json:"position,omitempty"` // 起播进度(秒)：刷新/重连恢复时让页面 seek 到该位置
+	Restore  bool    `json:"restore,omitempty"`  // true=这是重连后的状态恢复（页面据此 seek 并按原状态播/停）
 }
 
 // Type 实现 Payload。

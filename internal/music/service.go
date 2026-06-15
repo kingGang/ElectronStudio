@@ -18,6 +18,41 @@ type Service struct {
 	current  Track
 	playlist []Track // 当前搜索结果作为播放列表，用于连续播放
 	idx      int     // 当前曲目在 playlist 中的下标
+	state    State   // 后端维护的播放状态(playing/paused/stopped)，供刷新重连恢复
+	pos      float64 // 页面上报的当前进度(秒)，供重连 seek
+}
+
+// Playback 是供前端恢复用的播放快照。
+type Playback struct {
+	Track    Track
+	State    State
+	Position float64
+}
+
+// Snapshot 返回当前播放快照（用于新连接进来时恢复界面状态）。
+func (s *Service) Snapshot() Playback {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.state
+	if st == "" {
+		st = StateStopped
+	}
+	return Playback{Track: s.current, State: st, Position: s.pos}
+}
+
+// SetProgress 接收页面上报的播放进度/状态，落到后端（刷新后据此恢复）。
+func (s *Service) SetProgress(pos float64, playing bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == StateStopped {
+		return // 已停止则忽略迟到的上报
+	}
+	s.pos = pos
+	if playing {
+		s.state = StatePlaying
+	} else {
+		s.state = StatePaused
+	}
 }
 
 // NewService 创建音乐服务。onState 可为 nil。
@@ -82,6 +117,8 @@ func (s *Service) advance(ctx context.Context, step int) (Track, error) {
 		s.idx = i
 		s.current = t
 		s.playlist[i] = t
+		s.state = StatePlaying
+		s.pos = 0 // 新曲从头
 		s.mu.Unlock()
 		// 设备侧播放器（mpg123）尽力启动；失败不致命——页面侧仍可凭事件里的 URL 在浏览器播放。
 		if err := s.player.Play(ctx, url); err != nil {
@@ -99,14 +136,24 @@ func (s *Service) advance(ctx context.Context, step int) (Track, error) {
 // （设备无 mpg123 时其状态不可靠）。
 func (s *Service) Pause() {
 	_ = s.player.Pause()
+	s.mu.Lock()
+	s.state = StatePaused
+	s.mu.Unlock()
 	s.emit(s.Current(), StatePaused)
 }
 func (s *Service) Resume() {
 	_ = s.player.Resume()
+	s.mu.Lock()
+	s.state = StatePlaying
+	s.mu.Unlock()
 	s.emit(s.Current(), StatePlaying)
 }
 func (s *Service) Stop() {
 	_ = s.player.Stop()
+	s.mu.Lock()
+	s.state = StateStopped
+	s.pos = 0
+	s.mu.Unlock()
 	s.emit(s.Current(), StateStopped)
 }
 func (s *Service) SetVolume(v int) { _ = s.player.SetVolume(v) }

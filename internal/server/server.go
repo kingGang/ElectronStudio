@@ -168,7 +168,8 @@ func (s *Server) Broadcast(p protocol.Payload) {
 // BroadcastFrame 向所有客户端发送一帧屏幕镜像数据（二进制帧）。
 // frame 应为 protocol.EncodeFrame 的产物。
 func (s *Server) BroadcastFrame(frame []byte) {
-	s.hub.broadcast(outMsg{typ: websocket.MessageBinary, data: frame})
+	// 镜像帧高频且“最新即覆盖”，对慢连接可安全丢弃，避免因占满队列而被断开。
+	s.hub.broadcast(outMsg{typ: websocket.MessageBinary, data: frame, droppable: true})
 }
 
 // Inbound 返回入站命令通道，供上层业务消费。

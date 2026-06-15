@@ -93,7 +93,7 @@
     const p = env.payload || {};
     switch (env.type) {
       case SrvType.Status: onStatus(p); break;
-      case SrvType.VoiceState: setVoice(p.state || 'idle'); break;
+      case SrvType.VoiceState: onServerVoice(p.state || 'idle'); break;
       case SrvType.VAD: onVAD(p); break;
       case SrvType.Wake: setVoice('listening'); break;
       case SrvType.Chat: onChat(p); break;
@@ -143,10 +143,17 @@
   });
   function toggleDot(node, on) { node.classList.toggle('on', !!on); }
 
+  let pageVoiceActive = false; // 页面正在播放 TTS 语音（此时由浏览器播放进度决定何时回待命）
   function setVoice(state) {
     el.face.dataset.state = state;
     el.voiceState.dataset.state = state;
     el.vsText.textContent = VOICE_LABEL[state] || state;
+  }
+  // 服务端语音状态：若页面还在实际出声，服务端提前发来的"待命"先忽略，
+  // 等浏览器把语音播完再回待命——保证状态与真实说话同步（实时）。
+  function onServerVoice(state) {
+    if (pageVoiceActive && state === 'idle') return;
+    setVoice(state);
   }
 
   // ---- 对话流：按 id 去重/更新，支持流式 ----
@@ -439,6 +446,7 @@
   let audioInMode = 'device';
   let audioOutMode = 'page'; // 音频输出路由（来自 status.io.audio_out），决定音乐是否在浏览器播放
   let musicSource = ''; // 当前音源（来自 status.music.source）：qq | kuwo
+  let pendingMusicPlay = false; // 刷新恢复时被自动播放策略拦下，待首次手势续播
   let micOn = false;
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let recog = null, recogOn = false, recogGotFinal = false;
@@ -493,15 +501,16 @@
   let currentAudio = null;
   let musicDucked = false; // 因播放语音回复而临时暂停了音乐，待回复结束续播
   function stopAudio() { if (currentAudio) { try { currentAudio.pause(); } catch (_) {} currentAudio = null; } }
-  // 语音回复结束/被打断后，续播之前为让路而暂停的音乐。
-  function resumeDuckedMusic() {
+  // 语音回复结束/被打断后：续播音乐 + 让语音状态回到待命（与真实播放同步）。
+  function endVoicePlayback() {
     if (musicDucked && musicAudio) { musicAudio.play().catch(() => {}); }
     musicDucked = false;
+    if (pageVoiceActive) { pageVoiceActive = false; setVoice('idle'); }
   }
   function onAudio(p) {
     if (!p) return;
     stopAudio();              // 先停上一段（打断/新段都先停）
-    if (p.stop) { resumeDuckedMusic(); return; } // 仅停止（barge-in）→ 续播音乐
+    if (p.stop) { endVoicePlayback(); return; } // 仅停止（barge-in）→ 续播音乐、回待命
     let src = null;
     if (p.url) {
       src = p.url;            // 较大音频（音乐）走 HTTP URL
@@ -512,12 +521,15 @@
     if (!src) return;
     // 让路：放语音回复前，先暂停正在播放的音乐，回复结束再自动续播。
     if (musicAudio && !musicAudio.paused) { try { musicAudio.pause(); } catch (_) {} musicDucked = true; }
+    // 语音状态实时化：开始出声即"说话"，由浏览器播放进度决定何时回"待命"。
+    pageVoiceActive = true;
+    setVoice('speaking');
     try {
       currentAudio = new Audio(src);
-      currentAudio.addEventListener('ended', resumeDuckedMusic);
-      currentAudio.addEventListener('error', resumeDuckedMusic);
-      currentAudio.play().catch(() => { resumeDuckedMusic(); }); // 播不了也别把音乐一直卡停
-    } catch (_) { resumeDuckedMusic(); }
+      currentAudio.addEventListener('ended', endVoicePlayback);
+      currentAudio.addEventListener('error', endVoicePlayback);
+      currentAudio.play().catch(() => { endVoicePlayback(); }); // 播不了也别卡在"说话"/暂停音乐
+    } catch (_) { endVoicePlayback(); }
   }
 
   // ---- 提示条 ----
@@ -562,6 +574,9 @@
   }
   function onMusicState(p) {
     const bar = $('music-bar');
+    // 重连恢复事件：仅在本会话尚无播放器(=真刷新/首次)时生效。若浏览器里已有音乐在放
+    // （只是 WebSocket 断线重连），忽略恢复，避免打断或让进度跳动/“停了又继续”。
+    if (p.restore && musicAudio && musicAudio._srcUrl) return;
     if (p.state === 'stopped' || !p.state) {
       bar.style.display = 'none';
       musicPlaying = false;
@@ -573,30 +588,50 @@
     if (p.name) curTrack = { name: p.name, artist: p.artist || '' };
     // 页面输出：用浏览器播放 URL（可读进度/可拖动/可画波形）
     if (p.url && (audioOutMode === 'page' || audioOutMode === 'both')) {
+      if (!musicAudio) bindMusicAudio(new Audio());
+      if (musicAudio._srcUrl !== p.url) {
+        musicAudio._srcUrl = p.url;
+        // 经本地代理转发=同源，浏览器 Web Audio 才能读到采样画波形（跨域会拿到全 0）。
+        musicAudio.src = '/api/music-proxy?url=' + encodeURIComponent(p.url);
+      }
+      // 刷新/重连恢复：seek 到后端记录的进度。
+      if (p.position > 0) seekWhenReady(musicAudio, p.position);
       if (p.state === 'playing') {
-        if (!musicAudio) bindMusicAudio(new Audio());
-        if (musicAudio._srcUrl !== p.url) {
-          musicAudio._srcUrl = p.url;
-          // 经本地代理转发=同源，浏览器 Web Audio 才能读到采样画波形（跨域会拿到全 0）。
-          musicAudio.src = '/api/music-proxy?url=' + encodeURIComponent(p.url);
-        }
         ensureViz();
-        musicAudio.play().then(startViz).catch(() => toast('浏览器拦截了自动播放，点 ▶ 开始'));
-      } else if (p.state === 'paused' && musicAudio) {
+        musicAudio.play().then(startViz).catch(() => {
+          // 自动播放被拦（刷新后无手势）：标记待续播，点一下页面即恢复。
+          pendingMusicPlay = true;
+          toast(p.restore ? '点一下页面继续上次的音乐' : '点 ▶ 开始播放');
+        });
+      } else if (p.state === 'paused') {
         musicAudio.pause();
       }
     }
     renderMusicLabel();
     renderMusicTime();
   }
+  // 等元数据就绪后 seek（src 刚设置时 duration 还不可用）。
+  function seekWhenReady(a, sec) {
+    const doSeek = () => { try { a.currentTime = sec; } catch (_) {} a.removeEventListener('loadedmetadata', doSeek); };
+    if (a.readyState >= 1) doSeek(); else a.addEventListener('loadedmetadata', doSeek);
+  }
+  // 节流上报播放进度/状态给后端（刷新重连可恢复）。
+  let lastReport = 0;
+  function reportMusic(force) {
+    if (!musicAudio) return;
+    const now = Date.now();
+    if (!force && now - lastReport < 3000) return;
+    lastReport = now;
+    send(CliType.Music, { action: 'report', position: musicAudio.currentTime || 0, playing: !musicAudio.paused });
+  }
   // 绑定浏览器播放器的进度/状态事件。
   function bindMusicAudio(a) {
     musicAudio = a;
     a.crossOrigin = 'anonymous';
-    a.addEventListener('timeupdate', renderMusicTime);
+    a.addEventListener('timeupdate', () => { renderMusicTime(); reportMusic(false); });
     a.addEventListener('loadedmetadata', renderMusicTime);
-    a.addEventListener('play', () => { musicPlaying = true; renderMusicLabel(); startViz(); });
-    a.addEventListener('pause', () => { musicPlaying = false; renderMusicLabel(); stopViz(); });
+    a.addEventListener('play', () => { musicPlaying = true; renderMusicLabel(); startViz(); reportMusic(true); });
+    a.addEventListener('pause', () => { musicPlaying = false; renderMusicLabel(); stopViz(); reportMusic(true); });
     // 一首放完自动切下一首（连续播放），由服务端解析下一首 URL 再下发 music_state。
     a.addEventListener('ended', () => { stopViz(); send(CliType.Music, { action: 'next' }); });
   }
@@ -626,7 +661,15 @@
   }
   // 全局手势兜底：任何点击/按键都尝试唤醒被浏览器策略挂起的 AudioContext。
   ['pointerdown', 'keydown', 'touchstart'].forEach((ev) =>
-    document.addEventListener(ev, () => { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); }, { passive: true }));
+    document.addEventListener(ev, () => {
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      // 刷新恢复时被自动播放策略拦下的音乐，首次手势即续播。
+      if (pendingMusicPlay && musicAudio) {
+        pendingMusicPlay = false;
+        ensureViz();
+        musicAudio.play().then(startViz).catch(() => {});
+      }
+    }, { passive: true }));
   function startViz() {
     if (vizRAF) return;
     const an = musicAudio && musicAudio._analyser;

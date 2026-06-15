@@ -10,8 +10,11 @@ import (
 
 // outMsg 是一条待发送的出站消息，携带 WebSocket 帧类型（文本/二进制）。
 type outMsg struct {
-	typ  websocket.MessageType
+	typ websocket.MessageType
 	data []byte
+	// droppable=true 表示该消息可在慢连接上安全丢弃（如高频屏幕镜像帧，下一帧即覆盖），
+	// 队列满时丢这一条而非断开连接；关键事件(JSON)应保持 false。
+	droppable bool
 }
 
 // hub 集中管理所有客户端连接，并负责广播。
@@ -73,15 +76,25 @@ func (h *hub) run(ctx context.Context) {
 }
 
 // fanout 把一条消息投递给所有客户端。
-// 对消费过慢（发送队列已满）的客户端，直接断开，避免阻塞广播循环。
+// 背压策略：队列满时——
+//   - 可丢弃消息(droppable，如屏幕镜像帧)：丢这一条，连接保留（下一帧很快补上）；
+//   - 关键消息(事件/命令)：先尝试腾出队首的可丢弃帧再投递，仍放不下才判定死连接并断开。
 func (h *hub) fanout(msg outMsg) {
 	for c := range h.clients {
-		if !c.enqueue(msg) {
-			h.log.Warn("客户端发送队列已满，断开慢连接")
-			c.close(websocket.StatusPolicyViolation, "send buffer overflow")
-			delete(h.clients, c)
-			h.setCount(len(h.clients))
+		if c.enqueue(msg) {
+			continue
 		}
+		if msg.droppable {
+			continue // 慢连接：丢弃这一帧镜像帧，不断开
+		}
+		// 关键消息放不下：尝试丢弃队列里积压的可丢弃帧，给它让位。
+		if c.dropOneDroppable() && c.enqueue(msg) {
+			continue
+		}
+		h.log.Warn("客户端发送队列已满，断开慢连接")
+		c.close(websocket.StatusPolicyViolation, "send buffer overflow")
+		delete(h.clients, c)
+		h.setCount(len(h.clients))
 	}
 }
 

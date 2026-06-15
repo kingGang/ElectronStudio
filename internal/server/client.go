@@ -38,12 +38,30 @@ func newClient(srv *Server, conn *websocket.Conn) *Client {
 	}
 }
 
-// enqueue 尝试把一条消息放入发送队列。返回 false 表示队列已满（消费过慢），
-// 调用方（hub）据此判定为慢连接并断开之。非阻塞。
+// enqueue 尝试把一条消息放入发送队列。返回 false 表示队列已满（消费过慢）。非阻塞。
 func (c *Client) enqueue(msg outMsg) bool {
 	select {
 	case c.send <- msg:
 		return true
+	default:
+		return false
+	}
+}
+
+// dropOneDroppable 从发送队列里丢弃一条可丢弃消息（镜像帧），腾出空间给关键消息。
+// 返回是否成功丢弃了一条。非阻塞：取出的若是关键消息则放回并停止。
+func (c *Client) dropOneDroppable() bool {
+	select {
+	case m := <-c.send:
+		if m.droppable {
+			return true // 丢掉这条可丢弃帧，腾出了位置
+		}
+		// 取出的是关键消息：放回去（尽力），不丢
+		select {
+		case c.send <- m:
+		default:
+		}
+		return false
 	default:
 		return false
 	}

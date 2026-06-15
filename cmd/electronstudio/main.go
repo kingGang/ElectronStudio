@@ -240,6 +240,13 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 			}
 			_ = c.Send(a.scheduleListEvent()) // 推送当前定时任务列表
 			_ = c.Send(a.materialsEvent())    // 推送当前屏幕表情素材列表
+			// 刷新/重连后恢复音乐播放状态（后端为准）：当前有曲且未停就把曲目+进度推回去。
+			if pb := a.music.Snapshot(); pb.State != "" && pb.State != "stopped" && pb.Track.URL != "" {
+				_ = c.Send(protocol.MusicEvent{
+					State: string(pb.State), Name: pb.Track.Name, Artist: pb.Track.Artist,
+					URL: pb.Track.URL, Position: pb.Position, Restore: true,
+				})
+			}
 		},
 	})
 
@@ -828,9 +835,17 @@ func (a *app) emitUser(text string) {
 
 // finishAssistant 完成一条助手回复：入历史、朗读、回到待命。
 func (a *app) finishAssistant(ctx context.Context, content string) {
+	a.finishReply(ctx, content, true)
+}
+
+// finishReply 完成一条助手回复。speakIt=false 时只入历史/显示、不朗读——
+// 用于"放歌/切歌"这类已经有音频输出的轮次，避免确认语音打断刚开始的音乐。
+func (a *app) finishReply(ctx context.Context, content string, speakIt bool) {
 	if content != "" {
 		a.appendHistory(llm.Message{Role: llm.RoleAssistant, Content: content})
-		a.speak(ctx, content) // 按 io.tts_engine/audio_out 路由（MiniMax 云端 / sidecar；设备/页面）
+		if speakIt {
+			a.speak(ctx, content) // 按 io.tts_engine/audio_out 路由（MiniMax 云端 / sidecar；设备/页面）
+		}
 	}
 	a.screen.SetSpeaking(false) // 停止口型动画
 	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStop, Text: content})
@@ -850,12 +865,16 @@ func (a *app) handleChatWithTools(ctx context.Context, text string) {
 
 	id := a.nextMsgID()
 	var pTools []protocol.ToolCall
+	musicTurn := false // 本轮是否触发了音乐播放/切换（则不朗读确认，避免打断音乐）
 	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceSpeaking})
 	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStart})
 	a.screen.SetSpeaking(true) // 驱动口型动画
 
 	res, err := llm.RunToolLoop(ctx, a.llm, a.historySnapshot(), lt, a.tools.Execute, 5,
 		func(ec llm.ExecutedCall) {
+			if ec.Err == "" && (ec.Name == "play_music" || ec.Name == "generate_music" || ec.Name == "music_control") {
+				musicTurn = true
+			}
 			// 每执行一个工具，实时把工具徽章推给前端。
 			status := "ok"
 			if ec.Err != "" {
@@ -878,7 +897,8 @@ func (a *app) handleChatWithTools(ctx context.Context, text string) {
 	a.srv.Broadcast(protocol.ChatEvent{
 		ID: id, Role: protocol.RoleAssistant, Content: content, Tools: pTools, Status: protocol.ChatFinal,
 	})
-	a.finishAssistant(ctx, content)
+	// 放歌/切歌轮次：只显示文字、不朗读，免得确认语音打断刚开始的音乐。
+	a.finishReply(ctx, content, !musicTurn)
 }
 
 // handleChatStreaming 跑一次流式对话：用户消息回显 → 思考 → 流式生成 → 朗读。
@@ -1094,6 +1114,8 @@ func (a *app) handleMusic(ctx context.Context, cmd protocol.MusicCommand) {
 		}
 	case "volume":
 		a.music.SetVolume(cmd.Volume)
+	case "report": // 页面上报播放进度/状态，后端记录以便刷新重连恢复
+		a.music.SetProgress(cmd.Position, cmd.Playing)
 	default:
 		a.log.Debug("未知音乐动作", "action", cmd.Action)
 	}
