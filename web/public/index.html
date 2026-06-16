@@ -119,10 +119,22 @@
     <section class="panel model3d-panel">
       <div class="panel-head">
         <h2>ElectronBot 3D 模型</h2>
+        <label class="model3d-pick">外壳
+          <select id="model3d-select">
+            <option value="elite">精英版外壳</option>
+            <option value="classic">经典版外壳</option>
+          </select>
+        </label>
         <span class="muted" id="model3d-status">等待加载…</span>
       </div>
-      <div class="model3d-stage" id="model3d-stage"></div>
-      <p class="muted">鼠标拖动旋转、滚轮缩放。模型由 ElectronBot 原始 CAD(STEP) 转换为 glTF 显示。</p>
+      <div class="model3d-body">
+        <div class="model3d-stage" id="model3d-stage"></div>
+        <div class="model3d-controls" id="model3d-controls">
+          <div class="m3d-head"><span>关节控制</span><button class="link-btn" id="model3d-reset">归零</button></div>
+          <!-- 6 个关节滑块由 JS 生成 -->
+        </div>
+      </div>
+      <p class="muted">画面里鼠标拖动旋转、滚轮缩放；右侧滑块直接拖动驱动模型（同时下发给设备）。</p>
     </section>
   </main>
 

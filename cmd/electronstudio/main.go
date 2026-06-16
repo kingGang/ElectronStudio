@@ -263,6 +263,15 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		},
 	})
 
+	// 语音 sidecar 连接状态变化（自动重连连上/断开）时，广播一次状态快照刷新界面。
+	if sc, ok := a.speech.(*speech.Sidecar); ok {
+		sc.OnStateChange(func() {
+			if a.srv != nil {
+				a.srv.Broadcast(a.statusSnapshot())
+			}
+		})
+	}
+
 	// 画面源：摄像头(可选) + 离线素材片 + 程序实时动画脸(眨眼/口型, 兜底)。
 	// 统一设备驱动以固定帧率把"姿态 + 画面"一并 Sync 给设备，并把同一帧广播给 UI，实现镜像同步。
 	face := display.NewEmotionSource()
@@ -982,7 +991,7 @@ func (a *app) handleJog(cmd protocol.JogJointCommand) {
 		return
 	}
 	a.poseMu.Lock()
-	a.desiredPose[cmd.Joint] = cmd.Angle
+	a.desiredPose[cmd.Joint] = robot.ClampAngle(cmd.Joint, cmd.Angle) // 限位，避免超出舵机安全范围
 	pose := a.desiredPose
 	a.poseMu.Unlock()
 	a.driver.SetPose(pose, cmd.Enable)

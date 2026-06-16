@@ -29,6 +29,16 @@ type Sidecar struct {
 	conn      *websocket.Conn // 当前连接；nil 表示未连接
 	connected bool
 	writeTO   time.Duration
+	onState   func() // 连接状态变化回调（连上/断开），用于刷新界面状态
+}
+
+// OnStateChange 注册连接状态变化回调（连上或断开时触发）。
+func (s *Sidecar) OnStateChange(fn func()) { s.onState = fn }
+
+func (s *Sidecar) notify() {
+	if s.onState != nil {
+		s.onState()
+	}
 }
 
 // sidecarMsg 是与 sidecar 之间交换的 JSON 消息（双向复用同一结构）。
@@ -54,22 +64,70 @@ func NewSidecar(wsURL string, log *slog.Logger) *Sidecar {
 	}
 }
 
-// Start 实现 Service：建立连接并启动读取循环。
+// Start 实现 Service：启动后台连接管理（自动重连），非阻塞、不因 sidecar 未就绪而失败。
+// sidecar 后启动、断线、重启都会被自动接上，连接状态变化会回调刷新界面。
 func (s *Sidecar) Start(ctx context.Context) error {
-	conn, _, err := websocket.Dial(ctx, s.url, nil)
-	if err != nil {
-		return fmt.Errorf("speech: 连接 sidecar 失败: %w", err)
-	}
-	conn.SetReadLimit(1 << 20)
-
-	s.mu.Lock()
-	s.conn = conn
-	s.connected = true
-	s.mu.Unlock()
-
-	s.log.Info("已连接语音 sidecar", "url", s.url)
-	go s.readLoop(ctx)
+	go s.manage(ctx)
 	return nil
+}
+
+// manage 持续维护与 sidecar 的连接：连不上则退避重试；连上后跑读取循环，断开后自动重连。
+func (s *Sidecar) manage(ctx context.Context) {
+	const minBackoff, maxBackoff = 1 * time.Second, 5 * time.Second
+	backoff := minBackoff
+	for ctx.Err() == nil {
+		conn, _, err := websocket.Dial(ctx, s.url, nil)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if sleepCtx(ctx, backoff) {
+				return
+			}
+			if backoff < maxBackoff {
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+			continue
+		}
+		backoff = minBackoff
+		conn.SetReadLimit(1 << 20)
+		s.mu.Lock()
+		s.conn = conn
+		s.connected = true
+		s.mu.Unlock()
+		s.log.Info("已连接语音 sidecar", "url", s.url)
+		s.notify()
+
+		s.readLoop(ctx) // 阻塞直到连接断开
+
+		s.mu.Lock()
+		s.conn = nil
+		s.connected = false
+		s.mu.Unlock()
+		s.notify()
+		if ctx.Err() != nil {
+			return
+		}
+		s.log.Info("语音 sidecar 断开，准备重连", "url", s.url)
+		if sleepCtx(ctx, minBackoff) {
+			return
+		}
+	}
+}
+
+// sleepCtx 睡 d，期间 ctx 取消则提前返回 true。
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return true
+	case <-t.C:
+		return false
+	}
 }
 
 // Events 实现 Service。

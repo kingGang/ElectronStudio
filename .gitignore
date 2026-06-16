@@ -39,6 +39,7 @@ __pycache__/
 /emotions/
 # 运行/调试日志与临时音频
 *.log
+*.err
 es.err.log
 /sidecars/speech/_tts_test.wav
 # 3D 源 CAD（大文件，运行时只用转换后的 .glb；如需重转见 docs）

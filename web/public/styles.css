@@ -311,10 +311,18 @@ body {
 .music-bar .icon-btn { width: 34px; height: 30px; font-size: 13px; }
 .music-icon { color: var(--accent); }
 .music-now { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model3d-pick { font-size: 13px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+.model3d-pick select { padding: 4px 6px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); font: inherit; }
 .model3d-view { padding: 16px; }
 .model3d-panel { display: flex; flex-direction: column; height: calc(100vh - 120px); }
+.model3d-body { flex: 1; display: flex; gap: 12px; min-height: 320px; }
 .model3d-stage { flex: 1; min-height: 320px; border-radius: var(--radius-sm); overflow: hidden; background: #0c1118; }
 .model3d-stage canvas { display: block; width: 100%; height: 100%; }
+.model3d-controls { flex: 0 0 220px; display: flex; flex-direction: column; gap: 10px; padding: 10px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow-y: auto; }
+.m3d-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+.m3d-joint { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.m3d-joint input[type="range"] { width: 100%; accent-color: var(--accent); }
+.m3d-val { color: var(--muted); font-variant-numeric: tabular-nums; }
 .link-btn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px; padding: 0 4px; }
 .dev-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; font-size: 13px; }
 .dev-row select { padding: 6px 8px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); font: inherit; }

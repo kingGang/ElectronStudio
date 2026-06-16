@@ -29,6 +29,9 @@
   // 6 轴关节名称（顺序与后端 robot.JointNames / 官方 RobotController 完全一致）。
   const JOINT_NAMES = ['左臂横滚', '左臂俯仰', '右臂横滚', '右臂俯仰', '头部俯仰', '身体旋转'];
   const JOINT_COUNT = 6;
+  // 各关节角度限制(度)，来自 ElectronBot 官方设定：横滚0~30 / 俯仰-20~180 / 头-15~15 / 身体-90~90
+  const JOINT_LIMITS = [[0, 30], [-20, 180], [0, 30], [-20, 180], [-15, 15], [-90, 90]];
+  const clampJoint = (i, a) => Math.max(JOINT_LIMITS[i][0], Math.min(JOINT_LIMITS[i][1], a));
   const VOICE_LABEL = { idle: '待命', connecting: '连接中', listening: '聆听中…', thinking: '思考中…', speaking: '回应中…' };
 
   const $ = (id) => document.getElementById(id);
@@ -61,15 +64,100 @@
 
   // ---- 3D 模型（three.js + GLTFLoader，懒加载）----
   let model3dReady = false;
+  let model3dJoints = null;       // {armRollLeft, armPitchLeft, ...} 关节节点
+  let lastJointAngles = null;     // 最近一次 6 轴角度，用于模型加载后补帧
+  let m3dScene = null, m3dCamera = null, m3dRenderer = null, m3dControls = null, m3dRoot = null;
+  const MODEL_URLS = { elite: 'models/electronbot-elite.glb', classic: 'models/electronbot-classic.glb' };
+  let currentModel = 'elite'; // 默认精英版外壳；可切回经典版
+  let m3dScreenTex = null;    // 头部屏幕贴图（取设备屏实时镜像画面）
+  // 屏幕圆面位置/尺寸——由打印件几何算出的正面圆开口圆心与半径（非手调）：
+  //   精英版取屏幕支架 head_adapter 正面圆心(-0.9,25.4) z=25.8 半径≈17；
+  //   经典版取脸部面板 Head3 正面圆心(0.7,43.2) z=27.1 半径≈16。z 内收 1mm 嵌进开口。
+  const SCREEN_CFG = {
+    elite:   { pos: [-0.9, 25.4, 24.8], size: [34, 34] },
+    classic: { pos: [0, 24.1, 27.3], size: [30, 30] },
+  };
+  const D2R = Math.PI / 180;
+  // 直接拖关节：节点名 → {x:横向拖控制的关节下标, y:纵向拖控制的关节下标}。
+  // 手臂(无论抓到 roll/pitch 节点)：横向拖=横滚(往外张)，纵向拖=俯仰(前后)。
+  // xs=横向拖的符号，让手臂"往你拖的方向"动（左右臂镜像，符号相反）。
+  const DRAG_MAP = {
+    armRollLeft:  { x: 0, y: 1, xs: 1 },  armPitchLeft:  { x: 0, y: 1, xs: 1 },
+    armRollRight: { x: 2, y: 3, xs: -1 }, armPitchRight: { x: 2, y: 3, xs: -1 },
+    head: { y: 4 },          // 抬/低头
+    body: { x: 5, xs: 1 },   // 左右转身
+  };
+  let m3dDragging = false;   // 正在拖关节：期间忽略服务端回传，避免抖动
+  // 按 ElectronBot 官方 RobotController 的轴/符号驱动 6 关节。
+  // angles 顺序 = robot.JointNames: [左臂横滚,左臂俯仰,右臂横滚,右臂俯仰,头部俯仰,身体旋转]
+  function drive3D(angles) {
+    lastJointAngles = angles;
+    const j = model3dJoints;
+    if (!j || !j.body) return;
+    if (j.armRollLeft) j.armRollLeft.rotation.z = angles[0] * D2R;
+    if (j.armPitchLeft) j.armPitchLeft.rotation.x = -angles[1] * D2R;  // 俯仰：手性相反，取负让正角度朝前
+    if (j.armRollRight) j.armRollRight.rotation.z = -angles[2] * D2R;
+    if (j.armPitchRight) j.armPitchRight.rotation.x = -angles[3] * D2R;
+    if (j.head) j.head.rotation.x = angles[4] * D2R;
+    if (j.body) j.body.rotation.y = angles[5] * D2R;
+  }
+  // 加载（或切换）一个模型到已有场景；移除旧模型，重新抓关节、归位相机。
+  function loadModel3D(url) {
+    const st = $('model3d-status');
+    if (m3dRoot) { m3dScene.remove(m3dRoot); m3dRoot = null; window.electronbotModel = null; }
+    model3dJoints = null;
+    st.textContent = '加载模型中…';
+    new THREE.GLTFLoader().load(url, (gltf) => {
+      const root = gltf.scene;
+      model3dJoints = {
+        armRollLeft: root.getObjectByName('armRollLeft'),
+        armPitchLeft: root.getObjectByName('armPitchLeft'),
+        armRollRight: root.getObjectByName('armRollRight'),
+        armPitchRight: root.getObjectByName('armPitchRight'),
+        head: root.getObjectByName('head'),
+        body: root.getObjectByName('body'),
+      };
+      const box = new THREE.Box3().setFromObject(root);
+      const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+      root.position.sub(center);
+      const maxDim = Math.max(size.x, size.y, size.z) || 1;
+      m3dCamera.position.set(0, maxDim * 0.25, maxDim * 1.9);
+      m3dControls.target.set(0, 0, 0); m3dControls.update();
+      m3dScene.add(root);
+      m3dRoot = root; window.electronbotModel = root;
+      addScreen(model3dJoints.head, SCREEN_CFG[currentModel]); // 头部贴上实时屏幕画面
+      if (lastJointAngles) drive3D(lastJointAngles);
+      st.textContent = '拖动旋转 / 滚轮缩放；动作/关节会驱动模型';
+    }, (e) => { if (e.total) st.textContent = '加载中 ' + Math.round((e.loaded / e.total) * 100) + '%'; },
+      (err) => { st.textContent = '模型加载失败'; console.error(err); });
+  }
+  // 在头部加一块屏幕平面，贴上设备屏的实时镜像画面（el.mirror canvas）。
+  function addScreen(head, cfg) {
+    if (!head || !cfg) return;
+    if (!m3dScreenTex) {
+      m3dScreenTex = new THREE.CanvasTexture(el.mirror);
+      if ('SRGBColorSpace' in THREE) m3dScreenTex.colorSpace = THREE.SRGBColorSpace;
+    }
+    // 圆形屏幕：与头部圆形开口贴合（半径取尺寸一半），不受光照像真屏幕。
+    const r = Math.min(cfg.size[0], cfg.size[1]) / 2;
+    const plane = new THREE.Mesh(
+      new THREE.CircleGeometry(r, 48),
+      new THREE.MeshBasicMaterial({ map: m3dScreenTex, side: THREE.DoubleSide })
+    );
+    plane.position.set(cfg.pos[0], cfg.pos[1], cfg.pos[2]);
+    if (cfg.rot) plane.rotation.set(cfg.rot[0] || 0, cfg.rot[1] || 0, cfg.rot[2] || 0);
+    plane.name = '__screen';
+    head.add(plane);
+  }
   function init3D() {
     if (model3dReady || typeof THREE === 'undefined') return;
     model3dReady = true;
-    const stage = $('model3d-stage'), st = $('model3d-status');
+    const stage = $('model3d-stage');
     const W = () => stage.clientWidth || 600, H = () => stage.clientHeight || 400;
-    const scene = new THREE.Scene();
+    const scene = new THREE.Scene(); m3dScene = scene;
     scene.background = new THREE.Color(0x0c1118);
-    const camera = new THREE.PerspectiveCamera(45, W() / H(), 0.1, 5000);
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    const camera = new THREE.PerspectiveCamera(45, W() / H(), 0.1, 5000); m3dCamera = camera;
+    const renderer = new THREE.WebGLRenderer({ antialias: true }); m3dRenderer = renderer;
     renderer.setPixelRatio(window.devicePixelRatio || 1);
     renderer.setSize(W(), H());
     stage.appendChild(renderer.domElement);
@@ -77,32 +165,105 @@
     scene.add(new THREE.AmbientLight(0xffffff, 0.7));
     const dir = new THREE.DirectionalLight(0xffffff, 0.9); dir.position.set(1, 2, 2); scene.add(dir);
     const dir2 = new THREE.DirectionalLight(0x88aaff, 0.4); dir2.position.set(-2, 1, -1); scene.add(dir2);
-    const controls = new THREE.OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true; controls.autoRotate = true; controls.autoRotateSpeed = 1.0;
-    st.textContent = '加载模型中…';
-    new THREE.GLTFLoader().load('models/electronbot.glb', (gltf) => {
-      const root = gltf.scene;
-      // 居中并按包围盒自动调整相机距离
-      const box = new THREE.Box3().setFromObject(root);
-      const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
-      root.position.sub(center);
-      const maxDim = Math.max(size.x, size.y, size.z) || 1;
-      camera.position.set(0, maxDim * 0.3, maxDim * 1.8);
-      controls.target.set(0, 0, 0); controls.update();
-      scene.add(root);
-      window.electronbotModel = root; // 供后续"驱动表情/动作"用
-      st.textContent = '拖动旋转 / 滚轮缩放';
-    }, (e) => { if (e.total) st.textContent = '加载中 ' + Math.round((e.loaded / e.total) * 100) + '%'; },
-      (err) => { st.textContent = '模型加载失败'; console.error(err); });
+    const controls = new THREE.OrbitControls(camera, renderer.domElement); m3dControls = controls;
+    controls.enableDamping = true; controls.autoRotate = false; // 不自动旋转，只在用户拖动时转视角
+    loadModel3D(MODEL_URLS[currentModel]);
     function loop() {
       requestAnimationFrame(loop);
       controls.update();
+      if (m3dScreenTex) m3dScreenTex.needsUpdate = true; // 屏幕画面实时刷新
       renderer.render(scene, camera);
     }
     loop();
     window.addEventListener('resize', () => {
       if (!stage.clientWidth) return;
       camera.aspect = W() / H(); camera.updateProjectionMatrix(); renderer.setSize(W(), H());
+    });
+    build3DControls();
+
+    // ---- 直接抓关节拖动：点到胳膊/头/身体拖动改该关节；点空白处则旋转视角 ----
+    const ray = new THREE.Raycaster();
+    let dragMap = null, dragOX = 0, dragOY = 0, dragBX = 0, dragBY = 0, lastJog = 0;
+    function pickJoint(ev) {
+      const root = window.electronbotModel; if (!root) return null;
+      const r = renderer.domElement.getBoundingClientRect();
+      const ndc = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+      ray.setFromCamera(ndc, camera);
+      const hits = ray.intersectObject(root, true);
+      if (!hits.length) return null;
+      let o = hits[0].object;
+      while (o) { if (DRAG_MAP[o.name]) return o.name; o = o.parent; }
+      return null;
+    }
+    function setJointAngle(i, ang) {
+      ang = clampJoint(i, ang);
+      const a = (lastJointAngles ? lastJointAngles.slice() : [0, 0, 0, 0, 0, 0]); a[i] = ang; drive3D(a);
+      const inp = document.querySelector(`#model3d-controls input[data-m3d="${i}"]`); if (inp) inp.value = Math.round(ang);
+      const val = $(`m3d-val-${i}`); if (val) val.textContent = Math.round(ang) + '°';
+      return ang;
+    }
+    function jogNow(i) {
+      const now = Date.now();
+      if (now - lastJog < 80) return; lastJog = now;
+      send(CliType.JogJoint, { joint: i, angle: Math.round((lastJointAngles || [])[i] || 0), enable: true });
+    }
+    renderer.domElement.addEventListener('pointerdown', (ev) => {
+      const jn = pickJoint(ev);
+      if (!jn) return; // 点到空白/底座 → 交给 OrbitControls 转视角
+      dragMap = DRAG_MAP[jn]; dragOX = ev.clientX; dragOY = ev.clientY;
+      const cur = lastJointAngles || [0, 0, 0, 0, 0, 0];
+      dragBX = dragMap.x !== undefined ? cur[dragMap.x] : 0;
+      dragBY = dragMap.y !== undefined ? cur[dragMap.y] : 0;
+      m3dDragging = true;
+      controls.enabled = false; // 拖关节时禁掉视角旋转
+      renderer.domElement.style.cursor = 'grabbing';
+    });
+    window.addEventListener('pointermove', (ev) => {
+      if (!dragMap) return;
+      if (dragMap.x !== undefined) { setJointAngle(dragMap.x, dragBX + (ev.clientX - dragOX) * 0.6 * (dragMap.xs || 1)); jogNow(dragMap.x); }
+      if (dragMap.y !== undefined) { setJointAngle(dragMap.y, dragBY + (ev.clientY - dragOY) * 0.6); jogNow(dragMap.y); }
+    });
+    window.addEventListener('pointerup', () => {
+      m3dDragging = false;
+      if (dragMap) {
+        if (dragMap.x !== undefined) send(CliType.JogJoint, { joint: dragMap.x, angle: Math.round((lastJointAngles || [])[dragMap.x] || 0), enable: true });
+        if (dragMap.y !== undefined) send(CliType.JogJoint, { joint: dragMap.y, angle: Math.round((lastJointAngles || [])[dragMap.y] || 0), enable: true });
+      }
+      dragMap = null; controls.enabled = true; renderer.domElement.style.cursor = '';
+    });
+  }
+  // 3D 视图内的关节滑块：拖动即时驱动模型 + 下发 jog_joint 给设备。
+  function build3DControls() {
+    const box = $('model3d-controls');
+    if (!box || box.dataset.built) return;
+    box.dataset.built = '1';
+    // 外壳切换
+    const msel = $('model3d-select');
+    if (msel) { msel.value = currentModel; msel.addEventListener('change', () => { currentModel = msel.value; loadModel3D(MODEL_URLS[currentModel]); }); }
+    for (let i = 0; i < JOINT_COUNT; i++) {
+      const row = document.createElement('div');
+      row.className = 'm3d-joint';
+      row.innerHTML = `<label>${JOINT_NAMES[i] || ('J' + i)}</label>` +
+        `<input type="range" min="${JOINT_LIMITS[i][0]}" max="${JOINT_LIMITS[i][1]}" step="1" value="0" data-m3d="${i}" />` +
+        `<span class="m3d-val" id="m3d-val-${i}">0°</span>`;
+      box.appendChild(row);
+    }
+    box.querySelectorAll('input[type="range"]').forEach((inp) => {
+      inp.addEventListener('input', () => {
+        const j = Number(inp.dataset.m3d), angle = Number(inp.value);
+        $(`m3d-val-${j}`).textContent = angle + '°';
+        const a = (lastJointAngles ? lastJointAngles.slice() : [0, 0, 0, 0, 0, 0]);
+        a[j] = angle; drive3D(a);                       // 本地即时驱动
+        send(CliType.JogJoint, { joint: j, angle, enable: true }); // 同步设备
+      });
+    });
+    const rst = $('model3d-reset');
+    if (rst) rst.addEventListener('click', (e) => {
+      e.preventDefault();
+      box.querySelectorAll('input[type="range"]').forEach((inp) => { inp.value = 0; });
+      box.querySelectorAll('.m3d-val').forEach((s) => { s.textContent = '0°'; });
+      drive3D([0, 0, 0, 0, 0, 0]);
+      for (let j = 0; j < JOINT_COUNT; j++) send(CliType.JogJoint, { joint: j, angle: 0, enable: true });
     });
   }
 
@@ -306,7 +467,7 @@
       row.className = 'joint';
       row.innerHTML =
         `<label>J${i} ${JOINT_NAMES[i] || ''}</label>` +
-        `<input type="range" min="-90" max="90" step="1" value="0" data-joint="${i}" />` +
+        `<input type="range" min="${JOINT_LIMITS[i][0]}" max="${JOINT_LIMITS[i][1]}" step="1" value="0" data-joint="${i}" />` +
         `<span class="readout"><span class="tgt" id="tgt-${i}">0°</span> / <span class="fb" id="fb-${i}">0°</span></span>`;
       el.joints.appendChild(row);
     }
@@ -323,6 +484,7 @@
   let followActive = false;
   function onJoints(p) {
     if (!Array.isArray(p.angles)) return;
+    if (!m3dDragging) drive3D(p.angles); // 驱动 3D 模型；拖动期间不被回传覆盖(防抖)
     p.angles.forEach((a, i) => {
       const fb = $(`fb-${i}`);
       if (fb) fb.textContent = Math.round(a) + '°';

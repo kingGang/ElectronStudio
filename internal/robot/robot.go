@@ -29,6 +29,33 @@ const (
 // JointNames 是 6 轴的中文名，下标与 Joints 一致。
 var JointNames = [JointCount]string{"左臂横滚", "左臂俯仰", "右臂横滚", "右臂俯仰", "头部俯仰", "身体旋转"}
 
+// JointLimits 是各轴允许的角度范围(度)[min,max]，与 JointNames 同序。
+// 来自 ElectronBot 官方设定：横滚 0~30、俯仰 -20~180、头 -15~15、身体 -90~90。
+var JointLimits = [JointCount][2]float32{{0, 30}, {-20, 180}, {0, 30}, {-20, 180}, {-15, 15}, {-90, 90}}
+
+// ClampAngle 把第 i 轴角度裁剪到允许范围内。
+func ClampAngle(i int, a float32) float32 {
+	if i < 0 || i >= JointCount {
+		return a
+	}
+	lo, hi := JointLimits[i][0], JointLimits[i][1]
+	if a < lo {
+		return lo
+	}
+	if a > hi {
+		return hi
+	}
+	return a
+}
+
+// ClampJoints 把整组角度逐轴裁剪到允许范围。
+func ClampJoints(j Joints) Joints {
+	for i := range j {
+		j[i] = ClampAngle(i, j[i])
+	}
+	return j
+}
+
 // Joints 是 6 轴舵机角度（单位：度）。使用定长数组以避免误用和堆分配。
 type Joints = [JointCount]float32
 
