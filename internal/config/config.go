@@ -18,10 +18,16 @@ import (
 type ModelConfig struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
-	Type    string `json:"type"` // echo | openai
+	Type    string `json:"type"` // echo | openai | xiaozhi
 	BaseURL string `json:"base_url,omitempty"`
 	APIKey  string `json:"api_key,omitempty"`
 	Model   string `json:"model,omitempty"`
+	// 小智(xiaozhi)对接字段（type=xiaozhi 时用）：
+	WSURL    string `json:"ws_url,omitempty"`    // 小智 WebSocket 地址，如 wss://api.tenclass.net/xiaozhi/v1/
+	OTAURL   string `json:"ota_url,omitempty"`   // 可选；填了则先走 OTA 激活换取 ws 地址与 token
+	Token    string `json:"token,omitempty"`     // 直连用的访问令牌（自建服务器可留空）
+	DeviceID string `json:"device_id,omitempty"` // 设备 MAC；留空自动生成
+	ClientID string `json:"client_id,omitempty"` // 客户端 UUID；留空自动生成
 }
 
 // SpeechConfig 描述语音配置：本地 sidecar + 可选的网络 TTS/ASR（OpenAI 兼容）。
@@ -117,8 +123,9 @@ func (io IOConfig) ImageOutOr() string  { return orStr(io.ImageOut, "both") }
 type Config struct {
 	Addr    string        `json:"addr"`
 	Robot   string        `json:"robot,omitempty"`   // auto | electronbot | mock
-	Persona string        `json:"persona,omitempty"` // 设备角色/人设（作为系统提示的人设部分）
-	Voice   string        `json:"voice,omitempty"`   // 声音音色（覆盖当前 TTS 引擎的音色）
+	Persona       string  `json:"persona,omitempty"`        // 设备角色/人设（作为系统提示的人设部分）
+	PersonaSource string  `json:"persona_source,omitempty"` // local(用本机角色) | model(用模型自带角色,如小智服务端设定)，默认 local
+	Voice         string  `json:"voice,omitempty"`          // 声音音色（覆盖当前 TTS 引擎的音色）
 	Speech  SpeechConfig  `json:"speech"`
 	Gesture GestureConfig `json:"gesture"`
 	Camera  CameraConfig  `json:"camera"`
@@ -146,6 +153,14 @@ func (c *Config) ResolveMiniMax() MiniMaxConfig {
 		}
 	}
 	return m
+}
+
+// PersonaSourceOr 返回角色来源，默认 local（用本机角色）。
+func (c *Config) PersonaSourceOr() string {
+	if c.PersonaSource == "model" {
+		return "model"
+	}
+	return "local"
 }
 
 func orStr(v, def string) string {

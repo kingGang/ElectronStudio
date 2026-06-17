@@ -20,6 +20,8 @@
 
 import argparse
 import asyncio
+import base64
+import io
 import json
 import queue
 import sys
@@ -34,6 +36,11 @@ try:
     import sherpa_onnx
 except ImportError:
     sys.exit("缺少 sherpa-onnx，请先 pip install -r requirements.txt")
+
+try:
+    import soundfile as sf  # 较新版 libsndfile 内置 Ogg/Opus 解码（用于播放小智自带 TTS）
+except ImportError:
+    sf = None
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +171,11 @@ class Session:
         self._last_speaking = False
         self._kws_stream = self.eng.spotter.create_stream() if self.eng.spotter else None
 
+        # 播放队列 + 单线程串行播放：保证「逐句流式」音频按到达顺序、不重叠地播。
+        self._play_q: "queue.Queue" = queue.Queue()
+        self._play_thread = threading.Thread(target=self._play_worker, daemon=True)
+        self._play_thread.start()
+
     # ---- 麦克风 ----
     def _mic_callback(self, indata, frames, time_info, status):
         # 在 sounddevice 的音频线程中执行：只做最轻量的入队。
@@ -181,6 +193,7 @@ class Session:
 
     def stop(self):
         self._running = False
+        self._play_q.put(None)  # 解阻塞播放线程
         if self._stream:
             self._stream.stop()
             self._stream.close()
@@ -242,19 +255,48 @@ class Session:
             if msg.get("type") == "speak":
                 text = msg.get("text", "")
                 if text:
-                    await self.loop.run_in_executor(None, self._speak, text)
+                    self._play_q.put(("speak", text))  # 入队，由播放线程串行处理
+            elif msg.get("type") == "play":
+                # 主程序送来一段已编码音频（如小智自带 TTS 的 Ogg/Opus），入队串行解码播放。
+                data = msg.get("data", "")
+                if data:
+                    self._play_q.put(("audio", base64.b64decode(data)))
             elif msg.get("type") == "abort":
-                sd.stop()  # 立即停止当前播放
+                self._drain_play()  # 清空待播队列
+                sd.stop()           # 立即停止当前播放
         self._running = False
 
-    def _speak(self, text: str):
-        """合成并播放（阻塞，在执行器线程中运行）。"""
+    def _drain_play(self):
+        """清空播放队列（打断时用）。"""
         try:
-            samples, sr = self.eng.synthesize(text)
-            sd.play(samples, sr, device=self.cfg.output_device)
-            sd.wait()
-        except Exception as e:  # 播放失败不应拖垮会话
-            print("TTS 播放失败:", e, file=sys.stderr)
+            while True:
+                self._play_q.get_nowait()
+        except queue.Empty:
+            pass
+
+    def _play_worker(self):
+        """单线程串行播放：保证逐句音频按到达顺序、不重叠。"""
+        while True:
+            item = self._play_q.get()
+            if item is None or not self._running:
+                if not self._running:
+                    return
+                continue
+            kind, payload = item
+            try:
+                if kind == "speak":
+                    samples, sr = self.eng.synthesize(payload)
+                elif kind == "audio":
+                    if sf is None:
+                        print("无法播放音频：缺少 soundfile，请 pip install soundfile", file=sys.stderr)
+                        continue
+                    samples, sr = sf.read(io.BytesIO(payload), dtype="float32", always_2d=False)
+                else:
+                    continue
+                sd.play(samples, sr, device=self.cfg.output_device)
+                sd.wait()
+            except Exception as e:  # 播放失败不应拖垮会话/播放线程
+                print("播放失败:", kind, e, file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +320,8 @@ async def serve(cfg: Config, engines: Engines):
             session.stop()
             print("主程序已断开", file=sys.stderr)
 
-    async with websockets.serve(handler, cfg.ws_host, cfg.ws_port):
+    # max_size 放大到 16MB：播放消息(base64 音频)可能超过默认 1MB 上限。
+    async with websockets.serve(handler, cfg.ws_host, cfg.ws_port, max_size=16 * 1024 * 1024):
         print(f"语音 sidecar 就绪 ws://{cfg.ws_host}:{cfg.ws_port}", file=sys.stderr)
         await asyncio.Future()  # 永久运行直至进程被终止
 

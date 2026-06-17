@@ -48,6 +48,7 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/speech"
 	"github.com/kingGang/ElectronStudio/internal/tools"
 	"github.com/kingGang/ElectronStudio/internal/weather"
+	"github.com/kingGang/ElectronStudio/internal/xiaozhi"
 	"github.com/kingGang/ElectronStudio/web"
 )
 
@@ -140,34 +141,35 @@ func main() {
 
 // app 持有各模块依赖与少量运行时状态，并实现命令分发。
 type app struct {
-	srv     *server.Server
-	chor    *choreography.Engine
-	llm     *llm.Router
-	bot     robot.Transport
-	driver  *device.Driver        // 统一设备驱动（拥有 Sync）
-	screen  *display.Compositor   // 屏幕画面合成（摄像头 / 素材片 / 程序动画脸）
-	clips   *display.ClipSource   // 离线表情素材片（支持界面上传/删除后热重载）
-	camera  *display.CameraSource // 摄像头采集（可为 nil）
+	srv    *server.Server
+	chor   *choreography.Engine
+	llm    *llm.Router
+	bot    robot.Transport
+	driver *device.Driver        // 统一设备驱动（拥有 Sync）
+	screen *display.Compositor   // 屏幕画面合成（摄像头 / 素材片 / 程序动画脸）
+	clips  *display.ClipSource   // 离线表情素材片（支持界面上传/删除后热重载）
+	camera *display.CameraSource // 摄像头采集（可为 nil）
 
 	emotionsDir string     // 表情素材目录（与 config.json 同目录的 emotions/）
 	matMu       sync.Mutex // 串行化素材上传/删除，避免并发改写同一情绪文件
-	speech  speech.Service
-	gesture gesture.Service
-	music   *music.Service
-	mm      *minimax.Client    // MiniMax 多模态(图片/语音)客户端；nil=未配置
-	netTTS  *netspeech.TTSClient // 网络 TTS(OpenAI 兼容)；nil=未配置
-	netASR  *netspeech.ASRClient // 网络 ASR(OpenAI 兼容)；nil=未配置
-	player  *audioout.Player   // 设备侧 mp3 播放(mpg123)
-	genimg  *genImgStore       // 生成图暂存(供页面 HTTP 取回)
-	genaudio *genImgStore      // 生成音频(音乐)暂存(供页面 HTTP 取回)
-	weather *weather.Client
+	speech      speech.Service
+	gesture     gesture.Service
+	music       *music.Service
+	mm          *minimax.Client      // MiniMax 多模态(图片/语音)客户端；nil=未配置
+	netTTS      *netspeech.TTSClient // 网络 TTS(OpenAI 兼容)；nil=未配置
+	netASR      *netspeech.ASRClient // 网络 ASR(OpenAI 兼容)；nil=未配置
+	player      *audioout.Player     // 设备侧 mp3 播放(mpg123)
+	genimg      *genImgStore         // 生成图暂存(供页面 HTTP 取回)
+	genaudio    *genImgStore         // 生成音频(音乐)暂存(供页面 HTTP 取回)
+	weather     *weather.Client
 
-	speakMu     sync.Mutex         // 保护 speakCancel
-	speakCancel context.CancelFunc // 取消进行中的一段语音(MiniMax 合成/设备播放)，用于打断 barge-in
-	sched   *scheduler.Scheduler
-	schedPath string
-	tools   *tools.Registry
-	log     *slog.Logger
+	speakMu       sync.Mutex         // 保护 speakCancel
+	speakCancel   context.CancelFunc // 取消进行中的一段语音(MiniMax 合成/设备播放)，用于打断 barge-in
+	audioStreamed atomic.Bool        // 本轮是否已用小智流式音频播放（true 则收尾的 speak 不再重复合成）
+	sched       *scheduler.Scheduler
+	schedPath   string
+	tools       *tools.Registry
+	log         *slog.Logger
 
 	frameSeq atomic.Uint32 // 屏幕镜像帧序号
 
@@ -175,22 +177,22 @@ type app struct {
 	cfg     *config.Config // 当前配置
 	cfgPath string         // 配置文件路径
 
-	qrMu    sync.Mutex      // 保护 qrLogin
-	qrLogin *music.QRLogin  // 进行中的 QQ 扫码登录会话
+	qrMu    sync.Mutex     // 保护 qrLogin
+	qrLogin *music.QRLogin // 进行中的 QQ 扫码登录会话
 
-	actionsPath string        // 录制动作的存盘路径
-	poseMu      sync.Mutex    // 保护 desiredPose
-	desiredPose robot.Joints  // 手动/跟随退出时保持的目标姿态
+	actionsPath string       // 录制动作的存盘路径
+	poseMu      sync.Mutex   // 保护 desiredPose
+	desiredPose robot.Joints // 手动/跟随退出时保持的目标姿态
 
-	recMu     sync.Mutex             // 保护录制状态
-	recording bool                   // 是否正在录制
-	recName   string                 // 当前录制动作名
+	recMu     sync.Mutex              // 保护录制状态
+	recording bool                    // 是否正在录制
+	recName   string                  // 当前录制动作名
 	recFrames []choreography.Keyframe // 已采集的关键帧
-	recStart  time.Time              // 录制起点
+	recStart  time.Time               // 录制起点
 
 	histMu  sync.Mutex
-	history []llm.Message  // 对话历史（含系统提示）
-	msgSeq  atomic.Uint64  // 对话消息 ID 自增源
+	history []llm.Message // 对话历史（含系统提示）
+	msgSeq  atomic.Uint64 // 对话消息 ID 自增源
 }
 
 // newApp 组装所有依赖。
@@ -199,10 +201,39 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	bot := connectRobot(cfg, log)
 	actionsPath := filepath.Join(filepath.Dir(cfgPath), "actions.json")
 
+	// 小智设备身份持久化：device_id/client_id 为空则首次生成并写回配置，
+	// 否则每次重启都换新身份 → xiaozhi.me 当成新设备反复要求绑定。
+	idDirty := false
+	for i := range cfg.Models {
+		if cfg.Models[i].Type != "xiaozhi" {
+			continue
+		}
+		if cfg.Models[i].DeviceID == "" {
+			cfg.Models[i].DeviceID = xiaozhi.NewDeviceID()
+			idDirty = true
+		}
+		if cfg.Models[i].ClientID == "" {
+			cfg.Models[i].ClientID = xiaozhi.NewClientID()
+			idDirty = true
+		}
+	}
+	if idDirty {
+		if err := cfg.Save(cfgPath); err != nil {
+			log.Warn("保存小智设备身份失败", "err", err)
+		} else {
+			log.Info("已为小智生成并保存固定设备身份（device_id/client_id），后续重启不再要求重新绑定")
+		}
+	}
+
 	// 大模型：从配置构建路由（至少含 Echo 兜底）。
 	router := llm.NewRouter()
+	var xzProviders []*llm.XiaozhiProvider
 	for _, mc := range cfg.Models {
-		router.Add(providerFromConfig(mc))
+		p := providerFromConfig(mc)
+		if xp, ok := p.(*llm.XiaozhiProvider); ok {
+			xzProviders = append(xzProviders, xp)
+		}
+		router.Add(p)
 	}
 	if cfg.Active != "" {
 		_ = router.SetActive(cfg.Active)
@@ -242,10 +273,24 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		history:     []llm.Message{{Role: llm.RoleSystem, Content: buildSystemPrompt(cfg.Persona)}},
 	}
 
+	// 小智 Provider：按 persona_source 决定是否把本机角色注入小智（model=用小智自带角色）；
+	// 并挂上流式音频回调——小智每说完一句就即时播放该句音频（边收边播，降低首声延迟）。
+	for _, xp := range xzProviders {
+		xp.SetPersonaFn(func() string {
+			a.cfgMu.Lock()
+			defer a.cfgMu.Unlock()
+			if a.cfg.PersonaSource == "model" {
+				return ""
+			}
+			return a.cfg.Persona
+		})
+		xp.SetAudioSink(func(ogg []byte) { a.streamXiaozhiAudio(ogg) })
+	}
+
 	// 新客户端连上时，推送一次状态快照，让前端立即渲染。
 	a.srv = server.New(server.Options{
 		Logger:   log,
-		StaticFS: web.FS(),        // 内嵌前端单页应用，访问 http://addr/ 即是界面
+		StaticFS: web.FS(),         // 内嵌前端单页应用，访问 http://addr/ 即是界面
 		Routes:   a.materialRoutes, // 素材管理 REST 接口（上传/缩略图）
 		OnConnect: func(c *server.Client) {
 			if err := c.Send(a.statusSnapshot()); err != nil {
@@ -276,6 +321,12 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	// 统一设备驱动以固定帧率把"姿态 + 画面"一并 Sync 给设备，并把同一帧广播给 UI，实现镜像同步。
 	face := display.NewEmotionSource()
 	a.emotionsDir = filepath.Join(filepath.Dir(cfgPath), "emotions")
+	// 首次运行把内置默认表情播种到 emotions/（一生一次，尊重用户后续删除）。
+	if n, err := display.SeedDefaultEmotions(a.emotionsDir); err != nil {
+		log.Warn("写入内置默认表情失败", "err", err)
+	} else if n > 0 {
+		log.Info("已写入内置默认表情", "数量", n)
+	}
 	clips, err := display.LoadClips(a.emotionsDir)
 	if err != nil {
 		log.Warn("加载表情素材失败，使用程序动画脸", "err", err)
@@ -581,6 +632,18 @@ func providerFromConfig(mc config.ModelConfig) llm.Provider {
 		return llm.NewOpenAICompat(llm.OpenAIConfig{
 			ID: id, Name: mc.Name, BaseURL: mc.BaseURL, APIKey: mc.APIKey, Model: mc.Model,
 		})
+	case "xiaozhi":
+		name := mc.Name
+		if name == "" {
+			name = "小智"
+		}
+		wsURL := mc.WSURL
+		if wsURL == "" {
+			wsURL = mc.BaseURL // 兼容用 base_url 填 ws 地址
+		}
+		return llm.NewXiaozhi(id, name, xiaozhi.Config{
+			WSURL: wsURL, OTAURL: mc.OTAURL, Token: mc.Token, DeviceID: mc.DeviceID, ClientID: mc.ClientID,
+		}, nil)
 	default: // echo 及未知类型一律回退为本地回声，避免启动失败
 		name := mc.Name
 		if name == "" {
@@ -712,9 +775,9 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 
 	case protocol.TypeInterrupt:
 		a.chor.Stop()
-		a.speech.Stop()                              // 打断 sidecar 语音
-		a.cancelSpeak()                              // 取消进行中的 MiniMax 合成/设备播放
-		a.player.Stop()                              // 兜底再杀一次设备播放
+		a.speech.Stop()                                  // 打断 sidecar 语音
+		a.cancelSpeak()                                  // 取消进行中的 MiniMax 合成/设备播放
+		a.player.Stop()                                  // 兜底再杀一次设备播放
 		a.srv.Broadcast(protocol.AudioEvent{Stop: true}) // 让页面停止播放
 		a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
 
@@ -814,11 +877,76 @@ var musicIntents = map[string]string{
 	"关音乐": "stop", "关闭音乐": "stop", "不听了": "stop", "停掉": "stop",
 }
 
-// tryMusicShortcut 命中音乐控制口令则直接执行并返回 true；否则返回 false 走正常对话。
+// musicPlayPrefixes 是"放歌"意图的句首动词；命中则把其后的内容当作搜索词。
+// 不含裸"放/听"（误命中"放假/想听你说话"太多），只收明确的放歌句式。
+var musicPlayPrefixes = []string{
+	"播放", "放一首歌", "放一首", "放首歌", "放首", "放点", "放个", "放歌",
+	"我想听听", "我想听", "我要听", "想听", "要听",
+	"听一首", "听首", "听点", "听个",
+	"来一首", "来首", "来点", "来个",
+	"唱一首", "唱首", "点一首", "点首",
+}
+
+// genericMusicWords 是"放点音乐"这类不含具体歌名的泛化请求，命中则放热门。
+var genericMusicWords = map[string]bool{
+	"": true, "音乐": true, "歌": true, "歌曲": true, "首歌": true,
+	"点音乐": true, "点歌": true, "随便": true, "随便一首": true,
+}
+
+// parseMusicPlay 解析"放歌"口令：命中返回搜索词（泛化请求返回"热门"）与 true。
+// 含疑问词的句子（"播放列表怎么做"）不当作放歌，避免误劫持正常对话。
+func parseMusicPlay(text string) (string, bool) {
+	t := strings.TrimSpace(text)
+	// 去掉句首语气/请求填充词（"帮我随便来首歌" → "来首歌"），便于后面匹配放歌动词。
+	for changed := true; changed; {
+		changed = false
+		for _, f := range []string{"帮我", "帮忙", "给我", "麻烦", "随便", "请", "我"} {
+			if strings.HasPrefix(t, f) {
+				t = strings.TrimSpace(t[len(f):])
+				changed = true
+			}
+		}
+	}
+	for _, p := range musicPlayPrefixes {
+		if !strings.HasPrefix(t, p) {
+			continue
+		}
+		q := strings.TrimSpace(t[len(p):])
+		for _, q2 := range []string{"歌曲", "音乐", "这首歌", "首歌", "的歌", "歌"} {
+			q = strings.TrimSuffix(strings.TrimSpace(q), q2)
+		}
+		q = strings.Trim(q, "的吧呀啊呗嘛~。.!！,，、 \t")
+		// 疑问/讨论句不当作放歌。
+		for _, bad := range []string{"怎么", "为什么", "是什么", "吗", "?", "？"} {
+			if strings.Contains(q, bad) {
+				return "", false
+			}
+		}
+		if genericMusicWords[q] {
+			return "热门", true
+		}
+		return q, true
+	}
+	return "", false
+}
+
+// tryMusicShortcut 命中音乐控制/放歌口令则直接执行并返回 true；否则返回 false 走正常对话。
+// 这条确定性路径不经过大模型，因此小智(xiaozhi)等不支持 function-calling 的后端也能放歌。
 func (a *app) tryMusicShortcut(ctx context.Context, text string) bool {
 	cleaned := strings.TrimRight(strings.TrimSpace(text), "吧呗啊呀嘛吗~。.!！,，、 \t")
 	action, ok := musicIntents[cleaned]
 	if !ok {
+		// 不是控制词，再看是不是"放某首歌"的意图。
+		if q, ok := parseMusicPlay(text); ok {
+			a.emitUser(text)
+			msg := "正在为你播放：" + q
+			a.appendHistory(llm.Message{Role: llm.RoleAssistant, Content: msg})
+			a.srv.Broadcast(protocol.ChatEvent{ID: a.nextMsgID(), Role: protocol.RoleAssistant, Content: msg, Status: protocol.ChatFinal})
+			a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
+			go a.handleMusic(ctx, protocol.MusicCommand{Action: "play", Query: q})
+			a.log.Info("放歌快捷指令", "text", text, "query", q)
+			return true
+		}
 		return false
 	}
 	// next/prev 需要已有播放列表，否则交给大模型去搜一首播。
@@ -859,6 +987,7 @@ func (a *app) tryMusicShortcut(ctx context.Context, text string) bool {
 
 // emitUser 记录并回显一条用户消息，随后进入思考态。
 func (a *app) emitUser(text string) {
+	a.audioStreamed.Store(false) // 新一轮开始：清空"已流式播放音频"标记
 	a.appendHistory(llm.Message{Role: llm.RoleUser, Content: text})
 	a.srv.Broadcast(protocol.ChatEvent{
 		ID:      a.nextMsgID(),
@@ -1271,9 +1400,10 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 			TTSEngine: a.cfg.IO.TTSEngineOr(),
 			ImageOut:  a.cfg.IO.ImageOutOr(),
 		},
-		Music:   protocol.MusicStatus{Source: a.cfg.Music.SourceOr()},
-		Persona: a.cfg.Persona,
-		Voice:   a.cfg.Voice,
+		Music:         protocol.MusicStatus{Source: a.cfg.Music.SourceOr()},
+		Persona:       a.cfg.Persona,
+		PersonaSource: a.cfg.PersonaSourceOr(),
+		Voice:         a.cfg.Voice,
 	}
 }
 
@@ -1285,7 +1415,7 @@ func validIO(field, v string) bool {
 	case "audio_out":
 		return v == "device" || v == "page" || v == "both" || v == "off"
 	case "tts_engine":
-		return v == "minimax" || v == "sidecar" || v == "openai"
+		return v == "minimax" || v == "sidecar" || v == "openai" || v == "xiaozhi"
 	case "image_out":
 		return v == "device" || v == "page" || v == "both" || v == "off"
 	}
@@ -1317,6 +1447,9 @@ func (a *app) handleSetDevice(cmd protocol.SetDeviceCommand) {
 	a.cfgMu.Lock()
 	a.cfg.Persona = cmd.Persona
 	a.cfg.Voice = cmd.Voice
+	if cmd.PersonaSource == "local" || cmd.PersonaSource == "model" {
+		a.cfg.PersonaSource = cmd.PersonaSource
+	}
 	persona := a.cfg.Persona
 	a.saveConfig()
 	a.cfgMu.Unlock()

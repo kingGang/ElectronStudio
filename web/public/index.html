@@ -170,12 +170,17 @@
   <!-- ===== 视图：设置 ===== -->
   <main class="view settings-view" data-view="settings">
     <section class="panel">
-      <h2>设备角色 / 音色</h2>
-      <p class="muted">给设备设定人设（影响大模型说话风格）和声音音色（当前语音引擎的音色）。改动即时生效并保存。</p>
-      <label class="dev-row"><span>角色 / 人设</span>
-        <textarea id="dev-persona" rows="3" placeholder="例：你是桌面机器人小电，活泼可爱、回答简洁。"></textarea>
+      <h2>🔊 声音</h2>
+      <p class="muted">机器人用什么嗓音说话。改动即时生效并保存。</p>
+      <label class="dev-row"><span>引擎</span>
+        <select id="io-tts_engine">
+          <option value="minimax">MiniMax 云端（可选 / 可克隆音色）</option>
+          <option value="openai">OpenAI 兼容（speech.tts）</option>
+          <option value="sidecar">本地 Piper（sidecar）</option>
+          <option value="xiaozhi">小智自带嗓音（需当前模型为小智）</option>
+        </select>
       </label>
-      <label class="dev-row"><span>声音音色
+      <label class="dev-row" id="dev-voice-row"><span>音色
           <button type="button" class="link-btn" id="dev-voice-refresh">↻ 刷新</button>
           <button type="button" class="link-btn" id="dev-voice-preview">▶ 试听</button>
         </span>
@@ -184,7 +189,7 @@
       <label class="dev-row" id="dev-voice-custom-row" style="display:none"><span>自定义音色 ID</span>
         <input id="dev-voice" placeholder="手填音色 ID" />
       </label>
-      <button class="qa" id="dev-save">保存角色与音色</button>
+      <p class="muted" id="dev-voice-note" style="display:none"></p>
       <div class="dev-clone">
         <div class="panel-head"><h3>从语音克隆音色（MiniMax）</h3></div>
         <p class="muted">录一段或上传一段清晰人声（约 10 秒~5 分钟），克隆成一个新音色，克隆后出现在上面的列表里可选。</p>
@@ -198,56 +203,22 @@
       </div>
     </section>
     <section class="panel">
-      <h2>输入 / 输出路由</h2>
-      <p class="muted">设备=ElectronBot 外设(主)，页面=本浏览器(调试/也可用)。改动即时生效并保存。</p>
-      <div class="io-grid">
-        <label class="io-row"><span>语音输入</span>
-          <select id="io-audio_in">
-            <option value="device">设备麦克风（sidecar 识别）</option>
-            <option value="page">网页麦克风（浏览器识别）</option>
-            <option value="network">网页麦克风（网络 ASR，speech.asr）</option>
-            <option value="off">关闭</option>
-          </select>
-        </label>
-        <label class="io-row"><span>语音/音频输出</span>
-          <select id="io-audio_out">
-            <option value="device">设备扬声器（mpg123）</option>
-            <option value="page">网页播放</option>
-            <option value="both">设备 + 网页</option>
-            <option value="off">关闭</option>
-          </select>
-        </label>
-        <label class="io-row"><span>文字转语音引擎</span>
-          <select id="io-tts_engine">
-            <option value="minimax">MiniMax 云端</option>
-            <option value="openai">网络 AI（OpenAI 兼容，speech.tts）</option>
-            <option value="sidecar">本地 Piper（sidecar）</option>
-          </select>
-        </label>
-        <label class="io-row"><span>图像输出</span>
-          <select id="io-image_out">
-            <option value="device">设备屏</option>
-            <option value="page">网页</option>
-            <option value="both">设备屏 + 网页</option>
-            <option value="off">关闭</option>
-          </select>
-        </label>
-      </div>
-    </section>
-    <section class="panel">
-      <h2>音乐</h2>
-      <div class="kv"><span>当前音源</span><b id="music-source-label">—</b></div>
-      <p class="muted">QQ 音乐播放完整付费曲需登录。点下方按钮用<b>手机 QQ 扫码</b>授权，自动获取登录态（无需手动复制 cookie）。登录态会过期，失效后再扫一次即可。</p>
-      <div class="qq-login" id="qq-login">
-        <button class="qa" id="qq-login-btn">📱 扫码登录 QQ 音乐</button>
-        <div class="qq-qr-box" id="qq-qr-box" style="display:none">
-          <img id="qq-qr-img" alt="QQ 登录二维码" width="160" height="160" />
-          <div class="qq-qr-status muted" id="qq-qr-status">正在生成二维码…</div>
-        </div>
-      </div>
+      <h2>🎭 角色 / 人设</h2>
+      <p class="muted">设定说话风格。小智等自带角色的模型可选「使用模型自带角色」。改动点保存生效。</p>
+      <label class="dev-row"><span>角色来源</span>
+        <select id="dev-persona-source">
+          <option value="local">使用本机角色（下方人设）</option>
+          <option value="model">使用模型自带角色（如小智服务端设定）</option>
+        </select>
+      </label>
+      <label class="dev-row" id="dev-persona-row"><span>角色 / 人设</span>
+        <textarea id="dev-persona" rows="3" placeholder="例：你是桌面机器人小电，活泼可爱、回答简洁。"></textarea>
+      </label>
+      <button class="qa" id="dev-save">保存人设</button>
     </section>
     <section class="panel">
       <h2>大模型</h2>
+      <p class="muted">选择对话使用的大模型。小智(xiaozhi)等自带角色的模型，可在上方「角色来源」选「使用模型自带角色」。</p>
       <div class="model-list" id="model-list"><span class="muted">等待状态…</span></div>
       <form class="add-model" id="add-model">
         <div class="am-row">
@@ -266,6 +237,56 @@
         </div>
         <button type="submit" class="qa">+ 添加模型</button>
       </form>
+    </section>
+    <section class="panel">
+      <h2>🎧 使用场景</h2>
+      <p class="muted">决定在哪儿听声音、用哪个麦克风。改动即时生效并保存。</p>
+      <div class="scene-row">
+        <label class="scene-opt"><input type="radio" name="io-scene" value="web" /> 单机网页调试</label>
+        <label class="scene-opt"><input type="radio" name="io-scene" value="device" /> 机器人 / 树莓派设备</label>
+      </div>
+      <p class="muted" id="io-scene-note">单机网页：麦克风 + 播放都走浏览器（不会回音）。</p>
+      <details class="io-advanced">
+        <summary>高级：分别设置输入 / 输出</summary>
+        <div class="io-grid">
+          <label class="io-row"><span>语音输入</span>
+            <select id="io-audio_in">
+              <option value="device">设备麦克风（sidecar 识别）</option>
+              <option value="page">网页麦克风（浏览器识别）</option>
+              <option value="network">网页麦克风（网络 ASR，speech.asr）</option>
+              <option value="off">关闭</option>
+            </select>
+          </label>
+          <label class="io-row"><span>语音/音频输出</span>
+            <select id="io-audio_out">
+              <option value="device">设备扬声器（mpg123）</option>
+              <option value="page">网页播放</option>
+              <option value="both">设备 + 网页（同一台机器会回音）</option>
+              <option value="off">关闭</option>
+            </select>
+          </label>
+          <label class="io-row"><span>图像输出</span>
+            <select id="io-image_out">
+              <option value="device">设备屏</option>
+              <option value="page">网页</option>
+              <option value="both">设备屏 + 网页</option>
+              <option value="off">关闭</option>
+            </select>
+          </label>
+        </div>
+      </details>
+    </section>
+    <section class="panel">
+      <h2>音乐</h2>
+      <div class="kv"><span>当前音源</span><b id="music-source-label">—</b></div>
+      <p class="muted">QQ 音乐播放完整付费曲需登录。点下方按钮用<b>手机 QQ 扫码</b>授权，自动获取登录态（无需手动复制 cookie）。登录态会过期，失效后再扫一次即可。</p>
+      <div class="qq-login" id="qq-login">
+        <button class="qa" id="qq-login-btn">📱 扫码登录 QQ 音乐</button>
+        <div class="qq-qr-box" id="qq-qr-box" style="display:none">
+          <img id="qq-qr-img" alt="QQ 登录二维码" width="160" height="160" />
+          <div class="qq-qr-status muted" id="qq-qr-status">正在生成二维码…</div>
+        </div>
+      </div>
     </section>
     <section class="panel">
       <h2>语音（本地）</h2>

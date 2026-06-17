@@ -97,6 +97,12 @@ type Provider interface {
 	SupportsTools() bool
 }
 
+// AudioReplier 是可选接口：自带 TTS 的后端（如小智）在一次回复后可返回该回复的音频
+// （Ogg/Opus 容器字节，已被取走则返回 nil）。Router.ActiveAudioOgg 据此取用。
+type AudioReplier interface {
+	LastAudioOgg() []byte
+}
+
 // Router 管理多个 Provider，并维护"当前生效"模型。并发安全。
 type Router struct {
 	mu        sync.RWMutex
@@ -215,6 +221,18 @@ func (r *Router) ActiveSupportsTools() bool {
 		return false
 	}
 	return p.SupportsTools()
+}
+
+// ActiveAudioOgg 取走当前生效模型最近一次回复自带的音频（Ogg/Opus）；不支持或无则 nil。
+func (r *Router) ActiveAudioOgg() []byte {
+	p, err := r.activeProvider()
+	if err != nil {
+		return nil
+	}
+	if ar, ok := p.(AudioReplier); ok {
+		return ar.LastAudioOgg()
+	}
+	return nil
 }
 
 // activeProvider 返回当前生效的 Provider。

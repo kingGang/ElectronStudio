@@ -236,8 +236,9 @@ func (MusicCommand) Type() Type { return TypeMusic }
 
 // SetDeviceCommand 设置设备角色(人设)与声音音色。空字段表示不改。
 type SetDeviceCommand struct {
-	Persona string `json:"persona,omitempty"` // 角色/人设（系统提示的人设部分）
-	Voice   string `json:"voice,omitempty"`   // 声音音色（覆盖当前 TTS 引擎音色）
+	Persona       string `json:"persona,omitempty"`        // 角色/人设（系统提示的人设部分）
+	PersonaSource string `json:"persona_source,omitempty"` // local | model（小智用自带角色）
+	Voice         string `json:"voice,omitempty"`          // 声音音色（覆盖当前 TTS 引擎音色）
 }
 
 // Type 实现 Payload。

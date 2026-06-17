@@ -23,6 +23,7 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/minimax"
 	"github.com/kingGang/ElectronStudio/internal/music"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
+	"github.com/kingGang/ElectronStudio/internal/speech"
 )
 
 // thinkRe 匹配推理模型（如 MiniMax-M3）输出在正文里的 <think>…</think> 思考块。
@@ -145,6 +146,27 @@ func (a *app) speak(parent context.Context, text string) {
 	if io.AudioOut == "off" { // 别出声：不合成、不播放
 		return
 	}
+	// tts_engine=xiaozhi：用当前模型（小智）自带 TTS。音频在本轮已由 streamXiaozhiAudio
+	// 逐句流式播放（边收边播），这里无需再处理。
+	if io.TTSEngine == "xiaozhi" {
+		if a.audioStreamed.Load() {
+			return // 已流式播放完毕
+		}
+		// 本轮没有流式音频：可能是非流式路径(Complete)留下的整段，或当前模型不是小智。
+		if ogg := a.llm.ActiveAudioOgg(); len(ogg) > 0 {
+			a.log.Info("使用小智自带语音(整段)", "bytes", len(ogg), "out", io.AudioOut)
+			sctx, cancel := context.WithCancel(context.Background())
+			a.setSpeakCancel(cancel)
+			a.routeOgg(sctx, io.AudioOut, ogg, text)
+			return
+		}
+		// 没有小智音频（当前模型不是小智 / 未回传）→ 回退 sidecar 合成。
+		a.log.Warn("tts_engine=xiaozhi 但本轮无小智音频，回退 sidecar（确认当前模型为小智且设备已在 xiaozhi.me 激活）")
+		if err := a.speech.Speak(parent, text); err != nil {
+			a.log.Warn("sidecar 语音失败", "err", err)
+		}
+		return
+	}
 	if io.TTSEngine == "openai" && a.netTTS != nil {
 		sctx, cancel := context.WithCancel(context.Background())
 		a.setSpeakCancel(cancel)
@@ -202,6 +224,63 @@ func (a *app) routeAudio(ctx context.Context, out string, mp3 []byte, text strin
 		a.srv.Broadcast(protocol.AudioEvent{
 			Format: "mp3", Data: base64.StdEncoding.EncodeToString(mp3), Text: text,
 		})
+	}
+}
+
+// streamXiaozhiAudio 是小智流式音频的回调：每收到一句的 Ogg/Opus 就即时播放（边收边播）。
+// 页面端按到达顺序排队顺序播放；设备端交 sidecar 串行解码播放。第一句到达时即标记本轮已出声，
+// 收尾的 speak 据此不再重复合成。
+func (a *app) streamXiaozhiAudio(ogg []byte) {
+	if len(ogg) == 0 {
+		return
+	}
+	io := a.ioSnapshot()
+	if io.AudioOut == "off" {
+		return
+	}
+	// 仅当 tts_engine=xiaozhi 时才用小智自带嗓音；否则忽略小智回传的音频，
+	// 交由 speak() 用所选引擎（minimax/openai）合成，避免两路声音叠加（回音）。
+	if io.TTSEngine != "xiaozhi" {
+		return
+	}
+	first := a.audioStreamed.CompareAndSwap(false, true)
+	if first {
+		a.log.Info("小智流式语音开始", "out", io.AudioOut)
+	}
+	if io.AudioOut == "page" || io.AudioOut == "both" {
+		a.srv.Broadcast(protocol.AudioEvent{
+			Format: "ogg", Data: base64.StdEncoding.EncodeToString(ogg), Stream: true,
+		})
+	}
+	if io.AudioOut == "device" || io.AudioOut == "both" {
+		if sc, ok := a.speech.(*speech.Sidecar); ok {
+			if err := sc.PlayAudio(context.Background(), "ogg", ogg); err != nil {
+				a.log.Warn("设备播放小智流式音频失败", "err", err)
+			}
+		}
+	}
+}
+
+// routeOgg 把一段 Ogg/Opus（小智自带 TTS）按 audio_out 路由：
+// 页面直接播 audio/ogg（浏览器原生解码）；设备交语音 sidecar 解码后用 sounddevice 播放
+// （主程序无 cgo，故不在 Go 里解码，也不依赖 ffmpeg）。
+func (a *app) routeOgg(ctx context.Context, out string, ogg []byte, text string) {
+	if out == "page" || out == "both" {
+		a.srv.Broadcast(protocol.AudioEvent{
+			Format: "ogg", Data: base64.StdEncoding.EncodeToString(ogg), Text: text,
+		})
+	}
+	if out == "device" || out == "both" {
+		sc, ok := a.speech.(*speech.Sidecar)
+		if !ok {
+			a.log.Warn("设备播放小智音频需要语音 sidecar，当前未启用")
+			return
+		}
+		go func() {
+			if err := sc.PlayAudio(ctx, "ogg", ogg); err != nil && ctx.Err() == nil {
+				a.log.Warn("设备播放小智音频失败（确认 sidecar 已连接）", "err", err)
+			}
+		}()
 	}
 }
 

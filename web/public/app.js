@@ -289,8 +289,14 @@
     };
   }
   function send(type, payload) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      // 连接断开时别静默丢命令——否则顶栏下拉显示了新选择、服务端却没收到，
+      // 看起来就是「顶栏和设置页不同步」。给出提示，待重连后状态会自动纠回真实值。
+      toast('连接已断开，正在重连…请稍候重试');
+      return false;
+    }
     ws.send(JSON.stringify({ type, ts: Date.now(), payload }));
+    return true;
   }
   function setConn(text, cls) { el.conn.textContent = text; el.conn.className = 'conn-state ' + (cls || ''); }
 
@@ -335,6 +341,8 @@
         : audioInMode === 'network' ? '网页录音（网络 ASR 识别）：点开始、再点结束'
         : '切换设备拾音';
       renderIO(s.io);
+      updateVoiceVisibility(s.io.tts_engine);
+      updateSceneRadio(s.io);
     }
     if (s.music) {
       musicSource = s.music.source || '';
@@ -344,6 +352,10 @@
     // 设备角色/音色：仅在用户未正在编辑时回填，避免打断输入。
     const pa = $('dev-persona');
     if (pa && document.activeElement !== pa) pa.value = s.persona || '';
+    const psrc = $('dev-persona-source');
+    if (psrc && document.activeElement !== psrc) psrc.value = s.persona_source || 'local';
+    const prow = $('dev-persona-row');
+    if (prow) prow.style.display = (s.persona_source === 'model') ? 'none' : '';
     devVoice = s.voice || '';
     reconcileVoiceSelect();
     renderSettings(s);
@@ -603,8 +615,55 @@
 
   // ---- I/O 路由设置（设置页下拉，改动即时发 set_io）----
   const IO_FIELDS = ['audio_in', 'audio_out', 'tts_engine', 'image_out'];
+  // 「使用场景」预设：一键把输入/输出收成两套常用组合（避免同机两路输出回音）。
+  const SCENES = {
+    web: { audio_in: 'page', audio_out: 'page' },        // 单机网页：全走浏览器
+    device: { audio_in: 'device', audio_out: 'device' }, // 机器人/树莓派：全走设备 sidecar
+  };
   function renderIO(io) {
     IO_FIELDS.forEach((f) => { const sel = $('io-' + f); if (sel && io[f]) sel.value = io[f]; });
+  }
+  // 音色区可见性：仅 MiniMax/OpenAI 引擎可选音色；小智/本地引擎给一句说明，不再空着像坏了。
+  function curEngine() { const e = $('io-tts_engine'); return e ? e.value : 'minimax'; }
+  function updateVoiceVisibility(engine) {
+    engine = engine || curEngine();
+    const usesVoice = engine === 'minimax' || engine === 'openai';
+    const row = $('dev-voice-row'), custom = $('dev-voice-custom-row'), note = $('dev-voice-note');
+    const sel = $('dev-voice-select');
+    if (row) row.style.display = usesVoice ? '' : 'none';
+    if (custom) custom.style.display = (usesVoice && sel && sel.value === '__custom__') ? '' : 'none';
+    if (note) {
+      note.style.display = usesVoice ? 'none' : '';
+      note.textContent = usesVoice ? '' : (engine === 'xiaozhi'
+        ? '小智用服务端嗓音（在 xiaozhi.me 后台设置），这里无需选音色。'
+        : '本地 Piper 由 sidecar 配置决定，这里无需选音色。');
+    }
+  }
+  function currentVoiceValue() {
+    const vsel = $('dev-voice-select');
+    if (!vsel) return '';
+    return vsel.value === '__custom__' ? (($('dev-voice').value) || '').trim() : vsel.value;
+  }
+  // 始终发完整三元组（后端按整组覆盖：空字段会清空，故不能只发其一）。
+  function saveDevice() {
+    const psrc = $('dev-persona-source');
+    send(CliType.SetDevice, {
+      persona: (($('dev-persona').value) || '').trim(),
+      persona_source: psrc ? psrc.value : 'local',
+      voice: currentVoiceValue(),
+    });
+  }
+  function sceneNote(scene) {
+    if (scene === 'web') return '单机网页：麦克风 + 播放都走浏览器（不会回音）。';
+    if (scene === 'device') return '设备：麦克风/扬声器走 ElectronBot（树莓派经 sidecar / mpg123）。';
+    return '当前为自定义组合（见下方「高级」）。同一台机器把输出设成「设备 + 网页」会回音。';
+  }
+  function updateSceneRadio(io) {
+    let scene = '';
+    if (io.audio_in === 'page' && io.audio_out === 'page') scene = 'web';
+    else if (io.audio_in === 'device' && io.audio_out === 'device') scene = 'device';
+    document.querySelectorAll('input[name="io-scene"]').forEach((r) => { r.checked = (r.value === scene); });
+    const n = $('io-scene-note'); if (n) n.textContent = sceneNote(scene);
   }
   function setupIO() {
     IO_FIELDS.forEach((f) => {
@@ -614,25 +673,45 @@
         const payload = {}; payload[f] = sel.value;
         send(CliType.SetIO, payload);
         toast('已更新：' + f + ' = ' + sel.value);
-        if (f === 'tts_engine') setTimeout(loadVoices, 300); // 引擎变了，刷新音色列表
+        if (f === 'tts_engine') { updateVoiceVisibility(sel.value); setTimeout(loadVoices, 300); }
+        if (f === 'audio_in' || f === 'audio_out') updateSceneRadio({ audio_in: $('io-audio_in').value, audio_out: $('io-audio_out').value });
       });
     });
-    // 设备角色/音色
+    // 使用场景预设：一键设 audio_in + audio_out。
+    document.querySelectorAll('input[name="io-scene"]').forEach((r) => {
+      r.addEventListener('change', () => {
+        if (!r.checked) return;
+        const s = SCENES[r.value]; if (!s) return;
+        send(CliType.SetIO, s);
+        const ai = $('io-audio_in'), ao = $('io-audio_out');
+        if (ai) ai.value = s.audio_in; if (ao) ao.value = s.audio_out;
+        const n = $('io-scene-note'); if (n) n.textContent = sceneNote(r.value);
+        toast('已切换场景：' + (r.value === 'web' ? '单机网页' : '机器人设备'));
+      });
+    });
+    // 声音：音色选择即时保存（发完整三元组），自定义 ID 失焦时保存。
     const vsel = $('dev-voice-select');
     if (vsel) vsel.addEventListener('change', () => {
-      $('dev-voice-custom-row').style.display = (vsel.value === '__custom__') ? '' : 'none';
+      updateVoiceVisibility();
+      if (vsel.value !== '__custom__') saveDevice();
     });
+    const vcustom = $('dev-voice');
+    if (vcustom) vcustom.addEventListener('change', saveDevice);
     const vref = $('dev-voice-refresh');
     if (vref) vref.addEventListener('click', (e) => { e.preventDefault(); loadVoices(); });
+    // 角色/人设：来源切换即时保存并切换可见性；人设文本点「保存人设」生效。
+    const psrc = $('dev-persona-source');
+    if (psrc) psrc.addEventListener('change', () => {
+      const prow = $('dev-persona-row');
+      if (prow) prow.style.display = (psrc.value === 'model') ? 'none' : '';
+      saveDevice();
+    });
     setupVoicePreview();
     setupVoiceClone();
     const save = $('dev-save');
-    if (save) save.addEventListener('click', () => {
-      const v = vsel.value === '__custom__' ? ($('dev-voice').value || '').trim() : vsel.value;
-      send(CliType.SetDevice, { persona: ($('dev-persona').value || '').trim(), voice: v });
-      toast('已保存设备角色与音色');
-    });
+    if (save) save.addEventListener('click', () => { saveDevice(); toast('已保存人设'); });
     loadVoices(); // 初次加载当前引擎的音色列表
+    updateVoiceVisibility();
   }
 
   // 音色下拉：从 /api/voices 拉当前引擎可用音色，含"默认/自定义"项。
@@ -667,6 +746,7 @@
       sel.appendChild(cust);
       if (!(d.voices || []).length) sel.title = '当前引擎无可列音色（本地 sidecar 由模型决定，可用自定义）';
       reconcileVoiceSelect();
+      updateVoiceVisibility();
     } catch (e) { /* 离线/未配置时忽略 */ }
   }
 
@@ -737,7 +817,9 @@
   }
 
   // ---- 顶栏模型下拉 ----
+  let activeModelId = ''; // 服务端当前生效模型；用于发送失败时把下拉纠回真实值
   function renderModelPicker(llm) {
+    activeModelId = llm.active || '';
     el.model.innerHTML = '';
     (llm.available || []).forEach((m) => {
       const opt = document.createElement('option');
@@ -765,7 +847,10 @@
   });
   el.interrupt.addEventListener('click', () => send(CliType.Interrupt, { reason: 'user' }));
   $('btn-greet').addEventListener('click', () => send(CliType.Greet, {}));
-  el.model.addEventListener('change', () => send(CliType.SelectModel, { id: el.model.value }));
+  el.model.addEventListener('change', () => {
+    // 发不出去（断线）就把下拉纠回服务端真实值，避免顶栏显示假状态。
+    if (!send(CliType.SelectModel, { id: el.model.value })) el.model.value = activeModelId;
+  });
 
   // 麦克风按钮：audio_in=page 用浏览器内置语音识别（网页麦）；否则切换设备拾音（sidecar）。
   let audioInMode = 'device';
@@ -856,7 +941,7 @@
 
   // ---- 音频播放（页面调试镜像：后端把合成语音 base64 推来，浏览器播放）----
   let currentAudio = null;
-  let musicDucked = false; // 因播放语音回复而临时暂停了音乐，待回复结束续播
+  let musicDucked = false;     // 因播放语音回复而临时暂停了音乐，待回复结束续播
   function stopAudio() { if (currentAudio) { try { currentAudio.pause(); } catch (_) {} currentAudio = null; } }
   // 语音回复结束/被打断后：续播音乐 + 让语音状态回到待命（与真实播放同步）。
   function endVoicePlayback() {
@@ -864,28 +949,88 @@
     musicDucked = false;
     if (pageVoiceActive) { pageVoiceActive = false; setVoice('idle'); }
   }
+  function duckMusicForVoice() {
+    if (musicAudio && !musicAudio.paused) { try { musicAudio.pause(); } catch (_) {} musicDucked = true; }
+  }
+
+  // ---- 流式分段语音（小智逐句）：用 Web Audio 按时间轴无缝排期，避免 <audio> 段间停顿 ----
+  let actx = null;             // AudioContext
+  let streamNextStart = 0;     // 下一段应开始的精确时间（contiguous 排期）
+  let streamSources = [];      // 已排期的源（用于打断时停止）
+  let streamChain = Promise.resolve(); // 串行解码链：严格按到达顺序解码+排期，避免乱序丢段
+  let streamEndTimer = null;
+  function ensureCtx() {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume().catch(() => {});
+    return actx;
+  }
+  function stopStreamAudio() {
+    streamSources.forEach(s => { try { s.stop(); } catch (_) {} });
+    streamSources = [];
+    streamNextStart = 0;
+    streamChain = Promise.resolve();
+    if (streamEndTimer) { clearTimeout(streamEndTimer); streamEndTimer = null; }
+  }
+  function scheduleStreamChunk(b64) {
+    const ctx = ensureCtx();
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    // decodeAudioData 用 Promise 形式；老实现回调形式这里统一包一层。
+    return new Promise(resolve => {
+      const done = () => resolve();
+      let p;
+      try { p = ctx.decodeAudioData(bytes.buffer); } catch (_) { return done(); }
+      if (!p || !p.then) { return done(); } // 不支持 Promise 形式则跳过该段
+      p.then(buf => {
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        const startAt = Math.max(ctx.currentTime + 0.03, streamNextStart); // 30ms 缓冲避免欠载
+        try { src.start(startAt); } catch (_) { return done(); }
+        streamNextStart = startAt + buf.duration;
+        streamSources.push(src);
+        src.onended = () => {
+          streamSources = streamSources.filter(s => s !== src);
+          // 全部播完且没有后续排期 → 回到待命（留一点余量给在途解码）。
+          if (streamEndTimer) clearTimeout(streamEndTimer);
+          streamEndTimer = setTimeout(() => {
+            if (streamSources.length === 0 && streamNextStart <= ctx.currentTime + 0.05) {
+              streamNextStart = 0;
+              endVoicePlayback();
+            }
+          }, 120);
+        };
+        done();
+      }).catch(() => done());
+    });
+  }
   function onAudio(p) {
     if (!p) return;
-    stopAudio();              // 先停上一段（打断/新段都先停）
-    if (p.stop) { endVoicePlayback(); return; } // 仅停止（barge-in）→ 续播音乐、回待命
-    let src = null;
-    if (p.url) {
-      src = p.url;            // 较大音频（音乐）走 HTTP URL
-    } else if (p.data) {
-      const mime = (!p.format || p.format === 'mp3') ? 'mpeg' : p.format; // mp3 的标准 MIME 是 audio/mpeg
-      src = 'data:audio/' + mime + ';base64,' + p.data; // 小段语音走 base64
+    if (p.stop) { stopStreamAudio(); stopAudio(); endVoicePlayback(); return; } // 打断：停流式+单段、回待命
+    if (p.stream && p.data) {
+      // 流式分段（小智逐句）：无缝排期，严格按到达顺序解码。
+      duckMusicForVoice();
+      pageVoiceActive = true;
+      setVoice('speaking');
+      streamChain = streamChain.then(() => scheduleStreamChunk(p.data)).catch(() => {});
+      return;
+    }
+    // 非流式（音乐 URL / 整段语音）：停掉当前再播单段。
+    stopStreamAudio();
+    stopAudio();
+    let src = p.url;
+    if (!src && p.data) {
+      const mime = (!p.format || p.format === 'mp3') ? 'mpeg' : p.format;
+      src = 'data:audio/' + mime + ';base64,' + p.data;
     }
     if (!src) return;
-    // 让路：放语音回复前，先暂停正在播放的音乐，回复结束再自动续播。
-    if (musicAudio && !musicAudio.paused) { try { musicAudio.pause(); } catch (_) {} musicDucked = true; }
-    // 语音状态实时化：开始出声即"说话"，由浏览器播放进度决定何时回"待命"。
+    duckMusicForVoice();
     pageVoiceActive = true;
     setVoice('speaking');
     try {
       currentAudio = new Audio(src);
       currentAudio.addEventListener('ended', endVoicePlayback);
       currentAudio.addEventListener('error', endVoicePlayback);
-      currentAudio.play().catch(() => { endVoicePlayback(); }); // 播不了也别卡在"说话"/暂停音乐
+      currentAudio.play().catch(() => endVoicePlayback());
     } catch (_) { endVoicePlayback(); }
   }
 

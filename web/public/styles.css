@@ -292,6 +292,16 @@ body {
   border-radius: var(--radius-sm); padding: 7px 10px; font-size: 13px;
 }
 .io-row select:focus { border-color: var(--accent); outline: none; }
+.scene-row { display: flex; gap: 10px; margin: 8px 0 6px; flex-wrap: wrap; }
+.scene-opt {
+  flex: 1 1 0; min-width: 150px; display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; font-size: 13px; color: var(--text); cursor: pointer;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.scene-opt:has(input:checked) { border-color: var(--accent); background: rgba(0, 229, 199, 0.08); }
+.io-advanced { margin-top: 10px; }
+.io-advanced > summary { cursor: pointer; font-size: 13px; color: var(--text-dim); padding: 4px 0; }
+.io-advanced[open] > summary { color: var(--accent); }
 .tool-badge {
   display: inline-block; margin-top: 6px; padding: 2px 8px; font-size: 11px;
   font-family: var(--mono); color: var(--accent);

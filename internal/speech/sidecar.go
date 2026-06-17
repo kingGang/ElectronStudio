@@ -2,6 +2,7 @@ package speech
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -49,6 +50,8 @@ type sidecarMsg struct {
 	Level    float32 `json:"level,omitempty"`
 	Text     string  `json:"text,omitempty"`
 	Final    bool    `json:"final,omitempty"`
+	Format   string  `json:"format,omitempty"` // type=play：音频容器格式（如 ogg）
+	Data     string  `json:"data,omitempty"`   // type=play：base64 编码的音频字节
 }
 
 // NewSidecar 创建一个连接到 wsURL 的语音 sidecar 客户端（尚未连接，需调用 Start）。
@@ -187,6 +190,17 @@ func toEvent(m sidecarMsg) (Event, bool) {
 // Speak 实现 Service：请求 sidecar 合成并播放文本。
 func (s *Sidecar) Speak(ctx context.Context, text string) error {
 	return s.send(ctx, sidecarMsg{Type: "speak", Text: text})
+}
+
+// PlayAudio 请求 sidecar 解码并播放一段音频（如小智自带 TTS 的 Ogg/Opus）。
+// 设备侧无 cgo，故把解码+播放交给 sidecar（Python + sounddevice），避免依赖 ffmpeg。
+// data 为音频容器字节，format 为容器格式（如 "ogg"）。
+func (s *Sidecar) PlayAudio(ctx context.Context, format string, data []byte) error {
+	return s.send(ctx, sidecarMsg{
+		Type:   "play",
+		Format: format,
+		Data:   base64.StdEncoding.EncodeToString(data),
+	})
 }
 
 // Stop 实现 Service：请求 sidecar 打断当前播放。

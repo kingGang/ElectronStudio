@@ -91,8 +91,9 @@ type StatusEvent struct {
 	Camera  bool          `json:"camera"`            // 是否配置了摄像头（前端据此显示切换按钮）
 	IO      IOStatus      `json:"io"`                // I/O 路由当前配置（供设置页展示/编辑）
 	Music   MusicStatus   `json:"music"`             // 音乐子系统状态（音源等，供前端展示）
-	Persona string        `json:"persona,omitempty"` // 设备角色/人设（供设置页展示/编辑）
-	Voice   string        `json:"voice,omitempty"`   // 声音音色（供设置页展示/编辑）
+	Persona       string  `json:"persona,omitempty"`        // 设备角色/人设（供设置页展示/编辑）
+	PersonaSource string  `json:"persona_source,omitempty"` // local | model（角色来源：本机/模型自带）
+	Voice         string  `json:"voice,omitempty"`          // 声音音色（供设置页展示/编辑）
 }
 
 // MusicStatus 是音乐子系统的当前配置（供前端展示来源）。
@@ -278,7 +279,8 @@ type AudioEvent struct {
 	Data   string `json:"data,omitempty"`   // base64 编码的音频字节（小段语音用）
 	URL    string `json:"url,omitempty"`    // 或给一个 HTTP 取回地址（较大音频如音乐用）
 	Text   string `json:"text,omitempty"`
-	Stop   bool   `json:"stop,omitempty"` // true=停止页面当前播放（barge-in）
+	Stop   bool   `json:"stop,omitempty"`   // true=停止页面当前播放（barge-in）
+	Stream bool   `json:"stream,omitempty"` // true=流式分段语音：页面按到达顺序排队顺序播放（小智逐句音频）
 }
 
 // Type 实现 Payload。
