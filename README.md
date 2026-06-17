@@ -45,9 +45,32 @@ CGO_ENABLED=0 go build ./cmd/electronstudio
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/electronstudio
 ```
 
+## 一键启动（推荐）
+
+跨平台启动脚本：自动建 Python 虚拟环境、装 sidecar 依赖、下载语音模型、（可选）编译，
+再起语音 sidecar + 主程序，缺啥补啥、已就绪则秒起。Ctrl+C 退出时一并关闭 sidecar。
+
+```bash
+# Linux / macOS / 树莓派
+./scripts/run.sh                       # 监听 :8080，含语音 sidecar
+./scripts/run.sh --mirror https://ghfast.top/   # 国内加速下模型
+./scripts/run.sh --no-sidecar          # 只跑文本链路（不装 Python/不下模型）
+./scripts/run.sh --build --addr :8099  # 编译成 bin/electronstudio 再跑
+./scripts/run.sh --help                # 全部参数
+```
+
+```powershell
+# Windows（或 scripts\run.bat 双击）
+pwsh scripts/run.ps1
+pwsh scripts/run.ps1 -Mirror https://ghfast.top/ -Tts piper
+```
+
+首次运行会下载约数百 MB 的语音模型（SenseVoice / Silero / VITS-zh），之后自动跳过。
+脚本不会改动你已有的 `config.json`（含密钥）；如需挂接大模型/QQ 音乐等，按下文手动配置。
+
 ## 运行（最小入口）
 
-当前入口使用 **Mock 机器人 + 本地 Echo 模型**，无需真机 / 联网 / C 工具链即可启动：
+也可直接用 Go 命令。当前入口使用 **Mock 机器人 + 本地 Echo 模型**，无需真机 / 联网 / C 工具链即可启动：
 
 ```bash
 go run ./cmd/electronstudio -addr :8080
