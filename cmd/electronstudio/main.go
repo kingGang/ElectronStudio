@@ -22,8 +22,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -109,6 +111,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// 设备驱动循环【最先启动】：真机有“连接后就绪窗口”，必须连上(connectRobot)后尽快
+	// 开始 Sync，否则窗口过期、设备就不再发就绪包(帧首读一直超时)。把它排在 speech/gesture
+	// 连 sidecar 等耗时操作之前，缩短 连接→首帧 的间隔。
+	go a.driver.Run(ctx)
+
 	// 启动语音服务（Mock 为空操作；Sidecar 会连接外部进程）。
 	if err := a.speech.Start(ctx); err != nil {
 		log.Warn("语音服务启动失败，将仅支持文本输入", "err", err)
@@ -124,9 +131,6 @@ func main() {
 
 	// 启动定时任务调度。
 	go a.sched.Run(ctx)
-
-	// 启动设备驱动循环（统一推帧 + 同步）。
-	go a.driver.Run(ctx)
 
 	// 消费入站命令、上行语音事件与手势事件。
 	go a.dispatchLoop(ctx)
@@ -158,7 +162,9 @@ type app struct {
 	mm          *minimax.Client      // MiniMax 多模态(图片/语音)客户端；nil=未配置
 	netTTS      *netspeech.TTSClient // 网络 TTS(OpenAI 兼容)；nil=未配置
 	netASR      *netspeech.ASRClient // 网络 ASR(OpenAI 兼容)；nil=未配置
-	player      *audioout.Player     // 设备侧 mp3 播放(mpg123)
+	player      *audioout.Player     // 设备侧 mp3 播放(mpg123 或 macOS playto)
+	ttsToDevice bool                 // 配了 audio_device：TTS 始终定向设备喇叭(与 audio_out 解耦)
+	robotStuck  atomic.Bool          // 设备疑似固件卡死(持续无就绪包，需断电复位)，广播给 UI 提示
 	genimg      *genImgStore         // 生成图暂存(供页面 HTTP 取回)
 	genaudio    *genImgStore         // 生成音频(音乐)暂存(供页面 HTTP 取回)
 	weather     *weather.Client
@@ -197,8 +203,6 @@ type app struct {
 
 // newApp 组装所有依赖。
 func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) {
-	// 机器人：按配置选择传输（auto 优先尝试真机 USB，失败回退 Mock）。
-	bot := connectRobot(cfg, log)
 	actionsPath := filepath.Join(filepath.Dir(cfgPath), "actions.json")
 
 	// 小智设备身份持久化：device_id/client_id 为空则首次生成并写回配置，
@@ -263,7 +267,6 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 
 	a := &app{
 		llm:         router,
-		bot:         bot,
 		speech:      voice,
 		gesture:     ges,
 		log:         log,
@@ -339,10 +342,28 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	}
 	a.clips = display.NewClipSource(clips)
 	a.screen = display.NewCompositor(a.camera, a.clips, face)
+	// 机器人连接放到【最后一刻】：真机有“连接后就绪窗口”，连上后必须尽快开始 Sync，否则
+	// 窗口过期、设备不再发就绪包(帧首读超时)。前面的表情播种等慢初始化都已做完，这里连上后
+	// 紧接着 NewDriver→newApp 返回→main 里 driver.Run(已排最前) 即首帧，间隔最短、稳命中窗口。
+	bot := connectRobot(cfg, log)
+	a.bot = bot
 	a.driver = device.NewDriver(bot, a.screen, log, 30, a.onDriverFrame, a.onDriverJoints)
+	a.driver.SetServoEnable(cfg.IO.ServoEnable) // 舵机总开关：默认关，避免舵机失联时固件卡死整机
+	a.driver.SetStuckHandler(func(stuck bool) { // 设备卡死/恢复 → 广播状态，UI 据此提示断电复位
+		a.robotStuck.Store(stuck)
+		a.srv.Broadcast(a.statusSnapshot())
+	})
+	if !cfg.IO.ServoEnable {
+		log.Info("舵机总开关 = 关（servo_enable=false）：不下发使能，舵机 I²C 通了再开")
+	}
 
 	// 动作编排：把姿态写入驱动；注册内置动作并加载用户录制的动作（同名覆盖内置）。
-	a.chor = choreography.NewEngine(a.driver, choreography.WithLogger(log))
+	// 注入表情回调（用 previewEmotion：只切脸、不联动同名动作，避免递归），
+	// 让带「表情轨道」的动作（如 dance）在踩到关键帧时即时变脸。
+	a.chor = choreography.NewEngine(a.driver,
+		choreography.WithLogger(log),
+		choreography.WithEmotionSink(func(e string) { a.previewEmotion(e) }),
+	)
 	for _, act := range choreography.DefaultActions() {
 		a.chor.Register(act)
 	}
@@ -361,9 +382,23 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		searcher = music.NewKuwoSearcher()
 		log.Info("音乐音源 = 酷我")
 	}
+	// 播放器：页面输出(audio_out=page)时音乐由浏览器 <audio> 直接播放事件里的 URL，
+	// 后端用 Mock 播放器、完全不依赖 mpg123；设备输出(device/both)时才用 mpg123 子进程出声。
+	var musicPlayer music.Player
+	switch {
+	case cfg.IO.AudioOutOr() == "page":
+		musicPlayer = music.NewMockPlayer()
+		log.Info("音乐播放 = 浏览器(page)，后端不使用 mpg123")
+	case runtime.GOOS == "darwin" && cfg.IO.AudioDevice != "" && findAudioHelper("musicto") != "":
+		// macOS 设备输出：用 musicto(NSSound 定向 USB 声卡)，与 TTS 的 playto 同源，无需 mpg123。
+		musicPlayer = music.NewDevicePlayer(findAudioHelper("musicto"), cfg.IO.AudioDevice, log)
+		log.Info("音乐播放 = 设备(musicto 定向 USB 声卡)", "device", cfg.IO.AudioDevice)
+	default:
+		musicPlayer = music.NewMpg123Player(cfg.Music.Mpg123, log)
+	}
 	a.music = music.NewService(
 		searcher,
-		music.NewMpg123Player(cfg.Music.Mpg123, log),
+		musicPlayer,
 		log,
 		func(t music.Track, st music.State) {
 			a.srv.Broadcast(protocol.MusicEvent{State: string(st), Name: t.Name, Artist: t.Artist, URL: t.URL})
@@ -381,8 +416,8 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 
 	// MiniMax 多模态（图片/语音）：凭据复用 models 里的 minimax 条目（或 io.minimax 显式配置）。
 	if mmc := cfg.ResolveMiniMax(); mmc.BaseURL != "" && mmc.APIKey != "" {
-		a.mm = minimax.New(mmc.BaseURL, mmc.APIKey)
-		log.Info("已启用 MiniMax 多模态", "base", mmc.BaseURL, "tts_engine", cfg.IO.TTSEngineOr(), "audio_out", cfg.IO.AudioOutOr(), "image_out", cfg.IO.ImageOutOr())
+		a.mm = minimax.NewWithGroup(mmc.BaseURL, mmc.APIKey, mmc.GroupID)
+		log.Info("已启用 MiniMax 多模态", "base", mmc.BaseURL, "tts_engine", cfg.IO.TTSEngineOr(), "audio_out", cfg.IO.AudioOutOr(), "image_out", cfg.IO.ImageOutOr(), "group", a.mm.GroupID())
 	}
 	// 网络语音（OpenAI 兼容）：配置了 base_url 即启用，供 tts_engine=openai / audio_in=network 使用。
 	if t := cfg.Speech.TTS; t.BaseURL != "" {
@@ -393,7 +428,20 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		a.netASR = netspeech.NewASR(r.BaseURL, r.APIKey, r.Model)
 		log.Info("已启用网络 ASR", "base", r.BaseURL, "model", r.Model)
 	}
-	a.player = audioout.New(cfg.Music.Mpg123, log) // 设备侧 mp3 播放复用 mpg123 路径
+	// 设备侧音频播放：macOS 上配了 audio_device 且找得到 playto helper 时，把 TTS 定向到该
+	// USB 声卡（不动系统默认输出）；否则复用 mpg123 播到系统默认输出。
+	if dev := cfg.IO.AudioDevice; runtime.GOOS == "darwin" && dev != "" {
+		if playto := findPlaytoHelper(); playto != "" {
+			a.player = audioout.NewCommand(playto, []string{dev}, log)
+			a.ttsToDevice = true // 与 audio_out 解耦：TTS 始终从设备喇叭出
+			log.Info("设备音频 = playto helper（定向 USB 声卡，不动系统默认）", "device", dev, "helper", playto)
+		} else {
+			a.player = audioout.New(cfg.Music.Mpg123, log)
+			log.Warn("配了 audio_device 但未找到 playto helper，回退 mpg123", "device", dev)
+		}
+	} else {
+		a.player = audioout.New(cfg.Music.Mpg123, log)
+	}
 	a.genimg = newGenImgStore()
 	a.genaudio = newGenImgStore()
 
@@ -490,19 +538,50 @@ func connectRobot(cfg *config.Config, log *slog.Logger) robot.Transport {
 	}
 
 	if mode != "mock" {
-		dev := electronbot.New(log)
-		if err := dev.Connect(); err == nil {
-			return dev
-		} else if mode == "electronbot" {
-			log.Warn("指定 electronbot 但连接失败，回退 Mock", "err", err)
+		// 只【探测】设备在不在（列设备，不 open/claim）；真正的 Connect 交给驱动循环，由它
+		// 在连上后【零间隔】立刻 Sync 抢就绪窗口。探测不到则回退 Mock（无真机也能跑）。
+		if electronbot.Probe() {
+			log.Info("已探测到 ElectronBot，连接交由驱动循环")
+			return electronbot.New(log)
+		}
+		if mode == "electronbot" {
+			log.Warn("指定 electronbot 但未探测到设备，回退 Mock")
 		} else {
-			log.Info("未检测到 ElectronBot，使用 Mock", "reason", err)
+			log.Info("未探测到 ElectronBot，使用 Mock")
 		}
 	}
 
 	m := robot.NewMock(log)
 	_ = m.Connect()
 	return m
+}
+
+// findPlaytoHelper 定位 macOS 的 playto 音频 helper（把声音定向到指定 USB 声卡）。
+// 依次找：可执行文件同级的 sidecars/audio/playto、当前目录下的同路径、最后 PATH 里的 playto。
+// 找不到返回空串。
+func findPlaytoHelper() string { return findAudioHelper("playto") }
+
+// findAudioHelper 在 exe 同级 / 工作目录的 sidecars/audio/ 下、再 PATH 里查找音频小工具
+// （playto=TTS 单段播放、musicto=音乐常驻播放）。找不到返回空串，调用方回退。
+func findAudioHelper(name string) string {
+	rel := filepath.Join("sidecars", "audio", name)
+	var cands []string
+	if exe, err := os.Executable(); err == nil {
+		cands = append(cands, filepath.Join(filepath.Dir(exe), rel))
+	}
+	cands = append(cands, rel) // 相对当前工作目录（go run 时仓库根）
+	for _, c := range cands {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			if abs, err := filepath.Abs(c); err == nil {
+				return abs
+			}
+			return c
+		}
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	return ""
 }
 
 // buildTools 构造工具注册表，副作用以闭包注入（情绪/动作走机器人，台灯为内置设备）。
@@ -698,6 +777,9 @@ func (a *app) handleSpeechEvent(ctx context.Context, ev speech.Event) {
 	case speech.KindWake:
 		a.srv.Broadcast(protocol.WakeEvent{Keyword: ev.Keyword})
 		a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceListening})
+		if a.player != nil { // 唤醒后立刻"嘀"一声反馈（到设备喇叭），不让用户干等
+			go a.player.Play(ctx, wakeBeepWAV)
+		}
 
 	case speech.KindVAD:
 		a.srv.Broadcast(protocol.VADEvent{Speaking: ev.Speaking, Level: ev.Level})
@@ -809,6 +891,11 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 
 	case protocol.TypeGreet:
 		go a.handleGreet(ctx) // 看一眼打招呼，放后台
+
+	case protocol.TypeParty:
+		if cmd, err := protocol.As[protocol.PartyCommand](in.Env); err == nil {
+			go a.handleParty(ctx, cmd.Query) // 一键蹦迪：放歌 + 跳舞，放后台
+		}
 
 	case protocol.TypeMusic:
 		if cmd, err := protocol.As[protocol.MusicCommand](in.Env); err == nil {
@@ -1303,6 +1390,33 @@ func (a *app) handleGreet(ctx context.Context) {
 	a.finishAssistant(ctx, text)
 }
 
+// defaultPartyQuery 是「一键蹦迪」默认曲目（节奏感强）；搜不到则只跳舞。
+const defaultPartyQuery = "最炫民族风"
+
+// handleParty 一键蹦迪：同时放歌 + 无限循环跳 dance（踩拍变脸）。
+// 立刻起舞（即时反馈），并发去放歌（网络搜索有延迟，失败则只跳舞不报错）。
+// 停止由前端发 interrupt（停舞）+ music stop（停歌）完成。
+func (a *app) handleParty(ctx context.Context, query string) {
+	if query == "" {
+		query = defaultPartyQuery
+	}
+	if err := a.chor.Play(ctx, "dance", -1); err != nil {
+		a.log.Warn("蹦迪：起舞失败", "err", err)
+		a.srv.Broadcast(protocol.ErrorEvent{Code: "party", Message: "起舞失败：" + err.Error()})
+		return
+	}
+	go func() {
+		if _, err := a.music.SearchAndPlay(ctx, query); err != nil {
+			a.log.Warn("蹦迪：放歌失败，仅跳舞", "query", query, "err", err)
+		}
+	}()
+	a.srv.Broadcast(protocol.ChatEvent{
+		ID: a.nextMsgID(), Role: protocol.RoleAssistant,
+		Content: "🪩 开跳！正在放《" + query + "》，点「打断」即可停。", Status: protocol.ChatFinal,
+	})
+	a.log.Info("一键蹦迪", "query", query)
+}
+
 // greetingText 生成招呼语：有摄像头则让视觉模型"看一眼"后打招呼，否则用友好问候兜底。
 func (a *app) greetingText(ctx context.Context) string {
 	if a.camera != nil {
@@ -1385,6 +1499,7 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 	return protocol.StatusEvent{
 		Robot: protocol.RobotStatus{
 			Connected: a.bot.Connected(),
+			Stuck:     a.robotStuck.Load(),
 			VID:       0x1001, // ElectronBot 设备标识（Mock 下仅作展示）
 			PID:       0x8023,
 			FPS:       30,
@@ -1400,7 +1515,7 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 			TTSEngine: a.cfg.IO.TTSEngineOr(),
 			ImageOut:  a.cfg.IO.ImageOutOr(),
 		},
-		Music:         protocol.MusicStatus{Source: a.cfg.Music.SourceOr()},
+		Music:         protocol.MusicStatus{Source: a.cfg.Music.SourceOr(), LoggedIn: a.cfg.Music.SourceOr() == "qq" && a.cfg.Music.QQ.Cookie != ""},
 		Persona:       a.cfg.Persona,
 		PersonaSource: a.cfg.PersonaSourceOr(),
 		Voice:         a.cfg.Voice,

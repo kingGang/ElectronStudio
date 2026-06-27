@@ -153,7 +153,9 @@ body {
 
 /* 添加模型表单 */
 .add-model { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
-.am-row { display: flex; gap: 8px; }
+.am-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.am-row input, .am-row .qa { min-width: 0; }
+.dev-clone .am-row #clone-name { flex: 1 1 140px; }
 .add-model input, .add-model select {
   flex: 1; min-width: 0; background: var(--card); color: var(--text);
   border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px;
@@ -372,10 +374,19 @@ body {
 
 /* ---------- 触摸屏 / 窄屏（树莓派） ---------- */
 @media (max-width: 720px) {
+  /* 顶栏：窄屏换行，避免导航/状态挤成一团或溢出屏外 */
+  .topbar { flex-wrap: wrap; gap: 8px 14px; padding: 8px 12px; }
+  .nav { flex-wrap: wrap; gap: 4px; }
+  .spacer { flex-basis: 100%; height: 0; } /* 占满一行，把状态/模型挤到下一行 */
+  .status-dots { gap: 12px; flex-wrap: wrap; }
+
   .layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .robot-pane { flex-direction: row; flex-wrap: wrap; justify-content: center; border-right: none; border-bottom: 1px solid var(--border); }
   .robot-face { width: 120px; height: 120px; }
   .emotions { margin-top: 0; }
+
+  /* 编排/设置页：窄屏强制单列，收紧留白，避免最小列宽撑出横向滚动 */
+  .choreo-view, .settings-view { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
 }
 @media (pointer: coarse) {
   .qa, .chip, .icon-btn { min-height: 44px; } /* 放大点击区 */

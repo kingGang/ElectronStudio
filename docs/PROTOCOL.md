@@ -53,7 +53,7 @@
 ```jsonc
 // 状态快照
 { "type": "status", "ts": 1781170000000, "payload": {
-  "robot": { "connected": true, "vid": 4097, "pid": 32803, "fps": 30 },
+  "robot": { "connected": true, "stuck": false, "vid": 4097, "pid": 32803, "fps": 30 },
   "asr":   { "running": true,  "detail": "SenseVoice-zh" },
   "tts":   { "running": true,  "detail": "piper zh_CN-huayan" },
   "llm":   { "active": "ollama:qwen2.5", "available": [
@@ -88,6 +88,7 @@
 | `add_model` | `AddModelCommand` | 新增/编辑大模型（`name` / `type` / `base_url` / `api_key` / `model`），写入配置文件 |
 | `remove_model` | `RemoveModelCommand` | 删除大模型（`id`），写入配置文件 |
 | `material_delete` | `MaterialDeleteCommand` | 删除一段屏幕表情素材（`name`），删后热重载并广播 `materials` |
+| `party` | `PartyCommand` | 一键蹦迪：同时放歌 + 无限循环跳 `dance`（踩拍变脸），可选 `query` 指定曲目；停止用 `interrupt` + `music`(`stop`) |
 
 > 注：屏幕表情素材的**上传**是二进制文件，不走 WebSocket，而走下方的 HTTP REST 接口。
 

@@ -181,6 +181,15 @@ type GreetCommand struct{}
 // Type 实现 Payload。
 func (GreetCommand) Type() Type { return TypeGreet }
 
+// PartyCommand 触发"一键蹦迪"：后端同时放歌 + 循环跳 dance（踩拍变脸）。
+// Query 为空时用内置默认曲目；停止用 interrupt + 音乐 stop。
+type PartyCommand struct {
+	Query string `json:"query,omitempty"` // 可选曲目关键词；空则用默认
+}
+
+// Type 实现 Payload。
+func (PartyCommand) Type() Type { return TypeParty }
+
 // ScheduleAddCommand 新增定时任务/提醒。At/Every/Daily 三选一。
 type ScheduleAddCommand struct {
 	Title string `json:"title"`

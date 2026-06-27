@@ -57,9 +57,10 @@ const JointCount = 6
 // RobotStatus 描述机器人 USB 连接状态。
 type RobotStatus struct {
 	Connected bool   `json:"connected"`
-	VID       uint16 `json:"vid"` // USB 厂商 ID（ElectronBot = 0x1001）
-	PID       uint16 `json:"pid"` // USB 产品 ID（ElectronBot = 0x8023）
-	FPS       int    `json:"fps"` // 当前画面推送帧率
+	Stuck     bool   `json:"stuck,omitempty"` // 已连接但持续无就绪包(疑似固件卡死)，需断电复位
+	VID       uint16 `json:"vid"`             // USB 厂商 ID（ElectronBot = 0x1001）
+	PID       uint16 `json:"pid"`             // USB 产品 ID（ElectronBot = 0x8023）
+	FPS       int    `json:"fps"`             // 当前画面推送帧率
 }
 
 // ServiceStatus 描述一个 sidecar 子服务（ASR / TTS）的运行状态。
@@ -98,7 +99,8 @@ type StatusEvent struct {
 
 // MusicStatus 是音乐子系统的当前配置（供前端展示来源）。
 type MusicStatus struct {
-	Source string `json:"source"` // qq | kuwo
+	Source   string `json:"source"`              // qq | kuwo
+	LoggedIn bool   `json:"logged_in,omitempty"` // QQ 音乐是否已登录（音源为 qq 且有 cookie）
 }
 
 // IOStatus 是 I/O 路由的当前生效配置（供前端设置页显示与编辑）。

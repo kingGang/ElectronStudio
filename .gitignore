@@ -27,6 +27,7 @@ web/.vite/
 /sidecars/speech/models/
 /sidecars/speech/config.json
 /sidecars/gesture/*.task
+/sidecars/audio/playto
 __pycache__/
 *.onnx
 *.bin
@@ -50,3 +51,11 @@ es.err.log
 .vscode/
 .DS_Store
 Thumbs.db
+/sidecars/audio/musicto
+
+# 调试二进制 / 第三方 app / 运行期素材（不入库）
+/electronstudio
+/ebtest
+/usbscan
+/电子脑壳*/
+/sidecars/speech/emotions/

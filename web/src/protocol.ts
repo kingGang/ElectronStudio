@@ -57,6 +57,7 @@ export const ClientType = {
   MaterialDelete: 'material_delete',
   SetIO: 'set_io',
   SetDevice: 'set_device',
+  Party: 'party',
 } as const
 
 export interface SetIOCommand {
@@ -116,6 +117,7 @@ export interface Envelope<T = unknown> {
 
 export interface RobotStatus {
   connected: boolean
+  stuck?: boolean // 已连接但持续无就绪包(疑似固件卡死)，需断电复位
   vid: number
   pid: number
   fps: number
@@ -151,6 +153,7 @@ export interface SetDeviceCommand {
 }
 export interface MusicStatus {
   source: string // qq | kuwo
+  logged_in?: boolean // QQ 音乐是否已登录（音源为 qq 且有 cookie）
 }
 export interface IOStatus {
   audio_in: string   // device | page | network | off

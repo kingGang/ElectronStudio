@@ -13,24 +13,33 @@ import (
 	"sync"
 )
 
-// Player 用 mpg123 子进程播放 mp3 字节。并发安全；同一时刻只播一段（新播放会打断旧的）。
+// Player 用外部子进程播放音频字节（从 stdin 读）。并发安全；同一时刻只播一段（新播放会打断旧的）。
+// 默认命令是 `mpg123 -q -`（跨平台、读 stdin 的 mp3）；macOS 上可换成 playto helper
+// （`playto "<设备名>"`，把声音定向到指定 USB 声卡、不动系统默认输出）。
 type Player struct {
-	bin string
-	log *slog.Logger
+	name string   // 可执行命令（mpg123 或 playto helper）
+	args []string // 固定参数；音频字节始终从 stdin 喂入
+	log  *slog.Logger
 
 	mu  sync.Mutex
 	cur *exec.Cmd // 当前正在播放的子进程；nil 表示空闲
 }
 
-// New 创建播放器。bin 为空则用 "mpg123"（需在 PATH）。
+// New 创建 mpg123 播放器。bin 为空则用 "mpg123"（需在 PATH）。
 func New(bin string, log *slog.Logger) *Player {
 	if bin == "" {
 		bin = "mpg123"
 	}
+	return NewCommand(bin, []string{"-q", "-"}, log)
+}
+
+// NewCommand 用自定义命令创建播放器：运行 `name args...` 并把音频字节写入其 stdin。
+// 用于 macOS 的 playto helper：NewCommand(playtoPath, []string{deviceName}, log)。
+func NewCommand(name string, args []string, log *slog.Logger) *Player {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Player{bin: bin, log: log}
+	return &Player{name: name, args: args, log: log}
 }
 
 // Play 同步播放一段 mp3（阻塞到播完或被 Stop 打断）。调用方通常放 goroutine 里跑。
@@ -41,20 +50,20 @@ func (p *Player) Play(ctx context.Context, mp3 []byte) error {
 	}
 	p.Stop() // 打断上一段
 
-	cmd := exec.CommandContext(ctx, p.bin, "-q", "-")
+	cmd := exec.CommandContext(ctx, p.name, p.args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("audioout: 创建 stdin 失败: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("audioout: 启动 mpg123 失败（确认已安装并在 PATH）: %w", err)
+		return fmt.Errorf("audioout: 启动播放器 %s 失败（确认已安装并在 PATH）: %w", p.name, err)
 	}
 
 	p.mu.Lock()
 	p.cur = cmd
 	p.mu.Unlock()
 
-	// 喂数据后关闭 stdin，mpg123 读到 EOF 即播完退出。
+	// 喂数据后关闭 stdin，播放器读到 EOF 即播完退出。
 	go func() {
 		_, _ = stdin.Write(mp3)
 		_ = stdin.Close()

@@ -25,6 +25,9 @@ const (
 type Keyframe struct {
 	AtMs   int          `json:"at_ms"`  // 相对动作起点的时间（毫秒）
 	Angles robot.Joints `json:"angles"` // 6 轴目标角度（度）
+	// Emotion 是可选的「表情轨道」：播放推进到该帧时切换为此表情（踩拍变脸）。
+	// 为空表示该帧不改表情。角度做插值，表情是离散事件、跨过帧即触发一次。
+	Emotion string `json:"emotion,omitempty"`
 }
 
 // Action 是一段具名动作，由若干关键帧构成。可序列化以便存盘/录制。
@@ -47,6 +50,8 @@ type Engine struct {
 	sink PoseSink
 	fps  int
 	log  *slog.Logger
+
+	onEmotion func(string) // 可选：踩到带 Emotion 的关键帧时回调（切表情）
 
 	mu      sync.Mutex
 	actions map[string]Action
@@ -72,6 +77,12 @@ func WithLogger(log *slog.Logger) Option {
 			e.log = log
 		}
 	}
+}
+
+// WithEmotionSink 注入表情回调：播放推进到带 Emotion 的关键帧时调用一次。
+// 应传入「只切表情、不联动动作」的函数（如 previewEmotion），避免与动作播放互相递归。
+func WithEmotionSink(fn func(string)) Option {
+	return func(e *Engine) { e.onEmotion = fn }
 }
 
 // NewEngine 创建一个动作编排引擎，把算出的姿态写入给定的 PoseSink。
@@ -200,18 +211,35 @@ func (e *Engine) playOnce(ctx context.Context, a Action) error {
 		frameMs = 1
 	}
 
+	fired := make([]bool, len(a.Frames)) // 表情轨道：每帧表情仅触发一次（每遍循环重置）
 	for t := 0; t <= total; t += frameMs {
 		if err := e.drive(SampleAt(a.Frames, t)); err != nil {
 			return err
 		}
+		e.fireEmotions(a.Frames, fired, t)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(frameDur):
 		}
 	}
+	e.fireEmotions(a.Frames, fired, total)
 	// 确保精确停在最后一帧，避免因取整漏掉终点姿态。
 	return e.drive(a.Frames[len(a.Frames)-1].Angles)
+}
+
+// fireEmotions 触发所有「已到点（AtMs<=t）、带 Emotion、本遍未触发」的关键帧表情。
+// 表情是离散事件不做插值；fired 切片由调用方按每遍循环重置，使循环播放每遍都重新变脸。
+func (e *Engine) fireEmotions(frames []Keyframe, fired []bool, t int) {
+	if e.onEmotion == nil {
+		return
+	}
+	for i := range frames {
+		if !fired[i] && frames[i].Emotion != "" && frames[i].AtMs <= t {
+			fired[i] = true
+			e.onEmotion(frames[i].Emotion)
+		}
+	}
 }
 
 // drive 把一组角度写入姿态接收器（实际下发与同步由设备驱动统一完成）。

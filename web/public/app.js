@@ -21,7 +21,7 @@
     AddModel: 'add_model', RemoveModel: 'remove_model',
     Follow: 'follow', RecordStart: 'record_start', RecordFrame: 'record_frame',
     RecordStop: 'record_stop', DeleteAction: 'delete_action',
-    Camera: 'camera', Greet: 'greet', Music: 'music',
+    Camera: 'camera', Greet: 'greet', Music: 'music', Party: 'party',
     ScheduleAdd: 'schedule_add', ScheduleRemove: 'schedule_remove',
     MaterialDelete: 'material_delete', SetIO: 'set_io', SetDevice: 'set_device',
   };
@@ -61,6 +61,8 @@
       if (view === 'model3d') init3D(); // 首次打开才加载 11MB 模型
     });
   });
+
+  let wasRobotStuck = false; // 跟踪设备卡死状态，仅在转为卡死时弹一次提示
 
   // ---- 3D 模型（three.js + GLTFLoader，懒加载）----
   let model3dReady = false;
@@ -325,7 +327,13 @@
   }
 
   function onStatus(s) {
-    toggleDot(el.dotUSB, s.robot && s.robot.connected);
+    const stuck = !!(s.robot && s.robot.stuck);
+    // USB 灯反映“在同步”而非仅“已连接”：卡死时(已连接但无就绪包)灯灭，避免误以为正常。
+    toggleDot(el.dotUSB, s.robot && s.robot.connected && !stuck);
+    if (el.dotUSB) el.dotUSB.title = stuck ? '设备卡死：请彻底断电(拔线≥15秒放净电容)再插复位'
+      : (s.robot && s.robot.connected ? '已连接同步中' : '未连接');
+    if (stuck && !wasRobotStuck) toast('⚠ 设备卡死，请彻底断电(拔线≥15秒)再插复位；频繁重连不会自愈');
+    wasRobotStuck = stuck;
     toggleDot(el.dotASR, s.asr && s.asr.running);
     toggleDot(el.dotTTS, s.tts && s.tts.running);
     if (s.llm) {
@@ -348,6 +356,13 @@
       musicSource = s.music.source || '';
       const lbl = $('music-source-label');
       if (lbl) lbl.textContent = musicSource === 'qq' ? 'QQ音乐' : (musicSource === 'kuwo' ? '酷我音乐' : musicSource || '—');
+      const qstate = $('qq-login-state');
+      if (qstate) {
+        if (musicSource === 'qq') {
+          qstate.textContent = s.music.logged_in ? '✅ 已登录' : '未登录（点下方扫码）';
+          qstate.style.color = s.music.logged_in ? 'var(--ok)' : 'var(--busy)';
+        } else { qstate.textContent = '—'; qstate.style.color = ''; }
+      }
     }
     // 设备角色/音色：仅在用户未正在编辑时回填，避免打断输入。
     const pa = $('dev-persona');
@@ -768,29 +783,63 @@
   }
 
   // 克隆：录音或上传音频 → POST /api/voice-clone → 成功后刷新音色列表并选中新音色。
-  let cloneRec = null, cloneChunks = [];
+  // 注意：MiniMax voice_clone 只接受 mp3/m4a/wav。浏览器 MediaRecorder 多产出 webm/opus，
+  // 会被拒（2013 invalid file ext），故录音走 Web Audio 采 PCM、停止时自编码为 16bit WAV。
+  let cloneCtx = null, cloneNode = null, cloneStream = null, clonePCM = [], cloneSR = 0, cloneWav = null;
+  // 将累积的 Float32 PCM 编码为单声道 16bit PCM WAV blob。
+  function encodeWav(chunks, sampleRate) {
+    let total = 0; chunks.forEach((c) => { total += c.length; });
+    const buf = new ArrayBuffer(44 + total * 2), view = new DataView(buf);
+    const wstr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+    wstr(0, 'RIFF'); view.setUint32(4, 36 + total * 2, true); wstr(8, 'WAVE');
+    wstr(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    wstr(36, 'data'); view.setUint32(40, total * 2, true);
+    let off = 44;
+    chunks.forEach((c) => { for (let i = 0; i < c.length; i++) { const s = Math.max(-1, Math.min(1, c[i])); view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true); off += 2; } });
+    return new Blob([view], { type: 'audio/wav' });
+  }
+  function stopCloneRec() {
+    if (cloneNode) { try { cloneNode.disconnect(); } catch (e) {} cloneNode = null; }
+    if (cloneStream) { cloneStream.getTracks().forEach((t) => t.stop()); cloneStream = null; }
+    if (cloneCtx) { try { cloneCtx.close(); } catch (e) {} cloneCtx = null; }
+  }
   function setupVoiceClone() {
     const recBtn = $('clone-record'), subBtn = $('clone-submit'), st = $('clone-status');
     if (!subBtn) return;
     if (recBtn) recBtn.addEventListener('click', async (e) => {
       e.preventDefault();
-      if (cloneRec && cloneRec.state === 'recording') { cloneRec.stop(); recBtn.textContent = '● 录音'; return; }
+      if (cloneNode) { // 正在录 → 停止并编码
+        stopCloneRec();
+        cloneWav = encodeWav(clonePCM, cloneSR);
+        const secs = clonePCM.reduce((n, c) => n + c.length, 0) / (cloneSR || 1);
+        recBtn.textContent = '● 录音';
+        st.textContent = '已录制 ' + secs.toFixed(1) + ' 秒，点“克隆”提交';
+        return;
+      }
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        cloneChunks = []; cloneRec = new MediaRecorder(stream);
-        cloneRec.ondataavailable = (ev) => { if (ev.data && ev.data.size) cloneChunks.push(ev.data); };
-        cloneRec.onstop = () => { stream.getTracks().forEach((t) => t.stop()); st.textContent = '已录制 ' + cloneChunks.length + ' 段，点"克隆"提交'; };
-        cloneRec.start(); recBtn.textContent = '■ 停止'; st.textContent = '录音中…（说 10 秒以上）';
-      } catch (err) { toast('无法录音：' + err.message); }
+        cloneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        cloneCtx = new (window.AudioContext || window.webkitAudioContext)();
+        cloneSR = cloneCtx.sampleRate; clonePCM = []; cloneWav = null;
+        const src = cloneCtx.createMediaStreamSource(cloneStream);
+        cloneNode = cloneCtx.createScriptProcessor(4096, 1, 1);
+        cloneNode.onaudioprocess = (ev) => { clonePCM.push(new Float32Array(ev.inputBuffer.getChannelData(0))); };
+        src.connect(cloneNode); cloneNode.connect(cloneCtx.destination);
+        recBtn.textContent = '■ 停止'; st.textContent = '录音中…（说 10 秒以上）';
+      } catch (err) { stopCloneRec(); toast('无法录音：' + err.message); }
     });
     subBtn.addEventListener('click', async (e) => {
       e.preventDefault();
       const name = ($('clone-name').value || '').trim();
       if (!name) { toast('请先填音色名（字母）'); return; }
-      let blob = null, fname = 'voice.webm';
+      let blob = null, fname = 'voice.wav';
       const f = $('clone-file').files[0];
-      if (f) { blob = f; fname = f.name; }
-      else if (cloneChunks.length) { blob = new Blob(cloneChunks, { type: cloneRec.mimeType || 'audio/webm' }); }
+      if (f) {
+        // MiniMax 只收 mp3/m4a/wav，上传文件先校验扩展名，避免白跑一趟。
+        if (!/\.(mp3|m4a|wav)$/i.test(f.name)) { toast('仅支持 mp3 / m4a / wav 文件'); return; }
+        blob = f; fname = f.name;
+      } else if (cloneWav) { blob = cloneWav; fname = 'voice.wav'; }
       if (!blob) { toast('请先录音或选择音频文件'); return; }
       st.textContent = '上传并克隆中…（约几十秒）';
       try {
@@ -810,7 +859,7 @@
     if (s.asr) el.setASR.textContent = (s.asr.running ? '在线' : '离线') + (s.asr.detail ? ` · ${s.asr.detail}` : '');
     if (s.tts) el.setTTS.textContent = (s.tts.running ? '在线' : '离线') + (s.tts.detail ? ` · ${s.tts.detail}` : '');
     if (s.robot) {
-      el.setUSB.textContent = s.robot.connected ? '已连接' : '未连接';
+      el.setUSB.textContent = s.robot.stuck ? '卡死(需断电复位)' : (s.robot.connected ? '已连接' : '未连接');
       el.setVidPid.textContent = `0x${(s.robot.vid || 0).toString(16)} / 0x${(s.robot.pid || 0).toString(16)}`;
       el.setFPS.textContent = (s.robot.fps || 0) + ' fps';
     }
@@ -847,6 +896,25 @@
   });
   el.interrupt.addEventListener('click', () => send(CliType.Interrupt, { reason: 'user' }));
   $('btn-greet').addEventListener('click', () => send(CliType.Greet, {}));
+  // 一键蹦迪：toggle —— 开始放歌+跳舞；再点一下停舞(打断)+停歌。
+  const partyBtn = $('btn-party');
+  if (partyBtn) {
+    let partyOn = false;
+    partyBtn.addEventListener('click', () => {
+      if (!partyOn) {
+        send(CliType.Party, {});
+        partyBtn.textContent = '⏹ 停止蹦迪';
+        partyBtn.classList.add('danger');
+        partyOn = true;
+      } else {
+        send(CliType.Interrupt, { reason: 'party-stop' });
+        send(CliType.Music, { action: 'stop' });
+        partyBtn.textContent = '🪩 蹦迪';
+        partyBtn.classList.remove('danger');
+        partyOn = false;
+      }
+    });
+  }
   el.model.addEventListener('change', () => {
     // 发不出去（断线）就把下拉纠回服务端真实值，避免顶栏显示假状态。
     if (!send(CliType.SelectModel, { id: el.model.value })) el.model.value = activeModelId;

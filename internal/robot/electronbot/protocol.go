@@ -15,19 +15,45 @@ package electronbot
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
+	"strings"
 
 	"github.com/kingGang/ElectronStudio/internal/robot"
 )
 
 // USB 设备标识与端点。
 const (
-	vid         = 0x1001 // USB 厂商 ID
-	pid         = 0x8023 // USB 产品 ID
-	endpointIn  = 0x81   // EP1_IN（读：MCU 反馈）
-	endpointOut = 0x01   // EP1_OUT（写：图像 + 舵机角度）
-	ifaceNum    = 0      // 接口号
+	endpointIn  = 0x81 // EP1_IN（读：MCU 反馈）
+	endpointOut = 0x01 // EP1_OUT（写：图像 + 舵机角度）
+	ifaceNum    = 0    // 接口号
 )
+
+// deviceID 是一组受支持的 USB 标识。
+type deviceID struct {
+	vid, pid uint16
+	name     string
+}
+
+// supportedDevices 列出已知的 ElectronBot 设备标识。连接时依次尝试。
+//   - 初代 ElectronBot：0x1001:0x8023（官方 SDK 标识）。
+//   - 精英版 ElectronBot Elite：0x5241:0x5241（免驱 WinUSB 固件，实测自 USB Tree Viewer）。
+//
+// 两者共用同一套 Sync 低层协议（4 段、512 字节包、EP 0x01/0x81）；精英版若端点不符
+// 需在此基础上再调整。
+var supportedDevices = []deviceID{
+	{0x1001, 0x8023, "ElectronBot"},
+	{0x5241, 0x5241, "ElectronBot Elite"},
+}
+
+// deviceListString 返回受支持设备的可读列表，用于错误信息。
+func deviceListString() string {
+	parts := make([]string, len(supportedDevices))
+	for i, d := range supportedDevices {
+		parts[i] = fmt.Sprintf("%s(%04x:%04x)", d.name, d.vid, d.pid)
+	}
+	return strings.Join(parts, ", ")
+}
 
 // 帧分段参数（与官方 SyncTask 完全一致）。
 const (
@@ -41,7 +67,10 @@ const (
 	segStride       = segImageBytes + tailImageBytes  // 每段图像总长 = 43200
 	imageBytes      = segments * segStride            // 整帧图像 = 172800
 
-	transferTimeoutMs = 100 // 单次 bulk 传输超时（毫秒），与官方一致
+	readTimeoutMs  = 5000 // 读 32 字节就绪/反馈包的超时（对照官方 ReceivePacket 的 5000ms）。
+	                      // 必须足够长：读发生在每段图像之前，中途超时会让该帧只写一半 → 设备花屏。
+	                      // 设备 Sync 已与 UI 解耦于独立 goroutine，长超时不拖累网页镜像帧率。
+	writeTimeoutMs = 2000 // 写 bulk 包的超时（对照官方 TransmitPacket）
 )
 
 // 编译期校验：整帧字节数须与屏幕尺寸及通用常量一致。

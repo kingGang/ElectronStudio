@@ -98,6 +98,7 @@ type CameraConfig struct {
 type MiniMaxConfig struct {
 	BaseURL    string `json:"base_url,omitempty"`
 	APIKey     string `json:"api_key,omitempty"`
+	GroupID    string `json:"group_id,omitempty"`    // files/upload 与 voice_clone 端点用；留空时由 JWT 自动解析
 	VoiceID    string `json:"voice_id,omitempty"`    // T2A 音色，默认 male-qn-qingse
 	TTSModel   string `json:"tts_model,omitempty"`   // 语音模型，默认 speech-02-hd
 	ImageModel string `json:"image_model,omitempty"` // 文生图模型，默认 image-01
@@ -108,9 +109,17 @@ type MiniMaxConfig struct {
 type IOConfig struct {
 	AudioIn   string        `json:"audio_in,omitempty"`   // device | page | off（默认 device：设备麦经 sidecar）
 	AudioOut  string        `json:"audio_out,omitempty"`  // device | page | both | off（默认 device：mpg123 播到设备扬声器）
-	TTSEngine string        `json:"tts_engine,omitempty"` // minimax | sidecar（默认 minimax：云端出 mp3 直接播）
-	ImageOut  string        `json:"image_out,omitempty"`  // device | page | both（默认 both：设备屏+页面镜像）
-	MiniMax   MiniMaxConfig `json:"minimax"`
+	// AudioDevice：设备侧音频输出的目标声卡名（子串）。仅 macOS 生效：填了就改用 playto helper
+	// 把 TTS 定向到该 USB 声卡（如 ElectronBot 语音板的 "USB audio CODEC"），不动系统默认输出；
+	// 留空则用 mpg123 播到系统默认输出。
+	AudioDevice string        `json:"audio_device,omitempty"`
+	TTSEngine   string        `json:"tts_engine,omitempty"` // minimax | sidecar（默认 minimax：云端出 mp3 直接播）
+	ImageOut    string        `json:"image_out,omitempty"`  // device | page | both（默认 both：设备屏+页面镜像）
+	// ServoEnable：舵机总开关。默认 false（不下发使能）——舵机 I²C 没接通/失联时，主控固件
+	// 会因对舵机的 I²C 无限重试而卡死整机；关着此开关即不碰舵机，屏幕/网页/语音照常用。
+	// 确认舵机在电子脑壳里能正常控制（即 I²C 已通）后，再设为 true 启用真机舵机。
+	ServoEnable bool          `json:"servo_enable,omitempty"`
+	MiniMax     MiniMaxConfig `json:"minimax"`
 }
 
 // 各路由的默认值（空配置时）。

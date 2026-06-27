@@ -6,10 +6,13 @@ package main
 //   - 图片：generate_image 工具产图 → image_out 决定 设备屏(ShowImage)/页面(聊天配图)。
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -25,6 +28,49 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/protocol"
 	"github.com/kingGang/ElectronStudio/internal/speech"
 )
+
+// wakeBeepWAV 是唤醒后立刻给用户的"嘀"提示音（WAV/16kHz/16bit 单声道，两声短促上升音）。
+// 唤醒词命中后马上播到设备喇叭，让用户知道"听到了、请说"，而不是静默等待。
+var wakeBeepWAV = genWakeBeep()
+
+func genWakeBeep() []byte {
+	const sr = 16000
+	var pcm bytes.Buffer
+	// 两声短音：880Hz 与 1175Hz，各 90ms，带 8ms 淡入淡出防爆音。
+	for _, tone := range []struct {
+		freq float64
+		ms   int
+	}{{880, 90}, {1175, 90}} {
+		n := sr * tone.ms / 1000
+		fade := sr * 8 / 1000
+		for i := 0; i < n; i++ {
+			env := 1.0
+			if i < fade {
+				env = float64(i) / float64(fade)
+			} else if i > n-fade {
+				env = float64(n-i) / float64(fade)
+			}
+			s := math.Sin(2*math.Pi*tone.freq*float64(i)/sr) * 0.45 * env
+			_ = binary.Write(&pcm, binary.LittleEndian, int16(s*32767))
+		}
+	}
+	data := pcm.Bytes()
+	var w bytes.Buffer
+	w.WriteString("RIFF")
+	binary.Write(&w, binary.LittleEndian, uint32(36+len(data)))
+	w.WriteString("WAVEfmt ")
+	binary.Write(&w, binary.LittleEndian, uint32(16))   // fmt 块大小
+	binary.Write(&w, binary.LittleEndian, uint16(1))    // PCM
+	binary.Write(&w, binary.LittleEndian, uint16(1))    // 单声道
+	binary.Write(&w, binary.LittleEndian, uint32(sr))   // 采样率
+	binary.Write(&w, binary.LittleEndian, uint32(sr*2)) // 字节率
+	binary.Write(&w, binary.LittleEndian, uint16(2))    // 块对齐
+	binary.Write(&w, binary.LittleEndian, uint16(16))   // 位深
+	w.WriteString("data")
+	binary.Write(&w, binary.LittleEndian, uint32(len(data)))
+	w.Write(data)
+	return w.Bytes()
+}
 
 // thinkRe 匹配推理模型（如 MiniMax-M3）输出在正文里的 <think>…</think> 思考块。
 var thinkRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
@@ -213,6 +259,16 @@ func (a *app) speak(parent context.Context, text string) {
 // routeAudio 把一段 mp3 按 audio_out 路由到设备(mpg123)与/或页面(base64 推浏览器)。
 // ctx 为本段语音的可取消上下文：interrupt 取消它会杀掉设备播放（barge-in）。
 func (a *app) routeAudio(ctx context.Context, out string, mp3 []byte, text string) {
+	// 配了 audio_device(macOS playto)：TTS 始终定向设备喇叭，与 audio_out 解耦——这样
+	// audio_out 可保持 page(音乐照常浏览器播)，而机器人用自己的喇叭说话，不走浏览器(免回声)。
+	if a.ttsToDevice {
+		go func() {
+			if err := a.player.Play(ctx, mp3); err != nil && ctx.Err() == nil {
+				a.log.Warn("设备播放音频失败", "err", err)
+			}
+		}()
+		return
+	}
 	if out == "device" || out == "both" {
 		go func() {
 			if err := a.player.Play(ctx, mp3); err != nil && ctx.Err() == nil {

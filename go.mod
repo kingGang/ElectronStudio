@@ -4,4 +4,4 @@ go 1.23.4
 
 require github.com/coder/websocket v1.8.14
 
-require github.com/ebitengine/purego v0.10.1 // indirect
+require github.com/ebitengine/purego v0.10.1

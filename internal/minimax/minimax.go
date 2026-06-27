@@ -13,12 +13,14 @@ package minimax
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -36,16 +38,66 @@ const (
 type Client struct {
 	baseURL string
 	apiKey  string
+	groupID string // 从 API Key(JWT) 解出的 GroupID；files/upload 与 voice_clone 端点要求
 	http    *http.Client
 }
 
 // New 创建客户端。baseURL 形如 https://api.minimaxi.com/v1（末尾斜杠会被去掉）。
+// GroupID 由 API Key(JWT) 自动解析。
 func New(baseURL, apiKey string) *Client {
+	return NewWithGroup(baseURL, apiKey, "")
+}
+
+// NewWithGroup 同 New，但允许显式指定 GroupID（非 JWT 的 key 无法自动解析时用）。
+// groupID 为空时退化为从 apiKey(JWT) 解析。
+func NewWithGroup(baseURL, apiKey, groupID string) *Client {
+	if groupID == "" {
+		groupID = groupIDFromJWT(apiKey)
+	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
+		groupID: groupID,
 		http:    &http.Client{Timeout: defaultTimeout},
 	}
+}
+
+// GroupID 返回当前生效的 GroupID（显式配置或从 JWT 解析；可能为空）。
+func (c *Client) GroupID() string { return c.groupID }
+
+// groupIDFromJWT 从 MiniMax API Key(JWT) 的 payload 中解出 GroupID。
+// /files/upload 与 /voice_clone 端点要求 URL 带 ?GroupId=，而 key 本身已含该值，
+// 故无需用户额外填配置。解析失败返回空串（调用方退化为不带 GroupId）。
+func groupIDFromJWT(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		if payload, err = base64.URLEncoding.DecodeString(parts[1]); err != nil {
+			return ""
+		}
+	}
+	var claims struct {
+		GroupID string `json:"GroupID"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return ""
+	}
+	return claims.GroupID
+}
+
+// withGroup 在路径后追加 ?GroupId=（已知时）。GroupID 为空时原样返回。
+func (c *Client) withGroup(path string) string {
+	if c.groupID == "" {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "GroupId=" + url.QueryEscape(c.groupID)
 }
 
 // baseResp 是 MiniMax 所有响应都带的业务状态。status_code==0 才算成功。
@@ -157,7 +209,7 @@ func (c *Client) UploadFile(ctx context.Context, audio []byte, filename, purpose
 		return 0, err
 	}
 	_ = w.Close()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/files/upload", &buf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+c.withGroup("/files/upload"), &buf)
 	if err != nil {
 		return 0, err
 	}
@@ -186,7 +238,7 @@ func (c *Client) UploadFile(ctx context.Context, audio []byte, filename, purpose
 
 // CloneVoice 用已上传的 file_id 克隆出一个音色 voiceID（需满足：字母开头、含字母与数字、≥8 位）。
 func (c *Client) CloneVoice(ctx context.Context, fileID int64, voiceID string) error {
-	data, err := c.post(ctx, "/voice_clone", map[string]any{"file_id": fileID, "voice_id": voiceID})
+	data, err := c.post(ctx, c.withGroup("/voice_clone"), map[string]any{"file_id": fileID, "voice_id": voiceID})
 	if err != nil {
 		return err
 	}
@@ -197,6 +249,11 @@ func (c *Client) CloneVoice(ctx context.Context, fileID int64, voiceID string) e
 		return fmt.Errorf("minimax: 解析克隆响应失败: %w", err)
 	}
 	if r.BaseResp.StatusCode != 0 {
+		if r.BaseResp.StatusCode == 2038 {
+			return fmt.Errorf("minimax: 克隆失败 (2038 voice clone user forbidden)：该账号尚未开通音色克隆权限。"+
+				"请到 MiniMax 控制台(platform.minimaxi.com)完成『实名认证』并『绑定银行卡』后重试"+
+				"（克隆接口免费，但首次用克隆音色合成会扣 9.9 元解锁费）。原始信息: %s", r.BaseResp.StatusMsg)
+		}
 		return fmt.Errorf("minimax: 克隆失败 (%d): %s", r.BaseResp.StatusCode, r.BaseResp.StatusMsg)
 	}
 	return nil

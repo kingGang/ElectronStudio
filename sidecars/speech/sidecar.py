@@ -26,6 +26,7 @@ import json
 import queue
 import sys
 import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -74,10 +75,35 @@ class Config:
         d = self.raw.get("audio", {}).get("output_device", "")
         return d if d not in ("", None) else None
 
+    @property
+    def mic_gain(self) -> float:
+        """麦克风软件增益：采集音量过低时放大（带限幅防爆音）。默认 1.0=不放大。"""
+        return float(self.raw.get("audio", {}).get("mic_gain", 1.0))
+
+    @property
+    def noise_gate(self) -> float:
+        """噪声门：放大后块 RMS 低于此值则整块清零当静音。用于滤掉某些 USB 麦的恒定噪声底/
+        低频嗡声（会被 Silero VAD 误判为持续说话、导致永不分段）。0=关闭。"""
+        return float(self.raw.get("audio", {}).get("noise_gate", 0.0))
+
 
 def load_config(path: str) -> Config:
     with open(path, "r", encoding="utf-8") as f:
         return Config(json.load(f))
+
+
+def build_keywords_file(keywords, tokens_path, tokens_type, out_path):
+    """把配置里的纯文本唤醒词（如 ["小电小电"]）转成 KWS 需要的 token 串并写入文件。
+    中文走拼音 token（tokens_type=ppinyin），每行格式：<token 空格分隔> @<原文>。
+    返回写入的文件路径；keywords 为空时返回 None。"""
+    keywords = [k for k in (keywords or []) if k.strip()]
+    if not keywords:
+        return None
+    rows = sherpa_onnx.text2token(keywords, tokens=tokens_path, tokens_type=tokens_type)
+    lines = [" ".join(toks) + " @" + kw for kw, toks in zip(keywords, rows)]
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return out_path
 
 
 # ---------------------------------------------------------------------------
@@ -129,15 +155,31 @@ class Engines:
 
         # --- 可选：唤醒词 KWS ---
         self.spotter = None
+        self.wake_enabled = False
+        self.wake_window = 8.0        # 唤醒后保持收听的窗口（秒）
+        self.wake_keywords = []       # 用于从识别文本里剔除唤醒词本身
         w = cfg.raw.get("wake", {})
         if w.get("enabled"):
-            self.spotter = sherpa_onnx.KeywordSpotter(
-                tokens=w["tokens"],
-                encoder=w["encoder"],
-                decoder=w["decoder"],
-                joiner=w["joiner"],
-                keywords_file=w["keywords_file"],
+            self.wake_keywords = [k for k in (w.get("keywords") or []) if k.strip()]
+            # 配置里写了纯文本唤醒词 → 自动转 token 生成 keywords_file；否则用现成文件。
+            kw_file = build_keywords_file(
+                self.wake_keywords,
+                tokens_path=w["tokens"],
+                tokens_type=w.get("tokens_type", "ppinyin"),
+                out_path=w["keywords_file"],
+            ) or w["keywords_file"]
+            kwargs = dict(
+                tokens=w["tokens"], encoder=w["encoder"], decoder=w["decoder"],
+                joiner=w["joiner"], keywords_file=kw_file,
             )
+            if w.get("keywords_score") is not None:
+                kwargs["keywords_score"] = float(w["keywords_score"])
+            if w.get("keywords_threshold") is not None:
+                kwargs["keywords_threshold"] = float(w["keywords_threshold"])
+            self.spotter = sherpa_onnx.KeywordSpotter(**kwargs)
+            self.wake_enabled = True
+            self.wake_window = float(w.get("window_seconds", 8))
+            print(f"唤醒词已启用: {self.wake_keywords} 收听窗口 {self.wake_window}s", file=sys.stderr)
 
     def transcribe(self, samples: np.ndarray, sr: int) -> str:
         """对一段 PCM（float32, [-1,1]）做离线识别。"""
@@ -166,10 +208,13 @@ class Session:
         self.sr = cfg.sample_rate
 
         self._audio_q: "queue.Queue[np.ndarray]" = queue.Queue()
+        self._mic_gain = cfg.mic_gain
+        self._noise_gate = cfg.noise_gate
         self._stream = None
         self._running = True
         self._last_speaking = False
         self._kws_stream = self.eng.spotter.create_stream() if self.eng.spotter else None
+        self._awake_until = 0.0  # 门控模式：>now 时处于收听窗口内才转写
 
         # 播放队列 + 单线程串行播放：保证「逐句流式」音频按到达顺序、不重叠地播。
         self._play_q: "queue.Queue" = queue.Queue()
@@ -181,7 +226,13 @@ class Session:
         # 在 sounddevice 的音频线程中执行：只做最轻量的入队。
         if status:
             print("音频状态:", status, file=sys.stderr)
-        self._audio_q.put(indata[:, 0].copy())
+        block = indata[:, 0].copy()
+        block -= np.mean(block)  # 去直流偏置（某些 USB 麦有恒定 DC，会被 VAD 误判为说话）
+        if self._mic_gain != 1.0:
+            np.clip(block * self._mic_gain, -1.0, 1.0, out=block)  # 放大并限幅，防爆音
+        # 注意：噪声门【不】在这里做——它会把唤醒词音节间隙清零、切碎词，KWS 就认不出了。
+        # 噪声门只在 VAD 那条路单独做（见 process_loop），KWS 拿到的是连续音频。
+        self._audio_q.put(block)
 
     def start_mic(self):
         self._stream = sd.InputStream(
@@ -225,25 +276,46 @@ class Session:
                 kw = self.eng.spotter.get_result(self._kws_stream)
                 if kw:
                     self.eng.spotter.reset_stream(self._kws_stream)
+                    self._awake_until = time.monotonic() + self.eng.wake_window
+                    print(f"[wake] 命中唤醒词: {kw}", file=sys.stderr)
                     await self._emit({"type": "wake", "keyword": kw})
 
             # 2) VAD：喂入并上报说话状态 + 电平（驱动前端波形）。
-            self.eng.vad.accept_waveform(block)
+            #    噪声门只作用于 VAD：低于门限的块当静音，滤掉恒定噪声底，VAD 才能正确收尾分段；
+            #    KWS 不受影响（上面用的是未过门的 block），唤醒词不被切碎。
+            vad_block = block
+            if self._noise_gate > 0.0 and np.sqrt(np.mean(block ** 2)) < self._noise_gate:
+                vad_block = np.zeros_like(block)
+            self.eng.vad.accept_waveform(vad_block)
             speaking = self.eng.vad.is_speech_detected()
             level = float(np.sqrt(np.mean(block ** 2)))  # RMS 作为电平近似
             if speaking != self._last_speaking:
                 self._last_speaking = speaking
             await self._emit({"type": "vad", "speaking": bool(speaking), "level": min(level * 4, 1.0)})
 
-            # 3) 完整语音段就绪 → 离线识别 → 上报最终结果。
+            # 3) 完整语音段就绪 → （门控）离线识别 → 上报最终结果。
+            #    门控模式(wake.enabled)：只有在唤醒窗口内才转写，否则丢弃语音段、不搭理。
             while not self.eng.vad.empty():
                 segment = self.eng.vad.front
+                samples = np.array(segment.samples, dtype=np.float32)  # 必须在 pop() 之前读，front 是内部引用，pop 后失效→空段
                 self.eng.vad.pop()
-                samples = np.array(segment.samples, dtype=np.float32)
+                if self.eng.wake_enabled and time.monotonic() >= self._awake_until:
+                    continue  # 未唤醒：丢弃语音段，不浪费算力转写
                 # 识别较重，放执行器，避免阻塞事件循环。
                 text = await self.loop.run_in_executor(None, self.eng.transcribe, samples, self.sr)
-                if text:
-                    await self._emit({"type": "asr", "text": text, "final": True})
+                _rms = float(np.sqrt(np.mean(samples ** 2))) if samples.size else 0.0
+                print(f"[asr-debug] 段长={samples.size/self.sr:.2f}s RMS={_rms:.4f} 转写='{text}'", file=sys.stderr)
+                if not text:
+                    continue
+                if self.eng.wake_enabled:
+                    # 剔除识别文本里的唤醒词本身（如「小电小电现在几点」→「现在几点」）；
+                    # 整句就是唤醒词时剔空 → 跳过，不触发对话。
+                    for kw in self.eng.wake_keywords:
+                        text = text.replace(kw, "")
+                    text = text.strip(" ，。,.!！?？、")
+                    if not text:
+                        continue
+                await self._emit({"type": "asr", "text": text, "final": True})
 
     # ---- 处理来自主程序的下行命令（speak / abort）----
     async def handle_incoming(self):
