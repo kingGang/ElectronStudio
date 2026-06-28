@@ -182,9 +182,75 @@ func (a *app) cancelSpeak() {
 }
 
 // speak 把文本转语音并按配置路由播放（替代直接 a.speech.Speak）。
+// 朗读文本清洗：剥掉 markdown/列表/表情/网址等，避免 TTS 把"星号井号"读出来、听着乱。
+var (
+	reSpeechCode    = regexp.MustCompile("(?s)```.*?```|`([^`]*)`")
+	reSpeechLink    = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
+	reSpeechHdr     = regexp.MustCompile(`(?m)^[ \t]{0,3}#{1,6}[ \t]*`)
+	reSpeechList    = regexp.MustCompile(`(?m)^[ \t]*(?:[-*+]|\d+[.)])[ \t]+`)
+	reSpeechEmoji   = regexp.MustCompile(`[\x{1F000}-\x{1FAFF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{FE00}-\x{FE0F}\x{2190}-\x{21FF}]`)
+	reSpeechNewline = regexp.MustCompile(`[ \t]*\n+[ \t]*`)
+)
+
+func cleanForSpeech(s string) string {
+	s = reSpeechCode.ReplaceAllString(s, "$1") // 代码块去掉、行内代码留内容
+	s = reSpeechLink.ReplaceAllString(s, "$1") // 链接只留文字
+	s = reSpeechHdr.ReplaceAllString(s, "")
+	s = reSpeechList.ReplaceAllString(s, "")
+	s = reSpeechEmoji.ReplaceAllString(s, "")
+	s = strings.NewReplacer("**", "", "__", "", "*", "", "~~", "", "> ", "").Replace(s)
+	s = reSpeechNewline.ReplaceAllString(s, "，") // 换行并成逗号，朗读更连贯
+	return strings.TrimSpace(s)
+}
+
+// 唤醒后的人声应答语（轮换使用，像语音助手那样）。
+var wakeReplies = []string{"我在", "在呢", "你说", "嗯，请讲", "有什么可以帮你的"}
+
+// speakWake 在命中唤醒词后用【人声】应答（替代提示音），带缓存→第二次起秒回；
+// 无 MiniMax TTS 时退回"嘀嘀"提示音，保证总有反馈。
+func (a *app) speakWake(ctx context.Context) {
+	io := a.ioSnapshot()
+	if io.AudioOut == "off" {
+		return
+	}
+	if a.mm == nil || io.TTSEngine != "minimax" { // 没有云端 TTS：退回提示音
+		if a.player != nil {
+			go a.player.Play(ctx, wakeBeepWAV)
+		}
+		return
+	}
+	phrase := wakeReplies[int(a.wakeIdx.Add(1))%len(wakeReplies)]
+	a.wakeMu.Lock()
+	mp3 := a.wakeCache[phrase]
+	a.wakeMu.Unlock()
+	if mp3 == nil { // 首次：合成并缓存
+		voiceID := io.MM.VoiceID
+		if io.Voice != "" {
+			voiceID = io.Voice
+		}
+		m, err := a.mm.Synthesize(ctx, phrase, minimax.SpeakOptions{Model: io.MM.TTSModel, VoiceID: voiceID})
+		if err != nil {
+			a.log.Warn("唤醒应答合成失败，退回提示音", "err", err)
+			if a.player != nil {
+				go a.player.Play(ctx, wakeBeepWAV)
+			}
+			return
+		}
+		mp3 = m
+		a.wakeMu.Lock()
+		if a.wakeCache == nil {
+			a.wakeCache = map[string][]byte{}
+		}
+		a.wakeCache[phrase] = mp3
+		a.wakeMu.Unlock()
+	}
+	a.routeAudio(ctx, io.AudioOut, mp3, phrase)
+}
+
 // tts_engine=minimax 时 host 合成 mp3 → routeAudio；否则回退 sidecar（在设备侧合成播放）。
 // 全程可被 interrupt 取消（barge-in）：合成中取消则不播放，播放中取消则杀 mpg123。
 func (a *app) speak(parent context.Context, text string) {
+	text = cleanForSpeech(text) // 朗读前清掉 markdown/列表/表情，避免读出"星号井号"等噪声
 	if text == "" {
 		return
 	}
@@ -281,6 +347,119 @@ func (a *app) routeAudio(ctx context.Context, out string, mp3 []byte, text strin
 			Format: "mp3", Data: base64.StdEncoding.EncodeToString(mp3), Text: text,
 		})
 	}
+}
+
+// ---- 流式 TTS：边生成边逐句合成播放，话音紧跟（像天猫精灵/车机助手）----
+
+// playClipBlocking 阻塞播放一段 mp3（保证逐句顺序、不重叠）。设备路径阻塞等播完，页面路径广播。
+func (a *app) playClipBlocking(ctx context.Context, mp3 []byte) {
+	devicePlay := a.ttsToDevice
+	out := a.ioSnapshot().AudioOut
+	if !devicePlay {
+		devicePlay = out == "device" || out == "both"
+	}
+	if devicePlay && a.player != nil {
+		if err := a.player.Play(ctx, mp3); err != nil && ctx.Err() == nil {
+			a.log.Warn("流式语音播放失败", "err", err)
+		}
+	}
+	if !a.ttsToDevice && (out == "page" || out == "both") {
+		a.srv.Broadcast(protocol.AudioEvent{Format: "mp3", Data: base64.StdEncoding.EncodeToString(mp3)})
+	}
+}
+
+// ttsSink 是一条流式 TTS 流水线：句子 → 合成(goroutine) → mp3 → 顺序播放(goroutine)。
+// 合成与播放解耦，下一句在当前句播放时就已合成好，几乎无停顿。
+type ttsSink struct {
+	sentences chan string
+	done      chan struct{}
+}
+
+// newTTSSink 启动流水线（仅 minimax host 合成时用）。ctx 取消即停（barge-in）。
+func (a *app) newTTSSink(ctx context.Context) *ttsSink {
+	io := a.ioSnapshot()
+	voiceID := io.MM.VoiceID
+	if io.Voice != "" {
+		voiceID = io.Voice
+	}
+	s := &ttsSink{sentences: make(chan string, 16), done: make(chan struct{})}
+	clips := make(chan []byte, 4)
+	go func() { // 合成级：逐句合成 mp3 灌进 clips
+		defer close(clips)
+		for sentence := range s.sentences {
+			if ctx.Err() != nil {
+				continue // 已取消：把队列排空，不再合成
+			}
+			mp3, err := a.mm.Synthesize(ctx, sentence, minimax.SpeakOptions{Model: io.MM.TTSModel, VoiceID: voiceID})
+			if err != nil {
+				if ctx.Err() == nil {
+					a.log.Warn("流式 TTS 合成失败", "err", err, "sentence", sentence)
+				}
+				continue
+			}
+			select {
+			case clips <- mp3:
+			case <-ctx.Done():
+			}
+		}
+	}()
+	go func() { // 播放级：顺序阻塞播每段，话音连贯不重叠
+		defer close(s.done)
+		for mp3 := range clips {
+			a.playClipBlocking(ctx, mp3)
+		}
+	}()
+	return s
+}
+
+func (s *ttsSink) push(sentence string) {
+	if sentence != "" {
+		s.sentences <- sentence
+	}
+}
+
+// close 关闭输入并等所有句子合成播放完毕。
+func (s *ttsSink) close() {
+	close(s.sentences)
+	<-s.done
+}
+
+// sentenceBoundary 判断是否句末终止符（用于流式逐句切分）。
+func sentenceBoundary(r rune) bool {
+	switch r {
+	case '。', '！', '？', '!', '?', '；', ';', '\n', '…':
+		return true
+	}
+	return false
+}
+
+// takeSentences 从 content（rune 视角）的 from 处起，抽出所有【已完整】的句子（清洗后），
+// 返回句子切片和新的 from（指向最后一个完整句之后）。未遇终止符的尾巴留待下次/收尾。
+func takeSentences(content string, from int) ([]string, int) {
+	runes := []rune(content)
+	if from > len(runes) {
+		from = len(runes)
+	}
+	var out []string
+	start := from
+	for i := from; i < len(runes); i++ {
+		if sentenceBoundary(runes[i]) {
+			if seg := cleanForSpeech(string(runes[start : i+1])); seg != "" {
+				out = append(out, seg)
+			}
+			start = i + 1
+		}
+	}
+	return out, start
+}
+
+// insideThink 判断当前是否处于未闭合的 <think> 推理块内（此时不可朗读，避免把思考过程读出来）。
+func insideThink(s string) bool {
+	o := strings.LastIndex(s, "<think>")
+	if o < 0 {
+		return false
+	}
+	return !strings.Contains(s[o:], "</think>")
 }
 
 // streamXiaozhiAudio 是小智流式音频的回调：每收到一句的 Ogg/Opus 就即时播放（边收边播）。

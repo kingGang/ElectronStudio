@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,7 +72,8 @@ const toolRules = `
    - "换一首/下一首/切歌/换个"且没指定具体歌名 → music_control，action=next（切到当前列表下一首，不要重新搜索）
    - "上一首"→ music_control prev；"暂停"→ pause；"继续"→ resume；"停/别放了"→ stop
    - "生成/创作一段音乐"→ generate_music
-4. 工具执行后再用一句话简短告知结果。`
+4. 工具执行后再用一句话简短告知结果。
+5. 你是【语音助手】，回答会被朗读出来，所以必须口语化、简短：一两句话讲清重点，像人当面说话那样直接。禁止 markdown、标题、列表符号、表情符号、代码块、网址；不要"首先/其次"罗列，不要"好的，我来帮你"之类客套铺垫，直接说答案。`
 
 // buildSystemPrompt 组合"人设 + 工具铁律"为完整系统提示。
 func buildSystemPrompt(persona string) string {
@@ -165,12 +167,21 @@ type app struct {
 	player      *audioout.Player     // 设备侧 mp3 播放(mpg123 或 macOS playto)
 	ttsToDevice bool                 // 配了 audio_device：TTS 始终定向设备喇叭(与 audio_out 解耦)
 	robotStuck  atomic.Bool          // 设备疑似固件卡死(持续无就绪包，需断电复位)，广播给 UI 提示
+	cameraOn    atomic.Bool          // 摄像头当前是否开启(屏幕显示摄像头画面)，上报 status 供前端同步开关
+	wakeCache   map[string][]byte    // 唤醒人声应答缓存(短语→mp3)，第二次起秒回
+	wakeMu      sync.Mutex
+	wakeIdx     atomic.Uint32 // 轮换唤醒应答语
 	genimg      *genImgStore         // 生成图暂存(供页面 HTTP 取回)
 	genaudio    *genImgStore         // 生成音频(音乐)暂存(供页面 HTTP 取回)
 	weather     *weather.Client
 
-	speakMu       sync.Mutex         // 保护 speakCancel
+	speakMu       sync.Mutex         // 保护 speakCancel / turnCancel
 	speakCancel   context.CancelFunc // 取消进行中的一段语音(MiniMax 合成/设备播放)，用于打断 barge-in
+	turnCancel    context.CancelFunc // 取消进行中的对话(LLM 流)；新一轮 handleChat 先打断上一轮，杜绝多轮并发交错、回复乱序
+
+	asrMu      sync.Mutex  // 保护 asrPending / asrTimer
+	asrPending string      // 累积"一次说话被 VAD 切成的多段 ASR"
+	asrTimer   *time.Timer // 防抖：最后一段后静默一会儿才发起【一次】对话，避免话没说完就调 LLM、触发限速
 	audioStreamed atomic.Bool        // 本轮是否已用小智流式音频播放（true 则收尾的 speak 不再重复合成）
 	sched       *scheduler.Scheduler
 	schedPath   string
@@ -442,6 +453,7 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	} else {
 		a.player = audioout.New(cfg.Music.Mpg123, log)
 	}
+	a.applyDeviceVolume(cfg.IO.AudioDevice, cfg.IO.DeviceVolumeOr()) // 启动即按配置设好设备音量
 	a.genimg = newGenImgStore()
 	a.genaudio = newGenImgStore()
 
@@ -559,12 +571,14 @@ func connectRobot(cfg *config.Config, log *slog.Logger) robot.Transport {
 // findPlaytoHelper 定位 macOS 的 playto 音频 helper（把声音定向到指定 USB 声卡）。
 // 依次找：可执行文件同级的 sidecars/audio/playto、当前目录下的同路径、最后 PATH 里的 playto。
 // 找不到返回空串。
-func findPlaytoHelper() string { return findAudioHelper("playto") }
+func findPlaytoHelper() string                  { return findAudioHelper("playto") }
+func findAudioHelper(name string) string         { return findHelper("audio", name) }
+func findCamcapHelper() string                   { return findHelper("video", "camcap") }
 
-// findAudioHelper 在 exe 同级 / 工作目录的 sidecars/audio/ 下、再 PATH 里查找音频小工具
-// （playto=TTS 单段播放、musicto=音乐常驻播放）。找不到返回空串，调用方回退。
-func findAudioHelper(name string) string {
-	rel := filepath.Join("sidecars", "audio", name)
+// findHelper 在 exe 同级 / 工作目录的 sidecars/<subdir>/ 下、再 PATH 里查找原生小工具
+// （audio: playto/musicto；video: camcap）。找不到返回空串，调用方回退。
+func findHelper(subdir, name string) string {
+	rel := filepath.Join("sidecars", subdir, name)
 	var cands []string
 	if exe, err := os.Executable(); err == nil {
 		cands = append(cands, filepath.Join(filepath.Dir(exe), rel))
@@ -582,6 +596,27 @@ func findAudioHelper(name string) string {
 		return p
 	}
 	return ""
+}
+
+// applyDeviceVolume 设置设备扬声器音量(0~100)。macOS + 配了 audio_device 时，经 playto
+// 以空音频方式只设 USB 声卡输出音量后退出；其它平台/未配设备则无操作。
+func (a *app) applyDeviceVolume(device string, vol int) {
+	if runtime.GOOS != "darwin" || device == "" {
+		return
+	}
+	playto := findAudioHelper("playto")
+	if playto == "" {
+		return
+	}
+	if vol < 0 {
+		vol = 0
+	} else if vol > 100 {
+		vol = 100
+	}
+	cmd := exec.Command(playto, device, strconv.Itoa(vol)) // Stdin=nil → 读到空 → 只设音量后退出
+	if err := cmd.Run(); err != nil {
+		a.log.Warn("设置设备音量失败", "err", err, "vol", vol)
+	}
 }
 
 // buildTools 构造工具注册表，副作用以闭包注入（情绪/动作走机器人，台灯为内置设备）。
@@ -681,6 +716,8 @@ func (a *app) captureJPEG(ctx context.Context) ([]byte, error) {
 		cfg := a.cfg.Camera
 		if err := a.camera.Start(ctx, display.CameraConfig{
 			FFmpeg: cfg.FFmpeg, InputFormat: cfg.InputFormat, Input: cfg.Input,
+			VideoSize: cfg.VideoSize, Framerate: cfg.Framerate,
+			Backend: cfg.Backend, Camcap: findCamcapHelper(),
 		}); err != nil {
 			return nil, err
 		}
@@ -777,9 +814,7 @@ func (a *app) handleSpeechEvent(ctx context.Context, ev speech.Event) {
 	case speech.KindWake:
 		a.srv.Broadcast(protocol.WakeEvent{Keyword: ev.Keyword})
 		a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceListening})
-		if a.player != nil { // 唤醒后立刻"嘀"一声反馈（到设备喇叭），不让用户干等
-			go a.player.Play(ctx, wakeBeepWAV)
-		}
+		go a.speakWake(context.Background()) // 唤醒后人声应答("我在"等，带缓存秒回；无TTS退回提示音)
 
 	case speech.KindVAD:
 		a.srv.Broadcast(protocol.VADEvent{Speaking: ev.Speaking, Level: ev.Level})
@@ -787,9 +822,9 @@ func (a *app) handleSpeechEvent(ctx context.Context, ev speech.Event) {
 	case speech.KindASR:
 		// 把识别文本作为前端的中间/最终 ASR 展示。
 		a.srv.Broadcast(protocol.ASREvent{Text: ev.Text, Final: ev.Final})
-		// 最终结果触发一次对话（与文本输入同一路径）。
+		// 最终结果触发对话：经防抖合并"一次说话被切成的多段"，避免话没说完就多次调 LLM。
 		if ev.Final && ev.Text != "" {
-			go a.handleChat(ctx, ev.Text)
+			a.debounceChat(ctx, ev.Text)
 		}
 	}
 }
@@ -928,6 +963,11 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 			a.handleSetDevice(cmd)
 		}
 
+	case protocol.TypeSetVolume:
+		if cmd, err := protocol.As[protocol.SetVolumeCommand](in.Env); err == nil {
+			a.handleSetVolume(cmd)
+		}
+
 	default:
 		a.log.Debug("未处理的命令类型", "type", in.Env.Type)
 	}
@@ -935,19 +975,58 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 
 // handleChat 是对话入口：当生效模型支持工具调用且已注册工具时走工具循环，
 // 否则走流式对话。
+// debounceChat 合并"一次说话被 VAD 切成的多段 ASR"：累积文本，在最后一段后静默 ~600ms 才
+// 发起【一次】对话。避免话没说完(VAD 中途断句)就提前、多次调用 LLM，从而频繁触发接口限速。
+func (a *app) debounceChat(ctx context.Context, text string) {
+	const wait = 600 * time.Millisecond
+	a.asrMu.Lock()
+	defer a.asrMu.Unlock()
+	if a.asrPending == "" {
+		a.asrPending = text
+	} else {
+		a.asrPending += text // 续上前一段（同一句被切开）
+	}
+	if a.asrTimer != nil {
+		a.asrTimer.Stop()
+	}
+	a.asrTimer = time.AfterFunc(wait, func() {
+		a.asrMu.Lock()
+		t := a.asrPending
+		a.asrPending = ""
+		a.asrMu.Unlock()
+		if t != "" {
+			a.handleChat(ctx, t)
+		}
+	})
+}
+
 func (a *app) handleChat(ctx context.Context, text string) {
 	if text == "" {
 		return
 	}
+	// 新一轮对话：先打断上一轮（LLM 流 + 正在合成/播放的 TTS），保证一次只处理一轮，
+	// 杜绝你连说几句时多轮并发、回复碎片交错乱序（"对话没有时序"的根因）。
+	a.speakMu.Lock()
+	if a.turnCancel != nil {
+		a.turnCancel()
+	}
+	if a.speakCancel != nil {
+		a.speakCancel()
+		a.speakCancel = nil
+	}
+	tctx, cancel := context.WithCancel(ctx)
+	a.turnCancel = cancel
+	a.speakMu.Unlock()
+
 	// 确定性快捷路径：音乐控制口令（换一首/暂停/继续/停…）直接执行，不经过大模型，
 	// 保证 100% 生效（大模型对这类指令偶尔会只口头回应而不调工具）。
-	if a.tryMusicShortcut(ctx, text) {
+	if a.tryMusicShortcut(tctx, text) {
 		return
 	}
 	if a.tools.Count() > 0 && a.llm.ActiveSupportsTools() {
-		a.handleChatWithTools(ctx, text)
+		a.handleChatWithTools(tctx, text)
 	} else {
-		a.handleChatStreaming(ctx, text)
+		a.handleChatStreaming(tctx, text)
 	}
 }
 
@@ -1172,6 +1251,19 @@ func (a *app) handleChatStreaming(ctx context.Context, text string) {
 	a.srv.Broadcast(protocol.TTSEvent{State: protocol.TTSStart})
 	a.screen.SetSpeaking(true) // 驱动口型动画
 
+	// 流式 TTS：minimax host 合成且有输出时，边生成边【逐句】合成播放——话音紧跟，不必等整段
+	// 生成完再开口（治"响应慢"）。其它引擎仍走收尾整段朗读。
+	io := a.ioSnapshot()
+	var sink *ttsSink
+	if io.TTSEngine == "minimax" && a.mm != nil && io.AudioOut != "off" {
+		sctx, cancel := context.WithCancel(context.Background())
+		a.setSpeakCancel(cancel) // 纳入 barge-in：打断即停
+		sink = a.newTTSSink(sctx)
+	}
+	spoken := 0          // 已送去朗读的 rune 数
+	var ttsBuf string    // 攒句缓冲：第一句立刻播，后续攒够再合成，减少 TTS 调用次数防限速
+	firstSpoken := false // 是否已播出第一句
+
 	for chunk := range ch {
 		if chunk.Err != nil {
 			a.srv.Broadcast(protocol.ErrorEvent{Code: "llm_stream", Message: chunk.Err.Error()})
@@ -1181,15 +1273,31 @@ func (a *app) handleChatStreaming(ctx context.Context, text string) {
 			break
 		}
 		content += chunk.Delta
+		clean := stripThink(content) // 剥掉 <think>，避免推理过程逐字泄漏到页面
 		a.srv.Broadcast(protocol.ChatEvent{
 			ID:      id,
 			Role:    protocol.RoleAssistant,
-			Content: stripThink(content), // 流式期间也剥掉 <think>，避免推理过程逐字泄漏到页面
+			Content: clean,
 			Status:  protocol.ChatStreaming,
 		})
+		if sink != nil && !insideThink(content) { // 抽出新出现的完整句
+			var sents []string
+			sents, spoken = takeSentences(clean, spoken)
+			for _, s := range sents {
+				if !firstSpoken { // 第一句立刻合成播放（话音紧跟）
+					sink.push(s)
+					firstSpoken = true
+				} else { // 后续攒够 ~24 字再合成一次（减少调用、防限速）
+					ttsBuf += s
+					if len([]rune(ttsBuf)) >= 24 {
+						sink.push(ttsBuf)
+						ttsBuf = ""
+					}
+				}
+			}
+		}
 	}
 
-	// 收尾：剥掉 <think> 推理块 → 最终消息 + 入历史 + 朗读 + 回到待命。
 	content = stripThink(content)
 	a.srv.Broadcast(protocol.ChatEvent{
 		ID:      id,
@@ -1197,7 +1305,19 @@ func (a *app) handleChatStreaming(ctx context.Context, text string) {
 		Content: content,
 		Status:  protocol.ChatFinal,
 	})
-	a.finishAssistant(ctx, content)
+	if sink != nil {
+		rest := ttsBuf // 残留攒句 + 无终止符的尾巴，一起补播
+		if runes := []rune(content); spoken < len(runes) {
+			rest += cleanForSpeech(string(runes[spoken:]))
+		}
+		if rest = strings.TrimSpace(rest); rest != "" {
+			sink.push(rest)
+		}
+		sink.close()                       // 等所有句子合成播放完
+		a.finishReply(ctx, content, false) // 入历史 + 收尾状态，不再整段朗读（已逐句播过）
+	} else {
+		a.finishAssistant(ctx, content)
+	}
 }
 
 // handleJog 手动微调单个舵机：更新目标姿态并交给驱动下发（角度反馈由驱动统一广播）。
@@ -1441,16 +1561,21 @@ func (a *app) handleCamera(ctx context.Context, enable bool) {
 		cfg := a.cfg.Camera
 		if err := a.camera.Start(ctx, display.CameraConfig{
 			FFmpeg: cfg.FFmpeg, InputFormat: cfg.InputFormat, Input: cfg.Input,
+			VideoSize: cfg.VideoSize, Framerate: cfg.Framerate,
+			Backend: cfg.Backend, Camcap: findCamcapHelper(),
 		}); err != nil {
 			a.log.Warn("启动摄像头失败", "err", err)
 			a.srv.Broadcast(protocol.ErrorEvent{Code: "camera_error", Message: err.Error()})
 			return
 		}
 		a.screen.SetCamera(true)
+		a.cameraOn.Store(true)
 	} else {
 		a.screen.SetCamera(false)
 		a.camera.Stop()
+		a.cameraOn.Store(false)
 	}
+	a.srv.Broadcast(a.statusSnapshot()) // 广播新状态，前端开关据此同步开/关
 }
 
 // handleAddModel 新增/编辑一个模型：更新路由、持久化配置、广播状态。
@@ -1500,6 +1625,7 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 		Robot: protocol.RobotStatus{
 			Connected: a.bot.Connected(),
 			Stuck:     a.robotStuck.Load(),
+			Speed:     a.bot.Speed(),
 			VID:       0x1001, // ElectronBot 设备标识（Mock 下仅作展示）
 			PID:       0x8023,
 			FPS:       30,
@@ -1508,12 +1634,14 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 		TTS:     protocol.ServiceStatus{Running: ss.TTSRunning, Detail: ss.Detail},
 		LLM:     protocol.LLMStatus{Active: a.llm.ActiveID(), Available: models},
 		Actions: actions,
-		Camera:  a.camera != nil,
+		Camera:   a.camera != nil,
+		CameraOn: a.cameraOn.Load(),
 		IO: protocol.IOStatus{
-			AudioIn:   a.cfg.IO.AudioInOr(),
-			AudioOut:  a.cfg.IO.AudioOutOr(),
-			TTSEngine: a.cfg.IO.TTSEngineOr(),
-			ImageOut:  a.cfg.IO.ImageOutOr(),
+			AudioIn:      a.cfg.IO.AudioInOr(),
+			AudioOut:     a.cfg.IO.AudioOutOr(),
+			TTSEngine:    a.cfg.IO.TTSEngineOr(),
+			ImageOut:     a.cfg.IO.ImageOutOr(),
+			DeviceVolume: a.cfg.IO.DeviceVolumeOr(),
 		},
 		Music:         protocol.MusicStatus{Source: a.cfg.Music.SourceOr(), LoggedIn: a.cfg.Music.SourceOr() == "qq" && a.cfg.Music.QQ.Cookie != ""},
 		Persona:       a.cfg.Persona,
@@ -1575,6 +1703,24 @@ func (a *app) handleSetDevice(cmd protocol.SetDeviceCommand) {
 	}
 	a.histMu.Unlock()
 	a.log.Info("更新设备角色与音色", "voice", cmd.Voice)
+	a.srv.Broadcast(a.statusSnapshot())
+}
+
+// handleSetVolume 设置设备扬声器音量(1~100)并落盘，立即生效（设置页滑块）。
+func (a *app) handleSetVolume(cmd protocol.SetVolumeCommand) {
+	v := cmd.Volume
+	if v < 1 {
+		v = 1
+	} else if v > 100 {
+		v = 100
+	}
+	a.cfgMu.Lock()
+	a.cfg.IO.DeviceVolume = v
+	device := a.cfg.IO.AudioDevice
+	a.saveConfig()
+	a.cfgMu.Unlock()
+	a.applyDeviceVolume(device, v)
+	a.log.Info("设置设备音量", "vol", v)
 	a.srv.Broadcast(a.statusSnapshot())
 }
 

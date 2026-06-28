@@ -49,16 +49,19 @@ func setVolume(_ id: AudioDeviceID, _ vol: Float32) {
     }
 }
 
-guard CommandLine.arguments.count >= 2 else { err("usage: playto <device-name-substr>  (audio on stdin)"); exit(2) }
+// 用法: playto <设备名子串> [音量0-100]   (音频从 stdin 进；stdin 为空时只设音量不播)
+guard CommandLine.arguments.count >= 2 else { err("usage: playto <device-name-substr> [volume0-100]  (audio on stdin)"); exit(2) }
 let sub = CommandLine.arguments[1]
+// 可选音量参数：给了就设设备输出音量；没给就【不动】当前音量（这样滑块设过的值能保持）。
+let volArg: Float32? = CommandLine.arguments.count >= 3 ? Float(CommandLine.arguments[2]).map { Float32(max(0, min(100, $0)) / 100) } : nil
 
-// 找到名字含子串、且有输出声道的设备，取其 UID，并把音量拉满。
+// 找到名字含子串、且有输出声道的设备，取其 UID。给了音量参数则设音量。
 var targetUID: String? = nil
 for d in deviceIDs() where outChannels(d) > 0 {
     let nm = cfStr(d, kAudioObjectPropertyName)
     if nm.contains(sub) {
         targetUID = cfStr(d, kAudioDevicePropertyDeviceUID)
-        setVolume(d, 1.0) // 拉满设备输出音量
+        if let v = volArg { setVolume(d, v) }
         break
     }
 }

@@ -82,9 +82,21 @@ func buildExtraData(angles robot.Joints, enable bool) [extraDataBytes]byte {
 	var b [extraDataBytes]byte
 	if enable {
 		b[0] = 1
+		for j := 0; j < robot.JointCount; j++ {
+			binary.LittleEndian.PutUint32(b[1+4*j:], math.Float32bits(angles[j]))
+		}
+		return b
 	}
+	// 舵机禁用：6 个角度全发 NaN。固件主循环每帧无条件 UpdateJointAngle→UpdateServoAngle，其中
+	//   if (setPoint >= angleMin && setPoint <= angleMax) { TransmitAndReceiveI2cPacket(...) }
+	// 对 NaN 恒为假，于是【完全跳过 I2C 舵机通信】。这是“屏幕跑一会儿就死”的根治：固件 I2C 是
+	//   do { state = HAL_I2C_...(...,5,5); } while (state != HAL_OK);  // 无超时、无限重试
+	// 舵机一旦在负载下(开摄像头抢 USB 供电电流)掉电/不 ACK，固件就永久自旋 → 不再发反馈 → 屏幕冻死。
+	// 不下发 I2C 就永不触发该自旋；屏幕刷新本就不依赖 I2C，照常。NaN 比“超量程大数”更稳——不依赖
+	// 固件内部角度换算结果，比较一定为假。
+	nan := math.Float32bits(float32(math.NaN()))
 	for j := 0; j < robot.JointCount; j++ {
-		binary.LittleEndian.PutUint32(b[1+4*j:], math.Float32bits(angles[j]))
+		binary.LittleEndian.PutUint32(b[1+4*j:], nan)
 	}
 	return b
 }
@@ -96,7 +108,13 @@ func parseFeedback(buf []byte) robot.Joints {
 		return a
 	}
 	for j := 0; j < robot.JointCount; j++ {
-		a[j] = math.Float32frombits(binary.LittleEndian.Uint32(buf[1+4*j:]))
+		v := math.Float32frombits(binary.LittleEndian.Uint32(buf[1+4*j:]))
+		// 舵机禁用(发 NaN)时固件不走 I2C 读舵机，反馈角度字段是未初始化垃圾值，
+		// 偶尔为 NaN/±Inf。钳成 0，避免污染 UI 关节显示与 JSON 广播(json 无法编码非有限值)。
+		if f := float64(v); math.IsNaN(f) || math.IsInf(f, 0) {
+			v = 0
+		}
+		a[j] = v
 	}
 	return a
 }

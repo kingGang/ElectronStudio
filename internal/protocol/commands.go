@@ -252,3 +252,11 @@ type SetDeviceCommand struct {
 
 // Type 实现 Payload。
 func (SetDeviceCommand) Type() Type { return TypeSetDevice }
+
+// SetVolumeCommand 设置设备扬声器音量(0~100)，设置页滑块用。
+type SetVolumeCommand struct {
+	Volume int `json:"volume"`
+}
+
+// Type 实现 Payload。
+func (SetVolumeCommand) Type() Type { return TypeSetVolume }

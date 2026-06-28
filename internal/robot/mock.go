@@ -83,6 +83,9 @@ func (m *Mock) Connected() bool {
 	return m.connected
 }
 
+// Speed 实现 Transport：Mock 无真实 USB 连接，返回空。
+func (m *Mock) Speed() string { return "" }
+
 // Close 实现 Transport。
 func (m *Mock) Close() error {
 	m.mu.Lock()

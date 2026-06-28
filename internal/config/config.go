@@ -90,7 +90,14 @@ type CameraConfig struct {
 	Enabled     bool   `json:"enabled,omitempty"`
 	FFmpeg      string `json:"ffmpeg,omitempty"`       // ffmpeg 可执行路径，默认 "ffmpeg"
 	InputFormat string `json:"input_format,omitempty"` // v4l2(Linux) | dshow(Windows) | avfoundation(macOS)
-	Input       string `json:"input,omitempty"`        // 设备规格，如 /dev/video0 或 video=Camera
+	Input       string `json:"input,omitempty"`        // 设备规格，如 /dev/video0 或 video=Camera 或 avfoundation 索引 "1"
+	// VideoSize/Framerate：采集分辨率/帧率（如 "640x480"/"30"）。macOS avfoundation 必填一组摄像头
+	// 支持的值，否则 ffmpeg 报 Input/output error（可用 `ffmpeg -f avfoundation -list_devices true -i ""` 查）。
+	VideoSize string `json:"video_size,omitempty"`
+	Framerate string `json:"framerate,omitempty"`
+	// Backend：采集后端。""/"ffmpeg"=ffmpeg；"native"=原生 macOS 采集 camcap(无 ffmpeg)，
+	// 此时 input 当作摄像头名子串(如 "USB 2.0 PC Cam")。
+	Backend string `json:"backend,omitempty"`
 }
 
 // MiniMaxConfig 是 MiniMax 多模态（文生图 / 语音合成）的凭据与默认参数。
@@ -118,8 +125,11 @@ type IOConfig struct {
 	// ServoEnable：舵机总开关。默认 false（不下发使能）——舵机 I²C 没接通/失联时，主控固件
 	// 会因对舵机的 I²C 无限重试而卡死整机；关着此开关即不碰舵机，屏幕/网页/语音照常用。
 	// 确认舵机在电子脑壳里能正常控制（即 I²C 已通）后，再设为 true 启用真机舵机。
-	ServoEnable bool          `json:"servo_enable,omitempty"`
-	MiniMax     MiniMaxConfig `json:"minimax"`
+	ServoEnable bool `json:"servo_enable,omitempty"`
+	// DeviceVolume：设备扬声器输出音量(0~100)。仅 macOS + 配了 AudioDevice 时生效，经 playto
+	// helper 设 USB 声卡输出音量。0 视为未设，DeviceVolumeOr() 默认 100(满)。
+	DeviceVolume int           `json:"device_volume,omitempty"`
+	MiniMax      MiniMaxConfig `json:"minimax"`
 }
 
 // 各路由的默认值（空配置时）。
@@ -127,6 +137,14 @@ func (io IOConfig) AudioInOr() string   { return orStr(io.AudioIn, "device") }
 func (io IOConfig) AudioOutOr() string  { return orStr(io.AudioOut, "device") }
 func (io IOConfig) TTSEngineOr() string { return orStr(io.TTSEngine, "minimax") }
 func (io IOConfig) ImageOutOr() string  { return orStr(io.ImageOut, "both") }
+
+// DeviceVolumeOr 返回设备音量(0~100)，0(未设)时默认 100。
+func (io IOConfig) DeviceVolumeOr() int {
+	if io.DeviceVolume <= 0 || io.DeviceVolume > 100 {
+		return 100
+	}
+	return io.DeviceVolume
+}
 
 // Config 是应用的完整配置。
 type Config struct {

@@ -60,8 +60,8 @@ func main() {
 	}
 	dev.SetJointAngles(robot.Joints{}, false)
 
-	log.Info("开始推送四色象限测试图(左上红/右上绿/左下蓝/右下白)，持续 8 秒")
-	deadline := time.Now().Add(8 * time.Second)
+	log.Info("开始推送四色象限测试图(左上红/右上绿/左下蓝/右下白)，持续 30 秒")
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := dev.Sync(); err != nil {
 			log.Warn("Sync", "err", err)

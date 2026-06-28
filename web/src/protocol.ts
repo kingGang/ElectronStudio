@@ -57,6 +57,7 @@ export const ClientType = {
   MaterialDelete: 'material_delete',
   SetIO: 'set_io',
   SetDevice: 'set_device',
+  SetVolume: 'set_volume',
   Party: 'party',
 } as const
 
@@ -118,6 +119,7 @@ export interface Envelope<T = unknown> {
 export interface RobotStatus {
   connected: boolean
   stuck?: boolean // 已连接但持续无就绪包(疑似固件卡死)，需断电复位
+  speed?: string // USB 连接速度，如 "USB 2.0"/"USB 3.0"
   vid: number
   pid: number
   fps: number
@@ -141,7 +143,8 @@ export interface StatusEvent {
   tts: ServiceStatus
   llm: LLMStatus
   actions?: string[] // 可用的编排动作名（供动作编排页使用）
-  camera?: boolean   // 是否配置了摄像头
+  camera?: boolean    // 是否配置了摄像头
+  camera_on?: boolean // 摄像头当前是否开启（前端据此同步开关）
   io?: IOStatus      // I/O 路由当前配置
   music?: MusicStatus // 音乐子系统状态（音源）
   persona?: string   // 设备角色/人设
@@ -156,10 +159,11 @@ export interface MusicStatus {
   logged_in?: boolean // QQ 音乐是否已登录（音源为 qq 且有 cookie）
 }
 export interface IOStatus {
-  audio_in: string   // device | page | network | off
-  audio_out: string  // device | page | both | off
-  tts_engine: string // minimax | openai | sidecar
-  image_out: string  // device | page | both | off
+  audio_in: string      // device | page | network | off
+  audio_out: string     // device | page | both | off
+  tts_engine: string    // minimax | openai | sidecar
+  image_out: string     // device | page | both | off
+  device_volume: number // 设备扬声器音量 0~100
 }
 
 export interface VoiceStateEvent {

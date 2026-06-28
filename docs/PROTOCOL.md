@@ -53,13 +53,19 @@
 ```jsonc
 // 状态快照
 { "type": "status", "ts": 1781170000000, "payload": {
-  "robot": { "connected": true, "stuck": false, "vid": 4097, "pid": 32803, "fps": 30 },
+  "robot": { "connected": true, "stuck": false, "speed": "USB 2.0", "vid": 4097, "pid": 32803, "fps": 30 },
   "asr":   { "running": true,  "detail": "SenseVoice-zh" },
   "tts":   { "running": true,  "detail": "piper zh_CN-huayan" },
   "llm":   { "active": "ollama:qwen2.5", "available": [
               { "id": "ollama:qwen2.5", "name": "Qwen2.5", "provider": "ollama" },
               { "id": "openai:gpt-4o",  "name": "GPT-4o",  "provider": "openai" } ] }
 }}
+// status.payload 另含 io: { audio_in, audio_out, tts_engine, image_out, device_volume(0~100) }。
+// 另含 camera(bool，是否配置摄像头) / camera_on(bool，当前是否开启，前端据此同步切换按钮)。
+// 设置类命令（前端→后端，设置页用，均即时落盘并广播新 status）：
+//   set_io { audio_in/audio_out/tts_engine/image_out }
+//   set_device { persona, persona_source, voice }
+//   set_volume { volume: 0~100 }    // 设备扬声器音量（macOS 经 playto 设 USB 声卡）
 
 // 流式对话（同一 id 多次更新）
 { "type": "chat", "ts": 1781170001000, "payload": {

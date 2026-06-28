@@ -58,6 +58,7 @@ const JointCount = 6
 type RobotStatus struct {
 	Connected bool   `json:"connected"`
 	Stuck     bool   `json:"stuck,omitempty"` // 已连接但持续无就绪包(疑似固件卡死)，需断电复位
+	Speed     string `json:"speed,omitempty"` // USB 连接速度，如 "USB 2.0"/"USB 3.0"（Mock 为空）
 	VID       uint16 `json:"vid"`             // USB 厂商 ID（ElectronBot = 0x1001）
 	PID       uint16 `json:"pid"`             // USB 产品 ID（ElectronBot = 0x8023）
 	FPS       int    `json:"fps"`             // 当前画面推送帧率
@@ -89,7 +90,8 @@ type StatusEvent struct {
 	TTS     ServiceStatus `json:"tts"`
 	LLM     LLMStatus     `json:"llm"`
 	Actions []string      `json:"actions,omitempty"` // 可用的编排动作名（供动作编排页使用）
-	Camera  bool          `json:"camera"`            // 是否配置了摄像头（前端据此显示切换按钮）
+	Camera   bool         `json:"camera"`              // 是否配置了摄像头（前端据此显示切换按钮）
+	CameraOn bool         `json:"camera_on"`           // 摄像头当前是否开启（前端据此同步开关；不省略，false 也要明确上报）
 	IO      IOStatus      `json:"io"`                // I/O 路由当前配置（供设置页展示/编辑）
 	Music   MusicStatus   `json:"music"`             // 音乐子系统状态（音源等，供前端展示）
 	Persona       string  `json:"persona,omitempty"`        // 设备角色/人设（供设置页展示/编辑）
@@ -105,10 +107,11 @@ type MusicStatus struct {
 
 // IOStatus 是 I/O 路由的当前生效配置（供前端设置页显示与编辑）。
 type IOStatus struct {
-	AudioIn   string `json:"audio_in"`   // device | page | off
-	AudioOut  string `json:"audio_out"`  // device | page | both | off
-	TTSEngine string `json:"tts_engine"` // minimax | sidecar
-	ImageOut  string `json:"image_out"`  // device | page | both | off
+	AudioIn      string `json:"audio_in"`      // device | page | off
+	AudioOut     string `json:"audio_out"`     // device | page | both | off
+	TTSEngine    string `json:"tts_engine"`    // minimax | sidecar
+	ImageOut     string `json:"image_out"`     // device | page | both | off
+	DeviceVolume int    `json:"device_volume"` // 设备扬声器音量 0~100
 }
 
 // Type 实现 Payload。

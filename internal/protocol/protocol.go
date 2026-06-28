@@ -70,6 +70,7 @@ const (
 	TypeMaterialDelete Type = "material_delete" // 删除一段屏幕表情素材（上传走 HTTP）
 	TypeSetIO          Type = "set_io"          // 更新 I/O 路由配置（设置页）
 	TypeSetDevice      Type = "set_device"      // 设置设备角色(人设)与音色（设置页）
+	TypeSetVolume      Type = "set_volume"      // 设置设备扬声器音量(0~100)
 	TypeParty          Type = "party"           // 一键蹦迪：同时放歌 + 循环跳舞（踩拍变脸）
 )
 

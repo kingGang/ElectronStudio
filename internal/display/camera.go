@@ -16,6 +16,14 @@ type CameraConfig struct {
 	FFmpeg      string // ffmpeg 路径，空则取 "ffmpeg"
 	InputFormat string // v4l2 / dshow / avfoundation
 	Input       string // 设备规格，如 /dev/video0 或 video=Integrated Camera
+	// VideoSize/Framerate：采集分辨率与帧率（如 "640x480"/"30"）。avfoundation(macOS) 必须给一组
+	// 摄像头支持的值，否则 ffmpeg 报 Input/output error；留空则不传（Linux v4l2 通常可省）。
+	VideoSize string
+	Framerate string
+	// Backend："" / "ffmpeg"=用 ffmpeg；"native"=用原生 macOS 采集小工具 camcap(无 ffmpeg 依赖)，
+	// 此时 Input 当作摄像头名子串、Camcap 为其可执行路径。
+	Backend string
+	Camcap  string
 }
 
 // CameraSource 把摄像头画面作为屏幕画面源。
@@ -51,25 +59,37 @@ func (c *CameraSource) Start(ctx context.Context, cfg CameraConfig) error {
 	}
 	c.mu.Unlock()
 
-	ffmpeg := cfg.FFmpeg
-	if ffmpeg == "" {
-		ffmpeg = "ffmpeg"
+	var cmd *exec.Cmd
+	if cfg.Backend == "native" && cfg.Camcap != "" {
+		// 原生 macOS AVFoundation 采集(无 ffmpeg)：camcap <摄像头名子串> <边长>，输出 240×240 rgb24。
+		cmd = exec.CommandContext(ctx, cfg.Camcap, cfg.Input, fmt.Sprintf("%d", scrW))
+	} else {
+		ffmpeg := cfg.FFmpeg
+		if ffmpeg == "" {
+			ffmpeg = "ffmpeg"
+		}
+		args := []string{"-loglevel", "error", "-f", cfg.InputFormat}
+		// avfoundation 等需要在 -i 前指定支持的分辨率/帧率，否则报 Input/output error。
+		if cfg.Framerate != "" {
+			args = append(args, "-framerate", cfg.Framerate)
+		}
+		if cfg.VideoSize != "" {
+			args = append(args, "-video_size", cfg.VideoSize)
+		}
+		args = append(args,
+			"-i", cfg.Input,
+			"-vf", fmt.Sprintf("scale=%d:%d", scrW, scrH),
+			"-pix_fmt", "rgb24",
+			"-f", "rawvideo", "-",
+		)
+		cmd = exec.CommandContext(ctx, ffmpeg, args...)
 	}
-	args := []string{
-		"-loglevel", "error",
-		"-f", cfg.InputFormat,
-		"-i", cfg.Input,
-		"-vf", fmt.Sprintf("scale=%d:%d", scrW, scrH),
-		"-pix_fmt", "rgb24",
-		"-f", "rawvideo", "-",
-	}
-	cmd := exec.CommandContext(ctx, ffmpeg, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("display: ffmpeg 管道失败: %w", err)
+		return fmt.Errorf("display: 摄像头采集管道失败: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("display: 启动 ffmpeg 失败（确认已安装且摄像头规格正确）: %w", err)
+		return fmt.Errorf("display: 启动摄像头采集失败: %w", err)
 	}
 
 	c.mu.Lock()

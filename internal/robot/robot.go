@@ -80,6 +80,8 @@ type Transport interface {
 	JointAngles() Joints
 	// Connected 报告当前是否已连接。
 	Connected() bool
+	// Speed 返回 USB 连接速度("USB 2.0"/"USB 3.0" 等)；Mock 或未连接时为空。
+	Speed() string
 	// Close 释放连接资源。
 	Close() error
 }

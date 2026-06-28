@@ -23,7 +23,7 @@
     RecordStop: 'record_stop', DeleteAction: 'delete_action',
     Camera: 'camera', Greet: 'greet', Music: 'music', Party: 'party',
     ScheduleAdd: 'schedule_add', ScheduleRemove: 'schedule_remove',
-    MaterialDelete: 'material_delete', SetIO: 'set_io', SetDevice: 'set_device',
+    MaterialDelete: 'material_delete', SetIO: 'set_io', SetDevice: 'set_device', SetVolume: 'set_volume',
   };
 
   // 6 轴关节名称（顺序与后端 robot.JointNames / 官方 RobotController 完全一致）。
@@ -330,8 +330,12 @@
     const stuck = !!(s.robot && s.robot.stuck);
     // USB 灯反映“在同步”而非仅“已连接”：卡死时(已连接但无就绪包)灯灭，避免误以为正常。
     toggleDot(el.dotUSB, s.robot && s.robot.connected && !stuck);
-    if (el.dotUSB) el.dotUSB.title = stuck ? '设备卡死：请彻底断电(拔线≥15秒放净电容)再插复位'
-      : (s.robot && s.robot.connected ? '已连接同步中' : '未连接');
+    if (el.dotUSB) {
+      // 顶栏灯旁标签直接显示连接速度(USB 2.0/3.0)，未连接显示 "USB"。
+      if (el.dotUSB.lastChild) el.dotUSB.lastChild.textContent = (s.robot && s.robot.connected && s.robot.speed) ? s.robot.speed : 'USB';
+      el.dotUSB.title = stuck ? '设备卡死：请彻底断电(拔线≥15秒放净电容)再插复位'
+        : (s.robot && s.robot.connected ? ('已连接同步中' + (s.robot.speed ? ' · ' + s.robot.speed : '')) : '未连接');
+    }
     if (stuck && !wasRobotStuck) toast('⚠ 设备卡死，请彻底断电(拔线≥15秒)再插复位；频繁重连不会自愈');
     wasRobotStuck = stuck;
     toggleDot(el.dotASR, s.asr && s.asr.running);
@@ -342,6 +346,7 @@
     }
     if (s.actions) renderActions(s.actions);
     el.camera.style.display = s.camera ? '' : 'none'; // 配置了摄像头才显示按钮
+    if (typeof s.camera_on === 'boolean') setCameraBtn(s.camera_on); // 开关状态以后端为准
     if (s.io) {
       audioInMode = s.io.audio_in || 'device';
       audioOutMode = s.io.audio_out || 'page';
@@ -376,13 +381,18 @@
     renderSettings(s);
   }
 
-  // 摄像头开关：切换屏幕在"表情脸 / 摄像头画面"之间。
+  // 摄像头开关：切换屏幕在"表情脸 / 摄像头画面"之间。开/关状态以后端 status.camera_on 为准，
+  // 避免本地状态与后端不同步(如摄像头被其它途径开关、或重连后)导致点了没反应。
   let cameraOn = false;
-  el.camera.addEventListener('click', () => {
-    cameraOn = !cameraOn;
+  function setCameraBtn(on) {
+    cameraOn = !!on;
     el.camera.classList.toggle('active', cameraOn);
     el.camera.textContent = cameraOn ? '🙂 表情' : '📷 摄像头';
-    send(CliType.Camera, { enable: cameraOn });
+  }
+  el.camera.addEventListener('click', () => {
+    const next = !cameraOn;
+    setCameraBtn(next);                    // 立即反馈，随后由 status.camera_on 回来校正
+    send(CliType.Camera, { enable: next });
   });
   function toggleDot(node, on) { node.classList.toggle('on', !!on); }
 
@@ -637,6 +647,10 @@
   };
   function renderIO(io) {
     IO_FIELDS.forEach((f) => { const sel = $('io-' + f); if (sel && io[f]) sel.value = io[f]; });
+    const vol = $('io-device_volume'), volv = $('io-device_volume-val');
+    if (vol && typeof io.device_volume === 'number' && io.device_volume > 0) {
+      vol.value = io.device_volume; if (volv) volv.textContent = io.device_volume;
+    }
   }
   // 音色区可见性：仅 MiniMax/OpenAI 引擎可选音色；小智/本地引擎给一句说明，不再空着像坏了。
   function curEngine() { const e = $('io-tts_engine'); return e ? e.value : 'minimax'; }
@@ -692,6 +706,12 @@
         if (f === 'audio_in' || f === 'audio_out') updateSceneRadio({ audio_in: $('io-audio_in').value, audio_out: $('io-audio_out').value });
       });
     });
+    // 设备音量滑块：拖动实时更新数字，松手(change)发 set_volume 持久化并立即生效。
+    const vol = $('io-device_volume'), volv = $('io-device_volume-val');
+    if (vol) {
+      vol.addEventListener('input', () => { if (volv) volv.textContent = vol.value; });
+      vol.addEventListener('change', () => { send(CliType.SetVolume, { volume: parseInt(vol.value, 10) }); toast('设备音量 = ' + vol.value); });
+    }
     // 使用场景预设：一键设 audio_in + audio_out。
     document.querySelectorAll('input[name="io-scene"]').forEach((r) => {
       r.addEventListener('change', () => {
@@ -859,7 +879,7 @@
     if (s.asr) el.setASR.textContent = (s.asr.running ? '在线' : '离线') + (s.asr.detail ? ` · ${s.asr.detail}` : '');
     if (s.tts) el.setTTS.textContent = (s.tts.running ? '在线' : '离线') + (s.tts.detail ? ` · ${s.tts.detail}` : '');
     if (s.robot) {
-      el.setUSB.textContent = s.robot.stuck ? '卡死(需断电复位)' : (s.robot.connected ? '已连接' : '未连接');
+      el.setUSB.textContent = s.robot.stuck ? '卡死(需断电复位)' : (s.robot.connected ? ('已连接' + (s.robot.speed ? '（' + s.robot.speed + '）' : '')) : '未连接');
       el.setVidPid.textContent = `0x${(s.robot.vid || 0).toString(16)} / 0x${(s.robot.pid || 0).toString(16)}`;
       el.setFPS.textContent = (s.robot.fps || 0) + ' fps';
     }

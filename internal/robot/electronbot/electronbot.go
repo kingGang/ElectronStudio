@@ -33,6 +33,8 @@ type libusbAPI struct {
 	GetDeviceList    func(ctx uintptr, list uintptr) int64
 	FreeDeviceList   func(list uintptr, unref int32)
 	GetDeviceDesc    func(dev uintptr, desc uintptr) int32
+	GetDevice        func(handle uintptr) uintptr // libusb_get_device：句柄→设备
+	GetDeviceSpeed   func(dev uintptr) int32       // libusb_get_device_speed：连接速度(USB 2.0/3.0)
 }
 
 // candidateLibs 返回各平台 libusb 共享库的候选文件名。
@@ -71,6 +73,8 @@ func loadLibusb() (*libusbAPI, error) {
 		purego.RegisterLibFunc(&api.FreeDeviceList, h, "libusb_free_device_list")
 		purego.RegisterLibFunc(&api.GetDeviceDesc, h, "libusb_get_device_descriptor")
 		purego.RegisterLibFunc(&api.BulkTransfer, h, "libusb_bulk_transfer")
+		purego.RegisterLibFunc(&api.GetDevice, h, "libusb_get_device")
+		purego.RegisterLibFunc(&api.GetDeviceSpeed, h, "libusb_get_device_speed")
 		return api, nil
 	}
 	return nil, fmt.Errorf("electronbot: 无法加载 libusb（尝试 %v）: %w", candidateLibs(), lastErr)
@@ -129,6 +133,10 @@ type Device struct {
 	// closing 由 Close 置位：让"永不放弃"的读握手在重试间隙尽快退出、释放 mu，
 	// 否则设备停发就绪包时优雅退出会被卡死（读不返回→mu 不放→Close 死等）。
 	closing atomic.Bool
+	speed   string // USB 连接速度，如 "USB 2.0"/"USB 3.0"（连接时读取，供 UI 展示）
+	// pipeRecover：累计被 clear_halt 原地恢复的 PIPE 停滞次数。macOS libusb 瞬时故障的诊断计数——
+	// 节流打印，证明“跑一会儿就死”的真凶已被无损拦截(而非把设备搞掉线)。
+	pipeRecover atomic.Uint64
 
 	image []byte               // 整帧图像缓冲（240×240×3），跨 Sync 保留
 	extra [extraDataBytes]byte  // 待下发的 extraData（使能 + 舵机设定）
@@ -188,9 +196,37 @@ func (d *Device) Connect() error {
 
 	d.lib = lib
 	d.handle = handle
+	d.speed = speedString(lib.GetDeviceSpeed(lib.GetDevice(handle))) // USB 连接速度(2.0/3.0)，供 UI 展示
 	d.connected.Store(true)
-	d.log.Info("ElectronBot 已连接", "name", dev.name, "vid", dev.vid, "pid", dev.pid)
+	d.log.Info("ElectronBot 已连接", "name", dev.name, "vid", dev.vid, "pid", dev.pid, "速度", d.speed)
 	return nil
+}
+
+// speedString 把 libusb_get_device_speed 的枚举映射成可读连接速度。
+func speedString(speed int32) string {
+	switch speed {
+	case 1:
+		return "USB 1.0" // LOW 1.5Mbps
+	case 2:
+		return "USB 1.1" // FULL 12Mbps
+	case 3:
+		return "USB 2.0" // HIGH 480Mbps
+	case 4:
+		return "USB 3.0" // SUPER 5Gbps
+	case 5:
+		return "USB 3.1" // SUPER_PLUS 10Gbps
+	default:
+		return ""
+	}
+}
+
+// Speed 返回 USB 连接速度("USB 2.0"/"USB 3.0" 等)，未连接为空。不走 mu（同 Connected）：
+// Sync 长时间持 mu，statusSnapshot 调 Speed() 不能被它阻塞。speed 在连接时设好、之后稳定。
+func (d *Device) Speed() string {
+	if !d.connected.Load() {
+		return ""
+	}
+	return d.speed
 }
 
 // Reset 对设备做一次 USB 端口级复位（软重启其 USB 栈），用于解开固件卡死/失步态而
@@ -235,6 +271,17 @@ func (d *Device) SetJointAngles(angles robot.Joints, enable bool) error {
 var errDeviceLost = errors.New("electronbot: 设备已从总线断开")
 
 const errNoDevice = -4 // LIBUSB_ERROR_NO_DEVICE
+// errPipe：LIBUSB_ERROR_PIPE，端点管道停滞(stall)。macOS 的 libusb 在 bulk 传输上会偶发此错
+// （Windows/WinUSB 不会或自动清除），是“Mac 上跑一会儿就死”的真因。正确处理是 libusb_clear_halt
+// 清掉停滞后【重试】该传输，而非当掉线去 reopen（reopen 的 churn 会把固件彻底搞掉线）。
+const errPipe = -9 // LIBUSB_ERROR_PIPE
+
+// syncBackstop：单次 bulk 传输的“真卡死”兜底时长。远大于任何 macOS libusb 瞬时故障(PIPE停滞/单次
+// 超时，至多数秒)，正常与瞬时故障下永不命中；命中即认定固件真卡死，交上层复位并提示断电。
+const syncBackstop = 12 * time.Second
+
+// errClosing：Close 置 closing 后，卡在无限重试里的传输据此尽快退出、释放 d.mu。
+var errClosing = errors.New("electronbot: 传输被关闭中断")
 
 // Sync 实现 robot.Transport：执行一次完整的图像 + 角度收发（对照官方 SyncTask）。
 // 若过程中检测到设备掉线，会清理死 handle 并置为未连接，供上层退避重连。
@@ -256,9 +303,8 @@ func (d *Device) syncFrame() error {
 	offset := 0
 	for seg := 0; seg < segments; seg++ {
 		// 1) 等待 MCU 请求并读回 32 字节反馈（官方 ReceivePacket(1,32)）。
-		//    段0(帧首)可超时放弃：此时未写任何数据，放弃不致半帧失步，只是丢这帧；
-		//    段1-3(帧中)永不放弃：已写过前段，中途放弃会留半帧→失步→花屏。
-		if err := d.bulkReadExact(endpointIn, d.rx[:], seg == 0); err != nil {
+		//    固件收发是无超时自旋，任何中途放弃都会把它卡死，故这里无限重试到读满(见 bulkRetry)。
+		if err := d.bulkReadExact(endpointIn, d.rx[:]); err != nil {
 			return err
 		}
 		// 2) 写入本段图像主体：84 个 512 字节包（每包后补一个零长包 ZLP）。
@@ -334,83 +380,60 @@ func (d *Device) transmitPackets(buf []byte) error {
 	return nil
 }
 
-// bulkWriteExact 写出整个 p，必要时重试（对照官方 TransmitPacket 的重试语义），带总超时兜底。
+// bulkWriteExact / bulkWriteZLP / bulkReadExact 都是 bulkRetry 的薄封装(写 / 零长包 / 读)。
 func (d *Device) bulkWriteExact(ep uint8, p []byte) error {
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		var transferred int32
-		ret := d.lib.BulkTransfer(d.handle, ep,
-			uintptr(unsafe.Pointer(&p[0])), int32(len(p)),
-			uintptr(unsafe.Pointer(&transferred)), writeTimeoutMs)
-		if ret == 0 && int(transferred) == len(p) {
-			return nil
-		}
-		if ret == errNoDevice {
-			return errDeviceLost
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("electronbot: bulk 写超时 ep=0x%x ret=%d transferred=%d", ep, ret, transferred)
-		}
-	}
+	return d.bulkRetry(ep, uintptr(unsafe.Pointer(&p[0])), int32(len(p)), writeTimeoutMs)
 }
 
-// bulkWriteZLP 写一个零长包（zero-length packet），用于在 512 整数倍包后标记传输结束。
+// bulkWriteZLP 写一个零长包(ZLP)，在 512 整数倍包后标记传输结束(对照官方 packetSize%512==0 时 Write(...,0))。
 func (d *Device) bulkWriteZLP(ep uint8) error {
-	var dummy [1]byte // 长度为 0，不会被读取，仅需一个非空指针
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		var transferred int32
-		ret := d.lib.BulkTransfer(d.handle, ep,
-			uintptr(unsafe.Pointer(&dummy[0])), 0,
-			uintptr(unsafe.Pointer(&transferred)), writeTimeoutMs)
-		if ret == 0 {
-			return nil
-		}
-		if ret == errNoDevice {
-			return errDeviceLost
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("electronbot: ZLP 写超时 ep=0x%x ret=%d", ep, ret)
-		}
-	}
+	var dummy [1]byte // 长度为 0，仅需一个非空指针
+	return d.bulkRetry(ep, uintptr(unsafe.Pointer(&dummy[0])), 0, writeTimeoutMs)
 }
 
-// bulkReadExact 读满 p（对照官方 ReceivePacket：while 不成功就一直重试）。
+func (d *Device) bulkReadExact(ep uint8, p []byte) error {
+	return d.bulkRetry(ep, uintptr(unsafe.Pointer(&p[0])), int32(len(p)), readTimeoutMs)
+}
+
+// bulkRetry 执行一次 bulk 传输并按官方语义【无限原地重试】，直到读/写满 length、确实掉线或正在关闭。
 //
-// canGiveUp=true（一帧的【帧首读】）：设备长时间不发就绪包就 3s 放弃（尚未写图像，不致失步）。
-// canGiveUp=false（【帧中读】）：给久一点（容忍舵机移动等瞬时卡顿），但兜底 8s 也放弃——否则
-// 设备 brownout/卡死时 syncLoop 会永久冻住、屏幕不恢复。中途放弃会留半帧花一下，但随后 reopen
-// 重连即恢复，比永久冻屏好。NO_DEVICE/closing 任何时候都立即返回。
-func (d *Device) bulkReadExact(ep uint8, p []byte, canGiveUp bool) error {
-	const errTimeout = -7 // LIBUSB_ERROR_TIMEOUT
-	deadline := time.Now().Add(8 * time.Second)
-	if canGiveUp {
-		deadline = time.Now().Add(3 * time.Second)
-	}
+// 这是“同样固件 Windows 不死、Mac 跑几分钟就死”的根治。固件侧(Bsp/robot.cpp)收发是【无超时自旋】：
+//
+//	SendUsbPacket:               do { ret = CDC_Transmit_HS(...); } while (ret != USBD_OK); // 等 host 取走
+//	ReceiveUsbPacketUntilSizeIs: while (usbBuffer.receivedPacketLen != _count);            // 等 host 发齐
+//
+// 所以 host 只要在【帧中途】放弃(超时 give-up / reopen churn)，固件就永久卡在这两个自旋里 → 设备“死”，
+// 只能断电复位。WinUSB 不丢包、不 stall，所以 Windows 永不触发；macOS libusb 会偶发 PIPE 停滞/超时，
+// 旧代码 3~8s 就放弃 → 反而亲手把固件搞死。
+//
+// 正解(对照官方 electron_low_level.cpp 的 while(!ret) / while(ret!=size) 无限重试)：瞬时故障一律
+// clear_halt 后【原地重试】、绝不中途放弃；仅真掉线(NO_DEVICE)或正在关闭(closing)才返回。backstop 仅作
+// “真卡死”兜底——远大于任何瞬时故障，正常永不命中，命中即固件真卡死、交上层复位并提示断电。
+func (d *Device) bulkRetry(ep uint8, ptr uintptr, length int32, timeoutMs uint32) error {
+	deadline := time.Now().Add(syncBackstop)
 	for {
+		if d.closing.Load() { // 关闭中：尽快退出释放 d.mu
+			return errClosing
+		}
 		var transferred int32
-		ret := d.lib.BulkTransfer(d.handle, ep,
-			uintptr(unsafe.Pointer(&p[0])), int32(len(p)),
-			uintptr(unsafe.Pointer(&transferred)), readTimeoutMs)
-		if ret == 0 && int(transferred) == len(p) {
+		ret := d.lib.BulkTransfer(d.handle, ep, ptr, length,
+			uintptr(unsafe.Pointer(&transferred)), timeoutMs)
+		if ret == 0 && transferred == length { // 读/写满(ZLP 时 length==0 亦成立)
 			return nil
 		}
 		if ret == errNoDevice {
-			return errDeviceLost // 掉线：退出让上层重连
+			return errDeviceLost // 真掉线：退出让上层重连
 		}
-		if ret != 0 && ret != errTimeout {
-			return fmt.Errorf("electronbot: bulk 读失败 ep=0x%x ret=%d transferred=%d", ep, ret, transferred)
-		}
-		// 关闭中：尽快退出释放 mu，让优雅退出/Close 不被卡死。
-		if d.closing.Load() {
-			return fmt.Errorf("electronbot: 读被关闭中断 ep=0x%x", ep)
-		}
-		// 超时过久就放弃（帧首 3s / 帧中 8s），让上层 reopen 恢复，避免永久冻屏。
-		if time.Now().After(deadline) {
-			if canGiveUp {
-				return fmt.Errorf("electronbot: 帧首读超时 ep=0x%x（设备无就绪包）", ep)
+		if ret == errPipe {
+			d.lib.ClearHalt(d.handle, ep) // 清管道停滞后原地重试(macOS libusb 已知瞬时故障，非掉线)
+			if n := d.pipeRecover.Add(1); n%200 == 0 {
+				d.log.Info("PIPE 停滞已 clear_halt 原地恢复(若是旧代码这些早把设备搞死了)", "累计次数", n)
 			}
-			return fmt.Errorf("electronbot: 帧中读超时 ep=0x%x（设备卡死/掉电？将重连恢复）", ep)
+		}
+		// 其余(超时/短读等)一律原地重试，绝不中途放弃——否则把固件卡死。
+		if time.Now().After(deadline) {
+			return fmt.Errorf("electronbot: bulk 兜底超时(疑似固件真卡死，需断电复位) ep=0x%x ret=%d transferred=%d/%d",
+				ep, ret, transferred, length)
 		}
 	}
 }

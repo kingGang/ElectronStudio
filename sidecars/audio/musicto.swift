@@ -51,14 +51,13 @@ var targetUID: String? = nil
 for d in deviceIDs() where outChannels(d) > 0 {
     if !sub.isEmpty, cfStr(d, kAudioObjectPropertyName).contains(sub) {
         targetUID = cfStr(d, kAudioDevicePropertyDeviceUID)
-        setDeviceVolume(d, 1.0) // 设备输出拉满，软件音量交给 NSSound.volume
-        break
+        break // 不在这里改设备音量——交给设备主音量(playto <设备> <音量>)统一控制，避免覆盖用户滑块
     }
 }
 if targetUID == nil { err("musicto: 未找到含『\(sub)』的输出设备，用系统默认") }
 
 var current: NSSound?
-var vol: Float = 0.8
+var vol: Float = 1.0 // 软件音量拉满，实际响度由设备主音量控制
 
 func handle(_ line: String) {
     let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
