@@ -85,12 +85,16 @@ if [ "$NO_SIDECAR" -eq 0 ]; then
 fi
 
 # 5) 构建（可选）
+# macOS 上启用 cgo：摄像头到屏用进程内 AVFoundation 采集(需 cgo)，根治"摄像头与主控共用板载 Hub
+# 导致的屏幕卡死"。其他平台保持 CGO_ENABLED=0 纯 Go（无 camcap 子进程时自动回落，交叉编译不受影响）。
+CGOFLAG=0
+[ "$(uname)" = "Darwin" ] && CGOFLAG=1
 BIN=""
 if [ "$BUILD" -eq 1 ]; then
-  log "编译主程序 -> bin/electronstudio"
+  log "编译主程序 -> bin/electronstudio (CGO_ENABLED=$CGOFLAG)"
   mkdir -p "$ROOT/bin"
   BIN="$ROOT/bin/electronstudio"
-  CGO_ENABLED=0 go build -o "$BIN" ./cmd/electronstudio
+  CGO_ENABLED=$CGOFLAG go build -o "$BIN" ./cmd/electronstudio
 fi
 
 if [ "$SETUP_ONLY" -eq 1 ]; then log "准备完成（--setup-only）。"; exit 0; fi
@@ -118,5 +122,5 @@ log "启动主程序 (addr=$ADDR) -> http://localhost${ADDR}"
 if [ -n "$BIN" ]; then
   "$BIN" -addr "$ADDR"
 else
-  go run ./cmd/electronstudio -addr "$ADDR"
+  CGO_ENABLED=$CGOFLAG go run ./cmd/electronstudio -addr "$ADDR"
 fi

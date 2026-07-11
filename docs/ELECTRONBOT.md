@@ -51,18 +51,20 @@ ElectronBot 内部有一颗 **4 口 USB Hub**，一根 USB 线插进去，主机
 要点：**摄像头/麦克风不走 0x8023 自定义协议**，它们是 hub 上的独立标准 USB 设备，主机用通用方式访问。
 base ElectronBot 本身无麦克风/喇叭，板上预留了一个 USB 口供加 USB 麦。
 
-## 6 自由度关节（与官方 ElectronStudio 的 RobotController 一致）
+## 6 自由度关节（顺序 = 官方下发给固件的线上顺序）
 
 ElectronBot 是 **6 自由度**：每臂 2 个（横滚 + 俯仰），头 1 个（俯仰），身体 1 个（偏航）——**没有肘关节**。下标顺序即 `Joints`：
 
 | 下标 | 关节 | 轴 |
 |------|------|----|
-| 0 | 左臂横滚 | Z |
-| 1 | 左臂俯仰 | X |
-| 2 | 右臂横滚 | Z（取反） |
-| 3 | 右臂俯仰 | X |
-| 4 | 头部俯仰 | X |
+| 0 | 头部俯仰 | X |
+| 1 | 左臂横滚 | Z |
+| 2 | 左臂俯仰 | X |
+| 3 | 右臂横滚 | Z（取反） |
+| 4 | 右臂俯仰 | X |
 | 5 | 身体旋转 | Y（偏航） |
+
+顺序依据官方上位机 `3.Software/Unity/ElectronBot-Studio/Assets/Scripts/UnityGetImageFromCpp.cs`（`joints[0]=sliderAngleHead` … `joints[5]=sliderAngleBody`）。**不要照 `RobotController.cs` 的字段声明顺序**——那只是 UI 字段的书写次序、不是线上顺序，照抄会让头与手臂整体错位一格（舵机动的关节和界面对不上）。
 
 内置动作（wave/nod/shake/cheer/home）按此布局编排；角度幅度/方向可在真机上微调。
 

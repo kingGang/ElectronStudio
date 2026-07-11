@@ -60,3 +60,8 @@ Thumbs.db
 /电子脑壳*/
 /sidecars/speech/emotions/
 /sidecars/video/camcap
+
+# 本地构建产物
+electronstudio-cgo
+# 官方固件 bin/hex（体积大、非本项目源码，不入库）
+ElectronBot-Debugger/

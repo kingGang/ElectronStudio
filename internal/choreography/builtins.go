@@ -9,9 +9,10 @@ import "github.com/kingGang/ElectronStudio/internal/robot"
 // 角度为示意值（度）。关节"用哪个轴"是确定的（与官方一致），但具体正负方向与
 // 幅度受真机舵机装配方向/量程影响，真机到货后可微调（仅调数值，不动结构）。
 
-// j 按 J0..J5 顺序构造 robot.Joints。
+// j 按 J0..J5 顺序构造 robot.Joints（线上顺序：头在 0 号，见 robot.JointHead 一族常量）。
+// 形参仍按"左臂→右臂→头→身体"的书写习惯排列，便于下面的关键帧读写；装配时才换成线上顺序。
 func j(armRollL, armPitchL, armRollR, armPitchR, head, body float32) robot.Joints {
-	return robot.Joints{armRollL, armPitchL, armRollR, armPitchR, head, body}
+	return robot.Joints{head, armRollL, armPitchL, armRollR, armPitchR, body}
 }
 
 // home 是中位（全部归零）姿态。

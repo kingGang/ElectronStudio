@@ -26,11 +26,12 @@
     MaterialDelete: 'material_delete', SetIO: 'set_io', SetDevice: 'set_device', SetVolume: 'set_volume',
   };
 
-  // 6 轴关节名称（顺序与后端 robot.JointNames / 官方 RobotController 完全一致）。
-  const JOINT_NAMES = ['左臂横滚', '左臂俯仰', '右臂横滚', '右臂俯仰', '头部俯仰', '身体旋转'];
+  // 6 轴关节名称（顺序与后端 robot.JointNames 一致，即官方下发给固件的线上顺序：头在 0 号）。
+  const JOINT_NAMES = ['头部俯仰', '左臂横滚', '左臂俯仰', '右臂横滚', '右臂俯仰', '身体旋转'];
   const JOINT_COUNT = 6;
-  // 各关节角度限制(度)，来自 ElectronBot 官方设定：横滚0~30 / 俯仰-20~180 / 头-15~15 / 身体-90~90
-  const JOINT_LIMITS = [[0, 30], [-20, 180], [0, 30], [-20, 180], [-15, 15], [-90, 90]];
+  // 各关节角度限制(度)，与后端 robot.JointLimits 同步：头-15~15 / 横滚0~30 / 俯仰-20~180 / 身体-90~90。
+  // 右臂俯仰上限 160：真机实测 167 就顶到机械限位堵转（会把主控 I²C 卡死），取 160 留余量。
+  const JOINT_LIMITS = [[-15, 15], [0, 30], [-20, 180], [0, 30], [-20, 160], [-90, 90]];
   const clampJoint = (i, a) => Math.max(JOINT_LIMITS[i][0], Math.min(JOINT_LIMITS[i][1], a));
   const VOICE_LABEL = { idle: '待命', connecting: '连接中', listening: '聆听中…', thinking: '思考中…', speaking: '回应中…' };
 
@@ -84,23 +85,23 @@
   // 手臂(无论抓到 roll/pitch 节点)：横向拖=横滚(往外张)，纵向拖=俯仰(前后)。
   // xs=横向拖的符号，让手臂"往你拖的方向"动（左右臂镜像，符号相反）。
   const DRAG_MAP = {
-    armRollLeft:  { x: 0, y: 1, xs: 1 },  armPitchLeft:  { x: 0, y: 1, xs: 1 },
-    armRollRight: { x: 2, y: 3, xs: -1 }, armPitchRight: { x: 2, y: 3, xs: -1 },
-    head: { y: 4 },          // 抬/低头
+    armRollLeft:  { x: 1, y: 2, xs: 1 },  armPitchLeft:  { x: 1, y: 2, xs: 1 },
+    armRollRight: { x: 3, y: 4, xs: -1 }, armPitchRight: { x: 3, y: 4, xs: -1 },
+    head: { y: 0 },          // 抬/低头
     body: { x: 5, xs: 1 },   // 左右转身
   };
   let m3dDragging = false;   // 正在拖关节：期间忽略服务端回传，避免抖动
   // 按 ElectronBot 官方 RobotController 的轴/符号驱动 6 关节。
-  // angles 顺序 = robot.JointNames: [左臂横滚,左臂俯仰,右臂横滚,右臂俯仰,头部俯仰,身体旋转]
+  // angles 顺序 = robot.JointNames: [头部俯仰,左臂横滚,左臂俯仰,右臂横滚,右臂俯仰,身体旋转]
   function drive3D(angles) {
     lastJointAngles = angles;
     const j = model3dJoints;
     if (!j || !j.body) return;
-    if (j.armRollLeft) j.armRollLeft.rotation.z = angles[0] * D2R;
-    if (j.armPitchLeft) j.armPitchLeft.rotation.x = -angles[1] * D2R;  // 俯仰：手性相反，取负让正角度朝前
-    if (j.armRollRight) j.armRollRight.rotation.z = -angles[2] * D2R;
-    if (j.armPitchRight) j.armPitchRight.rotation.x = -angles[3] * D2R;
-    if (j.head) j.head.rotation.x = angles[4] * D2R;
+    if (j.head) j.head.rotation.x = angles[0] * D2R;
+    if (j.armRollLeft) j.armRollLeft.rotation.z = angles[1] * D2R;
+    if (j.armPitchLeft) j.armPitchLeft.rotation.x = -angles[2] * D2R;  // 俯仰：手性相反，取负让正角度朝前
+    if (j.armRollRight) j.armRollRight.rotation.z = -angles[3] * D2R;
+    if (j.armPitchRight) j.armPitchRight.rotation.x = -angles[4] * D2R;
     if (j.body) j.body.rotation.y = angles[5] * D2R;
   }
   // 加载（或切换）一个模型到已有场景；移除旧模型，重新抓关节、归位相机。

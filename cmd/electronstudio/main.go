@@ -116,7 +116,19 @@ func main() {
 	// 设备驱动循环【最先启动】：真机有“连接后就绪窗口”，必须连上(connectRobot)后尽快
 	// 开始 Sync，否则窗口过期、设备就不再发就绪包(帧首读一直超时)。把它排在 speech/gesture
 	// 连 sidecar 等耗时操作之前，缩短 连接→首帧 的间隔。
-	go a.driver.Run(ctx)
+	driverDone := make(chan struct{})
+	go func() { defer close(driverDone); a.driver.Run(ctx) }()
+	// 退出时【先等驱动把手上这一帧 Sync 走完】，再让上面的 defer a.bot.Close() 关设备。
+	// syncLoop 是"同步完一帧才检查 ctx"，所以等它返回 = 这帧完整。半路掐断传输会让固件卡在
+	// lockstep 中间永久自旋、主控硬死（只能断电复位）——对照官方 Disconnect() 里的
+	// syncTaskHandle.join()。defer 后进先出：本 defer 晚于 defer a.bot.Close() 注册，故先于它执行。
+	defer func() {
+		select {
+		case <-driverDone:
+		case <-time.After(5 * time.Second):
+			log.Warn("驱动循环未按时收工，将强制关闭设备（可能打断传输，设备或需断电复位）")
+		}
+	}()
 
 	// 启动语音服务（Mock 为空操作；Sidecar 会连接外部进程）。
 	if err := a.speech.Start(ctx); err != nil {
@@ -359,13 +371,17 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	bot := connectRobot(cfg, log)
 	a.bot = bot
 	a.driver = device.NewDriver(bot, a.screen, log, 30, a.onDriverFrame, a.onDriverJoints)
-	a.driver.SetServoEnable(cfg.IO.ServoEnable) // 舵机总开关：默认关，避免舵机失联时固件卡死整机
+	a.driver.SetServoEnable(cfg.IO.ServoEnable) // 舵机总开关：关时不上扭矩（可手动摆姿）
+	a.driver.SetJointTrim(cfg.JointTrim)        // 机械零位补偿：让上层的 0 就是端正姿态
 	a.driver.SetStuckHandler(func(stuck bool) { // 设备卡死/恢复 → 广播状态，UI 据此提示断电复位
 		a.robotStuck.Store(stuck)
 		a.srv.Broadcast(a.statusSnapshot())
 	})
 	if !cfg.IO.ServoEnable {
-		log.Info("舵机总开关 = 关（servo_enable=false）：不下发使能，舵机 I²C 通了再开")
+		log.Info("舵机总开关 = 关（servo_enable=false）：不上扭矩，可手动摆姿")
+	}
+	if cfg.JointTrim != (robot.Joints{}) {
+		log.Info("已应用关节零位补偿", "trim", cfg.JointTrim)
 	}
 
 	// 动作编排：把姿态写入驱动；注册内置动作并加载用户录制的动作（同名覆盖内置）。
@@ -718,6 +734,7 @@ func (a *app) captureJPEG(ctx context.Context) ([]byte, error) {
 			FFmpeg: cfg.FFmpeg, InputFormat: cfg.InputFormat, Input: cfg.Input,
 			VideoSize: cfg.VideoSize, Framerate: cfg.Framerate,
 			Backend: cfg.Backend, Camcap: findCamcapHelper(),
+			Rotate: cfg.Rotate, Mirror: cfg.Mirror,
 		}); err != nil {
 			return nil, err
 		}
@@ -1559,20 +1576,25 @@ func (a *app) handleCamera(ctx context.Context, enable bool) {
 	}
 	if enable {
 		cfg := a.cfg.Camera
+		// ScreenMode：摄像头到屏由设备同步 owner 串行拉帧(来一帧发一帧，仿官方单一串行发送)，
+		// 不起并发读帧 goroutine——消除"并发读管道帧"卡死设备屏的路径。
 		if err := a.camera.Start(ctx, display.CameraConfig{
 			FFmpeg: cfg.FFmpeg, InputFormat: cfg.InputFormat, Input: cfg.Input,
 			VideoSize: cfg.VideoSize, Framerate: cfg.Framerate,
-			Backend: cfg.Backend, Camcap: findCamcapHelper(),
+			Backend: cfg.Backend, Camcap: findCamcapHelper(), ScreenMode: true,
+			Rotate: cfg.Rotate, Mirror: cfg.Mirror,
 		}); err != nil {
 			a.log.Warn("启动摄像头失败", "err", err)
 			a.srv.Broadcast(protocol.ErrorEvent{Code: "camera_error", Message: err.Error()})
 			return
 		}
+		a.driver.SetFramePuller(a.camera.ReadFrame) // syncLoop 进入摄像头模式，串行拉帧→同步
 		a.screen.SetCamera(true)
 		a.cameraOn.Store(true)
 	} else {
+		a.driver.SetFramePuller(nil) // 先退出摄像头模式
 		a.screen.SetCamera(false)
-		a.camera.Stop()
+		a.camera.Stop() // 关管道解阻塞在途的 ReadFrame，syncLoop 回落表情脸
 		a.cameraOn.Store(false)
 	}
 	a.srv.Broadcast(a.statusSnapshot()) // 广播新状态，前端开关据此同步开/关

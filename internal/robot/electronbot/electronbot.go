@@ -137,6 +137,12 @@ type Device struct {
 	// pipeRecover：累计被 clear_halt 原地恢复的 PIPE 停滞次数。macOS libusb 瞬时故障的诊断计数——
 	// 节流打印，证明“跑一会儿就死”的真凶已被无损拦截(而非把设备搞掉线)。
 	pipeRecover atomic.Uint64
+	// retries：累计 bulk 重试次数（超时/短传/停滞都算）。失步只可能从重试里长出来，故单列计数。
+	retries atomic.Uint64
+	// feedbackLost：累计"反馈包被主机侧吞掉"的次数（读到成功但零长）。见 syncFrame 里的接回逻辑。
+	feedbackLost atomic.Uint64
+	// zlpLost：累计写失败的零长包次数（不重试、按已送达继续，见 bulkWriteZLPBestEffort）。
+	zlpLost atomic.Uint64
 
 	image []byte               // 整帧图像缓冲（240×240×3），跨 Sync 保留
 	extra [extraDataBytes]byte  // 待下发的 extraData（使能 + 舵机设定）
@@ -270,6 +276,10 @@ func (d *Device) SetJointAngles(angles robot.Joints, enable bool) error {
 // errDeviceLost 表示设备已从 USB 总线消失（libusb 返回 NO_DEVICE）。用于触发清理与重连。
 var errDeviceLost = errors.New("electronbot: 设备已从总线断开")
 
+// errFeedbackLost 表示 MCU 的 32 字节反馈包被主机 USB 栈吞了（bulk 读返回成功但零字节）。
+// 不是错误、更不是掉线——设备已经发过、正在等我们发图，故 syncFrame 收到它要【继续发图】而非重读。
+var errFeedbackLost = errors.New("electronbot: 反馈包丢失(读到零长)")
+
 const errNoDevice = -4 // LIBUSB_ERROR_NO_DEVICE
 // errPipe：LIBUSB_ERROR_PIPE，端点管道停滞(stall)。macOS 的 libusb 在 bulk 传输上会偶发此错
 // （Windows/WinUSB 不会或自动清除），是“Mac 上跑一会儿就死”的真因。正确处理是 libusb_clear_halt
@@ -305,7 +315,20 @@ func (d *Device) syncFrame() error {
 		// 1) 等待 MCU 请求并读回 32 字节反馈（官方 ReceivePacket(1,32)）。
 		//    固件收发是无超时自旋，任何中途放弃都会把它卡死，故这里无限重试到读满(见 bulkRetry)。
 		if err := d.bulkReadExact(endpointIn, d.rx[:]); err != nil {
-			return err
+			if !errors.Is(err, errFeedbackLost) {
+				return err
+			}
+			// 反馈包在主机侧丢了（读到"成功但零长"）。此刻【设备已经把它发出去了】——固件的
+			// CDC_Transmit_HS 一旦交给 USB 核心就清了 TxState、往下走，现在正卡在
+			// ReceiveUsbPacketUntilSizeIs(224) 上等我们发图。
+			//
+			// 这时若按常规"没读满就重读"，就是死局：它不会再发，我们不会去写，两边对着干瞪眼，
+			// 直到兜底超时判死（真机日志实锤：零长读之后紧跟着就是连续 5s 读超时 → 判死）。
+			// 正确做法是【认定反馈已丢、直接往下发图】，把 lockstep 接回去。代价仅仅是这一帧沿用上
+			// 一帧的关节反馈（UI 少更新一帧），而原本这个状态是 100% 必死、只能断电复位。
+			d.feedbackLost.Add(1)
+			d.log.Warn("反馈包丢失(读到零长)，按 MCU 已发送处理、继续发图以接回 lockstep",
+				"累计", d.feedbackLost.Load())
 		}
 		// 2) 写入本段图像主体：84 个 512 字节包（每包后补一个零长包 ZLP）。
 		if err := d.transmitPackets(d.image[offset:offset+segImageBytes]); err != nil {
@@ -351,8 +374,23 @@ func (d *Device) Connected() bool {
 
 // Close 实现 robot.Transport：释放接口与 libusb。
 func (d *Device) Close() error {
-	d.closing.Store(true) // 先置位：让卡在永不放弃读里的 Sync 尽快退出、放掉 d.mu
-	d.mu.Lock()
+	// 【绝不半路打断正在进行的一帧】——对照官方 electron_low_level.cpp 的 Disconnect()：
+	//
+	//	if (syncTaskHandle.joinable()) syncTaskHandle.join();   // 先把在跑的 SyncTask 走完
+	//	USB_CloseDevice(0);
+	//
+	// 固件的一帧是 4 段严格 lockstep（读32 → 写84×512 → 写224尾包），且收发全是【无超时死循环】。
+	// 传输被从中间掐断，MCU 就永远停在 while(receivedPacketLen != 224) 上等那个再也不会来的尾包
+	// → 永久自旋 → 不再发反馈 → 主控硬死（只能断电复位）。以前这里一上来就 closing=true 强行打断，
+	// 于是每次 Ctrl+C / 重启程序都在亲手把固件搞死，下次连上必是"2×15s 全超时"。
+	//
+	// 拿到 d.mu 就等价于 join：Sync 全程持有它，锁一到手说明这帧已经走完。
+	if !d.acquireGraceful(closeGrace) {
+		// 等不到——设备多半本来就卡死在传输里（Sync 正堵在 backstop）。这时打断已无所谓，
+		// 强行置位让它尽快放锁，否则关不掉。
+		d.closing.Store(true)
+		d.mu.Lock()
+	}
 	defer d.mu.Unlock()
 	if !d.connected.Load() {
 		return nil
@@ -365,30 +403,61 @@ func (d *Device) Close() error {
 	return nil
 }
 
-// transmitPackets 按官方 TransmitPacket 把一段图像分成 packetsPerSeg 个 512 字节包逐个写出；
-// 因 packetSize(512) 是端点最大包的整数倍，每个包后须补一个零长包(ZLP)标记传输结束。
+// transmitPackets 逐个写出一段图像的 84 个 512 字节包，【每包后补一个零长包(ZLP)】。
+//
+// ZLP 不是可有可无的 Windows 仪式——它是这个固件的偏移逻辑赖以工作的一拍。看 CDC_Receive_HS：
+//
+//	if (len == 224) SwitchPingPongBuffer();        // 段尾：rxDataOffset=0、换缓冲
+//	hcdc->RxBuffer = base + rxDataOffset;          // ← 用【旧】offset 挂下一次接收缓冲
+//	if (len == 512) rxDataOffset += 512;           // ← 之后才推进 offset
+//	USBD_LL_PrepareReceive(..., hcdc->RxBuffer);
+//
+// 赋值在推进【之前】。若只发数据包不发 ZLP：包 N 落在 base+off，回调又把缓冲挂回 base+off（因为
+// 此刻 offset 还没推进），于是包 N+1 覆盖包 N——整段图错位一个包(512B≈170 像素)，屏幕横向撕裂
+// （真机验证过，就是这个现象）。ZLP 进来时 len=0：不推进 offset，但会把缓冲重新挂到【已推进过】
+// 的新地址，下一个真数据包才落对位置。这一拍就是它的全部作用。
+//
+// 但 ZLP 在 macOS 上会偶发写超时(ret=-7)，而【重试它是致命的】：真机日志——
+//
+//	bulk 重试 序号=1..6  ep=0x1 ret=-7 transferred=0 length=0   # 同一个 ZLP，每 2s 超一次，连超 6 次
+//	bulk 重试 序号=7..9  ep=0x81 ret=-7 transferred=0/32        # 整帧卡了 12s，主控失步 → 硬死
+//
+// 所以：ZLP 照发，超时就【当它已经送到、绝不重试】(bulkWriteZLPBestEffort)。真丢了的代价只是这一段
+// 图错一个包、屏幕闪一下，而且下一个 224 尾包会把 offset 归零自动复原；重试的代价则是必死。
 func (d *Device) transmitPackets(buf []byte) error {
 	for i := 0; i < packetsPerSeg; i++ {
 		if err := d.bulkWriteExact(endpointOut, buf[i*packetSize:(i+1)*packetSize]); err != nil {
 			return err
 		}
-		// 512 % 512 == 0：补零长包（对照官方 if (packetSize % 512 == 0) Write(...,0,...)）。
-		if err := d.bulkWriteZLP(endpointOut); err != nil {
-			return err
+		if err := d.bulkWriteZLPBestEffort(endpointOut); err != nil {
+			return err // 只有真掉线才会走到这里
 		}
 	}
 	return nil
 }
 
-// bulkWriteExact / bulkWriteZLP / bulkReadExact 都是 bulkRetry 的薄封装(写 / 零长包 / 读)。
-func (d *Device) bulkWriteExact(ep uint8, p []byte) error {
-	return d.bulkRetry(ep, uintptr(unsafe.Pointer(&p[0])), int32(len(p)), writeTimeoutMs)
+// bulkWriteZLPBestEffort 写一个零长包：只发一次，超时/短传【一律不重试】，直接当成功往下走。
+// 理由见 transmitPackets——重试 ZLP 会把整帧卡死、进而把固件搞成永久自旋（只能断电复位）；
+// 而丢一个 ZLP 只会让这一段图错位一个包，下一个 224 尾包即自动复位。
+func (d *Device) bulkWriteZLPBestEffort(ep uint8) error {
+	var dummy [1]byte // 长度为 0，仅需一个非空指针
+	var transferred int32
+	ret := d.lib.BulkTransfer(d.handle, ep, uintptr(unsafe.Pointer(&dummy[0])), 0,
+		uintptr(unsafe.Pointer(&transferred)), writeTimeoutMs)
+	if ret == errNoDevice {
+		return errDeviceLost
+	}
+	if ret != 0 {
+		if n := d.zlpLost.Add(1); n%50 == 1 { // 节流打印：只在第 1、51、101… 次报
+			d.log.Warn("零长包写失败，按已送达继续(重试它会把固件卡死)", "ret", ret, "累计", n)
+		}
+	}
+	return nil
 }
 
-// bulkWriteZLP 写一个零长包(ZLP)，在 512 整数倍包后标记传输结束(对照官方 packetSize%512==0 时 Write(...,0))。
-func (d *Device) bulkWriteZLP(ep uint8) error {
-	var dummy [1]byte // 长度为 0，仅需一个非空指针
-	return d.bulkRetry(ep, uintptr(unsafe.Pointer(&dummy[0])), 0, writeTimeoutMs)
+// bulkWriteExact / bulkReadExact 都是 bulkRetry 的薄封装(写 / 读)。
+func (d *Device) bulkWriteExact(ep uint8, p []byte) error {
+	return d.bulkRetry(ep, uintptr(unsafe.Pointer(&p[0])), int32(len(p)), writeTimeoutMs)
 }
 
 func (d *Device) bulkReadExact(ep uint8, p []byte) error {
@@ -424,6 +493,20 @@ func (d *Device) bulkRetry(ep uint8, ptr uintptr, length int32, timeoutMs uint32
 		if ret == errNoDevice {
 			return errDeviceLost // 真掉线：退出让上层重连
 		}
+		// IN 端点上"传输成功、却一个字节都没读到"：设备确实发了包，但数据在主机 USB 栈里被吞了
+		// （macOS 上摄像头/麦克风的等时流一挤就会发生）。设备那边已经认为发完、往下走了——继续重读
+		// 必死锁，交给 syncFrame 去接回 lockstep。
+		if ep&0x80 != 0 && ret == 0 && transferred == 0 && length > 0 {
+			return errFeedbackLost
+		}
+		// 每一次重试都记账。【失步只可能从这里发生】：一次没送达/送了两遍的写，就会让固件的
+		// rxDataOffset 错位、再也等不到那个"长度=224"的尾包 → 无超时自旋 → 主控硬死。所以要能看见
+		// 卡死【之前】到底重试过什么(尤其是 OUT 端点的写)，否则只能靠猜。前若干次打全量细节。
+		n := d.retries.Add(1)
+		if n <= 40 {
+			d.log.Warn("bulk 重试", "序号", n, "ep", fmt.Sprintf("0x%x", ep), "ret", ret,
+				"transferred", transferred, "length", length)
+		}
 		if ret == errPipe {
 			d.lib.ClearHalt(d.handle, ep) // 清管道停滞后原地重试(macOS libusb 已知瞬时故障，非掉线)
 			if n := d.pipeRecover.Add(1); n%200 == 0 {
@@ -432,9 +515,30 @@ func (d *Device) bulkRetry(ep uint8, ptr uintptr, length int32, timeoutMs uint32
 		}
 		// 其余(超时/短读等)一律原地重试，绝不中途放弃——否则把固件卡死。
 		if time.Now().After(deadline) {
-			return fmt.Errorf("electronbot: bulk 兜底超时(疑似固件真卡死，需断电复位) ep=0x%x ret=%d transferred=%d/%d",
-				ep, ret, transferred, length)
+			// 带上 PIPE 停滞累计次数：判断这次失步前是否发生过管道停滞(停滞→重发同一个包→固件
+			// rxDataOffset 多算，是我们能想到的、主机侧唯一可能诱发失步的路径)。
+			return fmt.Errorf("electronbot: bulk 兜底超时(疑似固件真卡死，需断电复位) ep=0x%x ret=%d transferred=%d/%d pipe停滞累计=%d 重试累计=%d",
+				ep, ret, transferred, length, d.pipeRecover.Load(), d.retries.Load())
 		}
+	}
+}
+
+// closeGrace 是 Close 等待"当前这一帧走完"的宽限期。正常一帧几十毫秒，给足余量；等不到即说明
+// 设备已卡死在传输里，再等无益。
+const closeGrace = 3 * time.Second
+
+// acquireGraceful 在 grace 内自旋抢 d.mu（等价于官方 Disconnect() 里的 syncTaskHandle.join()）。
+// 抢到返回 true（当前帧已收工，可安全关闭）；超时返回 false（调用方需强行打断）。
+func (d *Device) acquireGraceful(grace time.Duration) bool {
+	deadline := time.Now().Add(grace)
+	for {
+		if d.mu.TryLock() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 

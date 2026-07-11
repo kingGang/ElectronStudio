@@ -10,6 +10,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kingGang/ElectronStudio/internal/display"
@@ -31,19 +32,62 @@ type Driver struct {
 	mu          sync.Mutex
 	pose        robot.Joints
 	enable      bool
-	servoEnable bool // 总开关：false 时永不下发使能（防止舵机 I²C 未通时固件无限重试卡死整机）
+	servoEnable bool         // 总开关：false 时永不下发使能（舵机不上扭矩，可手动摆姿）
+	trim        robot.Joints // 机械零位补偿(度)：下发前加、读回时减，见 SetJointTrim
+
+	// framePull：非 nil=摄像头到屏模式。syncLoop 改由它【阻塞拉一帧→同步一帧】驱动（单 owner
+	// 串行 读→Sync，仿官方 EmoticonActionFrameService 单一串行发送），期间不跑自由 ticker、
+	// 也无独立读帧 goroutine——消除"并发读管道帧"与 libusb 争抢卡死设备屏的路径。
+	framePull atomic.Pointer[func() []byte]
 }
 
-// SetServoEnable 设置舵机总开关。false（默认）时无论上层怎么 enable，下发给设备的都是
-// 不使能——这样舵机 I²C 没接通/失联时，固件不会因无限重试而卡死，屏幕/网页/语音照常用。
+// SetServoEnable 设置舵机总开关。false 时无论上层怎么 enable，下发给设备的使能位都是 0
+// ——舵机不上扭矩（可手动摆姿），但角度照常下发（与官方一致，见 electronbot.buildExtraData）。
 func (d *Driver) SetServoEnable(on bool) {
 	d.mu.Lock()
 	d.servoEnable = on
 	d.mu.Unlock()
 }
 
+// SetJointTrim 设置 6 轴机械零位补偿(度)。装配公差让"角度 0"不一定是端正姿态（例如头部归零时略微
+// 低头），这里把补偿吸收在驱动层：下发给设备前加上 trim，读回真实角度时减掉 trim。于是上层（滑杆、
+// 动作编排、内置动作）看到的永远是"0 = 端正"的理想坐标系，不必每个动作各自去凑偏移。
+func (d *Driver) SetJointTrim(t robot.Joints) {
+	d.mu.Lock()
+	d.trim = t
+	d.mu.Unlock()
+}
+
+// applyTrim 把上层角度换成设备角度（加补偿并裁剪到量程内）。
+func applyTrim(pose, trim robot.Joints) robot.Joints {
+	for i := range pose {
+		pose[i] = robot.ClampAngle(i, pose[i]+trim[i])
+	}
+	return pose
+}
+
+// stripTrim 把设备读回的角度换回上层角度（减掉补偿）。
+func stripTrim(fb, trim robot.Joints) robot.Joints {
+	for i := range fb {
+		fb[i] -= trim[i]
+	}
+	return fb
+}
+
 // SetStuckHandler 注入“设备卡死/恢复”回调（上层据此广播 UI 提示断电复位）。
 func (d *Driver) SetStuckHandler(f func(stuck bool)) { d.onStuck = f }
+
+// SetFramePuller 设置/清除摄像头到屏的"拉帧"函数。非 nil 时 syncLoop 进入摄像头模式：由它
+// 阻塞拉取下一帧、拉到即 Sync(来一帧发一帧、同一帧也广播给 UI)，单 owner 串行；nil 时回落到
+// 表情脸 ticker 模式。开摄像头：先 Start(ScreenMode) 再 SetFramePuller(cam.ReadFrame)；
+// 关摄像头：先 SetFramePuller(nil) 再 cam.Stop()(关管道解阻塞在途的拉帧)。
+func (d *Driver) SetFramePuller(pull func() []byte) {
+	if pull == nil {
+		d.framePull.Store(nil)
+		return
+	}
+	d.framePull.Store(&pull)
+}
 
 func (d *Driver) notifyStuck(stuck bool) {
 	if d.onStuck != nil {
@@ -104,6 +148,9 @@ func (d *Driver) frameLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte)
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if d.framePull.Load() != nil {
+				continue // 摄像头模式：syncLoop 直接拉帧并广播同一帧，frameLoop 让位，避免双广播
+			}
 			if frame := d.source.Frame(); frame != nil {
 				fmu.Lock()
 				if len(*latest) != len(frame) {
@@ -163,32 +210,49 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 
 	for {
 		synced := false
+		camMode := d.framePull.Load()
+		blockingPaced := false // 本轮是否已被"阻塞拉帧"节流（是则末尾不再等 ticker，避免帧率减半）
 		if d.bot.Connected() {
-			// 取最近画面（copy 出来防与 frameLoop 写入撞车）推给设备。
-			fmu.Lock()
-			if n := len(*latest); n > 0 {
-				if len(buf) != n {
-					buf = make([]byte, n)
+			if camMode != nil {
+				// 摄像头模式：阻塞拉一帧(来一帧发一帧，单 owner 串行)。拉到的同一帧既上屏也广播给 UI。
+				// 拉帧本身即节流(随采集帧率)，故本轮末尾不再等 ticker。Stop 关管道 → 这里返回 nil。
+				blockingPaced = true
+				if frame := (*camMode)(); frame != nil {
+					if len(buf) != len(frame) {
+						buf = make([]byte, len(frame))
+					}
+					copy(buf, frame)
+					if d.onFrame != nil {
+						d.onFrame(frame)
+					}
 				}
-				copy(buf, *latest)
+			} else {
+				// 取最近画面（copy 出来防与 frameLoop 写入撞车）推给设备。
+				fmu.Lock()
+				if n := len(*latest); n > 0 {
+					if len(buf) != n {
+						buf = make([]byte, n)
+					}
+					copy(buf, *latest)
+				}
+				fmu.Unlock()
 			}
-			fmu.Unlock()
 			if len(buf) > 0 {
 				if err := d.bot.SetImage(buf); err != nil {
 					d.log.Debug("设置画面失败", "err", err)
 				}
 			}
 			d.mu.Lock()
-			pose, enable, servoOK := d.pose, d.enable, d.servoEnable
+			pose, enable, servoOK, trim := d.pose, d.enable, d.servoEnable, d.trim
 			d.mu.Unlock()
-			_ = d.bot.SetJointAngles(pose, enable && servoOK) // 总开关关时永不使能
+			_ = d.bot.SetJointAngles(applyTrim(pose, trim), enable && servoOK) // 总开关关时永不使能
 			if err := d.bot.Sync(); err != nil {
 				d.log.Debug("同步失败", "err", err)
 			} else {
 				synced = true
 				tick++
 				if tick%3 == 0 && d.onJoints != nil {
-					d.onJoints(d.bot.JointAngles())
+					d.onJoints(stripTrim(d.bot.JointAngles(), trim))
 				}
 			}
 		}
@@ -220,6 +284,15 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 			}
 			if backoff > maxBackoff {
 				backoff = maxBackoff
+			}
+			continue
+		}
+		if blockingPaced {
+			// 摄像头模式且已阻塞拉帧：拉取本身即节流，不再等 ticker，只检查退出。
+			select {
+			case <-ctx.Done():
+				return
+			default:
 			}
 			continue
 		}

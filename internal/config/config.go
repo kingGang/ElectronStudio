@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/kingGang/ElectronStudio/internal/robot"
 )
 
 // ModelConfig 描述一个大模型条目。
@@ -98,6 +100,11 @@ type CameraConfig struct {
 	// Backend：采集后端。""/"ffmpeg"=ffmpeg；"native"=原生 macOS 采集 camcap(无 ffmpeg)，
 	// 此时 input 当作摄像头名子串(如 "USB 2.0 PC Cam")。
 	Backend string `json:"backend,omitempty"`
+	// Rotate/Mirror：送屏前对摄像头画面做的旋转(0|90|180|270，顺时针)与左右镜像。
+	// 官方上位机不做任何旋转（它那台的摄像头模组是正装的），但精英版把摄像头横着装进了头里，
+	// 出图天生就是躺倒的——这属于每台机器的装配差异，所以做成配置而不是写死。
+	Rotate int  `json:"rotate,omitempty"`
+	Mirror bool `json:"mirror,omitempty"`
 }
 
 // MiniMaxConfig 是 MiniMax 多模态（文生图 / 语音合成）的凭据与默认参数。
@@ -150,6 +157,10 @@ func (io IOConfig) DeviceVolumeOr() int {
 type Config struct {
 	Addr    string        `json:"addr"`
 	Robot   string        `json:"robot,omitempty"`   // auto | electronbot | mock
+	// JointTrim 是 6 轴机械零位补偿(度)，下标同 robot.JointNames。下发前加到目标角上、读回时减掉，
+	// 于是界面/动作编排里的 0 就是"端正姿态"。机械零位每台机器不一样（装配公差），故放配置里而非写死。
+	// 例：头部归零时略微低头 → joint_trim[0] 填一个正数把它抬回来。
+	JointTrim [robot.JointCount]float32 `json:"joint_trim,omitempty"`
 	Persona       string  `json:"persona,omitempty"`        // 设备角色/人设（作为系统提示的人设部分）
 	PersonaSource string  `json:"persona_source,omitempty"` // local(用本机角色) | model(用模型自带角色,如小智服务端设定)，默认 local
 	Voice         string  `json:"voice,omitempty"`          // 声音音色（覆盖当前 TTS 引擎的音色）

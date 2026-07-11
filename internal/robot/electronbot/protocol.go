@@ -78,25 +78,25 @@ var _ = [1]struct{}{}[imageBytes-robot.ImageBytesRGB888] // imageBytes == 240*24
 
 // buildExtraData 把使能位与 6 轴角度打包为 32 字节 extraData（小端 float32）。
 // 布局：[0]=使能(0/1)，[1+4j .. 4]=第 j 轴角度，共 6 轴占 24 字节。
+//
+// 与官方 SDK 逐字节一致（ElectronBot.DotNet 的 SetJointAngles）：【任何时候都发真实角度】，
+// enable 位只决定舵机上不上扭矩，不影响角度字段。
+//
+// 曾经这里在 enable=false 时把 6 个角度全发 NaN，好让固件的
+//
+//	if (setPoint >= angleMin && setPoint <= angleMax) { TransmitAndReceiveI2cPacket(...) }
+//
+// 恒为假、从而完全跳过舵机 I2C。那是我们自己发明的、官方没有的行为，副作用很致命：舵机长期收不到
+// 任何 setpoint，一旦 enable 由 0 跳到 1，固件立刻上扭矩并给出一个与当前位置相距很远的目标 →
+// 电流尖峰 → 舵机不 ACK → 固件 I2C 是 do{...}while(state != HAL_OK)（无超时无限重试）→ 永久自旋
+// → 不再发 USB 反馈 → 主控硬死（只能断电复位）。官方持续下发 setpoint，舵机始终平滑跟随，没有这个跳变。
 func buildExtraData(angles robot.Joints, enable bool) [extraDataBytes]byte {
 	var b [extraDataBytes]byte
 	if enable {
 		b[0] = 1
-		for j := 0; j < robot.JointCount; j++ {
-			binary.LittleEndian.PutUint32(b[1+4*j:], math.Float32bits(angles[j]))
-		}
-		return b
 	}
-	// 舵机禁用：6 个角度全发 NaN。固件主循环每帧无条件 UpdateJointAngle→UpdateServoAngle，其中
-	//   if (setPoint >= angleMin && setPoint <= angleMax) { TransmitAndReceiveI2cPacket(...) }
-	// 对 NaN 恒为假，于是【完全跳过 I2C 舵机通信】。这是“屏幕跑一会儿就死”的根治：固件 I2C 是
-	//   do { state = HAL_I2C_...(...,5,5); } while (state != HAL_OK);  // 无超时、无限重试
-	// 舵机一旦在负载下(开摄像头抢 USB 供电电流)掉电/不 ACK，固件就永久自旋 → 不再发反馈 → 屏幕冻死。
-	// 不下发 I2C 就永不触发该自旋；屏幕刷新本就不依赖 I2C，照常。NaN 比“超量程大数”更稳——不依赖
-	// 固件内部角度换算结果，比较一定为假。
-	nan := math.Float32bits(float32(math.NaN()))
 	for j := 0; j < robot.JointCount; j++ {
-		binary.LittleEndian.PutUint32(b[1+4*j:], nan)
+		binary.LittleEndian.PutUint32(b[1+4*j:], math.Float32bits(angles[j]))
 	}
 	return b
 }
