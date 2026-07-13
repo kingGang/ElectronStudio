@@ -110,9 +110,11 @@ func main() {
 	}
 	defer a.bot.Close()
 
-	// Ctrl+C 触发优雅关闭。
+	// Ctrl+C 触发优雅关闭。/api/shutdown（仅本机可调）走的也是这个 stop——强杀进程会把固件
+	// 掐死在半帧的 lockstep 里、只能拔电源，所以必须有一条不依赖终端的干净退出路径。
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	a.shutdown = stop
 
 	// 设备驱动循环【最先启动】：真机有“连接后就绪窗口”，必须连上(connectRobot)后尽快
 	// 开始 Sync，否则窗口过期、设备就不再发就绪包(帧首读一直超时)。把它排在 speech/gesture
@@ -180,6 +182,9 @@ type app struct {
 	player      *audioout.Player     // 设备侧 mp3 播放(mpg123 或 macOS playto)
 	ttsToDevice bool                 // 配了 audio_device：TTS 始终定向设备喇叭(与 audio_out 解耦)
 	robotStuck  atomic.Bool          // 设备疑似固件卡死(持续无就绪包，需断电复位)，广播给 UI 提示
+	// shutdown 触发优雅退出（= signal.NotifyContext 的 stop，与 Ctrl+C 同一条路径）。
+	// 由 main 注入；供 /api/shutdown 调用，见 handleShutdown 的注释——强杀会把固件掐死在半帧里。
+	shutdown func()
 	cameraOn    atomic.Bool          // 摄像头当前是否开启(屏幕显示摄像头画面)，上报 status 供前端同步开关
 	wakeCache   map[string][]byte    // 唤醒人声应答缓存(短语→mp3)，第二次起秒回
 	wakeMu      sync.Mutex
@@ -534,8 +539,10 @@ func (a *app) onDriverFrame(rgb []byte) {
 }
 
 // onDriverJoints 周期广播舵机真实角度（驱动统一上报）。
+// 走 BroadcastLossy：这是 10 次/秒的"最新即覆盖"实时量，慢连接上丢旧值无损——若按不可丢消息
+// 处理，它会在镜像帧积压时把客户端顶爆、导致网页被当成慢连接踢掉（表现为镜像卡死）。
 func (a *app) onDriverJoints(j robot.Joints) {
-	a.srv.Broadcast(protocol.JointsEvent{Angles: j, Enabled: true})
+	a.srv.BroadcastLossy(protocol.JointsEvent{Angles: j, Enabled: true})
 }
 
 // setEmotion 切换情绪：更新屏幕画面源、广播情绪、并播放同名动作（若有）。
@@ -569,13 +576,19 @@ func connectRobot(cfg *config.Config, log *slog.Logger) robot.Transport {
 	if mode != "mock" {
 		// 只【探测】设备在不在（列设备，不 open/claim）；真正的 Connect 交给驱动循环，由它
 		// 在连上后【零间隔】立刻 Sync 抢就绪窗口。探测不到则回退 Mock（无真机也能跑）。
-		if electronbot.Probe() {
+		found, err := electronbot.ProbeErr()
+		switch {
+		case found:
 			log.Info("已探测到 ElectronBot，连接交由驱动循环")
 			return electronbot.New(log)
-		}
-		if mode == "electronbot" {
-			log.Warn("指定 electronbot 但未探测到设备，回退 Mock")
-		} else {
+		case err != nil:
+			// libusb 没装 ≠ 设备没插。这两种情况以前打的是同一句"未探测到"，
+			// 于是"机器人插着却连不上"要靠猜。见 docs/ELECTRONBOT.md。
+			log.Warn("libusb 加载失败，真机无法连接，回退 Mock（Windows 上把 libusb-1.0.dll 放到工作目录；run.ps1 会自动下载）",
+				"err", err)
+		case mode == "electronbot":
+			log.Warn("指定 electronbot 但未探测到设备（libusb 正常，总线上没有它）——检查是否插好、驱动是否为 WinUSB")
+		default:
 			log.Info("未探测到 ElectronBot，使用 Mock")
 		}
 	}
@@ -1670,6 +1683,7 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 			TTSEngine:    a.cfg.IO.TTSEngineOr(),
 			ImageOut:     a.cfg.IO.ImageOutOr(),
 			DeviceVolume: a.cfg.IO.DeviceVolumeOr(),
+			ServoEnable:  a.cfg.IO.ServoEnable,
 		},
 		Music:         protocol.MusicStatus{Source: a.cfg.Music.SourceOr(), LoggedIn: a.cfg.Music.SourceOr() == "qq" && a.cfg.Music.QQ.Cookie != ""},
 		Persona:       a.cfg.Persona,
@@ -1708,8 +1722,17 @@ func (a *app) handleSetIO(cmd protocol.SetIOCommand) {
 	if cmd.ImageOut != "" && validIO("image_out", cmd.ImageOut) {
 		a.cfg.IO.ImageOut = cmd.ImageOut
 	}
+	if cmd.ServoEnable != nil {
+		a.cfg.IO.ServoEnable = *cmd.ServoEnable
+	}
 	a.saveConfig()
 	a.cfgMu.Unlock()
+	// 舵机总开关即时生效：驱动下一帧就按新值下发使能位。关→开时线上使能位自然产生
+	// 0→1 跳变，固件据此给舵机上扭矩，无需额外补一次 Reenable 脉冲。
+	if cmd.ServoEnable != nil && a.driver != nil {
+		a.driver.SetServoEnable(*cmd.ServoEnable)
+		a.log.Info("舵机总开关已切换", "on", *cmd.ServoEnable)
+	}
 	a.srv.Broadcast(a.statusSnapshot())
 }
 

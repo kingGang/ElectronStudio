@@ -172,6 +172,24 @@ func (s *Server) BroadcastFrame(frame []byte) {
 	s.hub.broadcast(outMsg{typ: websocket.MessageBinary, data: frame, droppable: true})
 }
 
+// BroadcastLossy 广播一个【高频、最新即覆盖】的事件（如关节角度）：慢连接上可安全丢弃。
+//
+// 【为什么必须有它】：镜像帧 30fps × 172KB ≈ 5MB/s，浏览器一旦跟不上，客户端队列就会积压。
+// 此时若来一条【不可丢弃】的高频事件(关节角度 10 次/秒)，而队首恰好也是它，dropOneDroppable
+// 腾不出位置 → hub 判定"慢连接"直接断开 → 网页掉线重连、镜像看着就是卡死。真机浸泡日志里
+// "客户端发送队列已满，断开慢连接" 每隔几十秒刷一次，就是这么来的。
+//
+// 关节角度和镜像帧一样是"最新即覆盖"的实时量，丢掉旧的毫无损失——它本就不该占着不可丢的名额。
+// 真正不可丢的是状态/对话/错误这类一次性事件（继续走 Broadcast）。
+func (s *Server) BroadcastLossy(p protocol.Payload) {
+	data, err := protocol.Encode(p)
+	if err != nil {
+		s.log.Error("广播编码失败", "type", p.Type(), "err", err)
+		return
+	}
+	s.hub.broadcast(outMsg{typ: websocket.MessageText, data: data, droppable: true})
+}
+
 // Inbound 返回入站命令通道，供上层业务消费。
 // 调用方必须持续读取本通道，否则队列满后入站命令将被丢弃（并记录告警）。
 func (s *Server) Inbound() <-chan Inbound {

@@ -6,6 +6,38 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/robot"
 )
 
+// TestShouldClearHalt 锁死"超时不 clear_halt"这条铁律。
+//
+// 背景（真机代价惨重的一课）：bulk 超时时端点【没有 stall】，此时 clear_halt 会复位两端的数据
+// 翻转位，把固件正在跑的 4 段 lockstep 搞失步 → 它永远等不到 224 尾包 → 无超时自旋 → 主控硬死、
+// 只能断电复位。官方 .NET SDK 超时后只原地重发、从不 clear_halt。唯一例外是 macOS：IOKit 上超时
+// 的传输取消不干净会堵死管道，那是平台缺陷。
+//
+// 任何人想"顺手"把超时也加回 clear_halt 之前，先看这个测试和 shouldClearHalt 的注释。
+func TestShouldClearHalt(t *testing.T) {
+	cases := []struct {
+		name string
+		ret  int32
+		goos string
+		want bool
+	}{
+		{"超时/windows：绝不清(清了必失步→硬死)", errTimeout, "windows", false},
+		{"超时/linux：绝不清", errTimeout, "linux", false},
+		{"超时/darwin：例外，IOKit 会堵死管道", errTimeout, "darwin", true},
+		{"真 stall(PIPE)/windows：该清", errPipe, "windows", true},
+		{"真 stall(PIPE)/darwin：该清", errPipe, "darwin", true},
+		{"掉线：不清", errNoDevice, "windows", false},
+		{"成功：不清", 0, "windows", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := shouldClearHalt(c.ret, c.goos); got != c.want {
+				t.Fatalf("ret=%d goos=%s: 期望 %v 实际 %v", c.ret, c.goos, c.want, got)
+			}
+		})
+	}
+}
+
 // TestSegmentMath 验证分段常量自洽，与整帧字节数一致。
 func TestSegmentMath(t *testing.T) {
 	if segImageBytes != 43008 {

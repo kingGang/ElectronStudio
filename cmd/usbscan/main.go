@@ -106,7 +106,7 @@ func candidateLibs() []string {
 func load() (*libusb, error) {
 	var lastErr error
 	for _, name := range candidateLibs() {
-		h, err := purego.Dlopen(name, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+		h, err := dlopen(name) // 平台相关：Unix 走 purego.Dlopen，Windows 走 LoadLibrary
 		if err != nil {
 			lastErr = err
 			continue

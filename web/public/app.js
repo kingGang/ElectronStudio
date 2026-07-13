@@ -92,18 +92,36 @@
     body: { x: 5, xs: 1 },   // 左右转身
   };
   let m3dDragging = false;   // 正在拖关节：期间忽略服务端回传，避免抖动
+  // 显示用的平滑角度（度）。舵机反馈是【带噪声的模拟量】：机器人完全静止时，电位器/ADC 读数
+  // 仍会在 ±0.5° 上下跳（真机实测：头部俯仰 1.13→0.82→0.50→0.19→0.98），每秒广播 10 次。
+  // 把这种原始值直接灌进模型的旋转角，模型就会一直微微发抖——那不是机器人在抖，是噪声在抖。
+  // 这里只对【显示】做处理，控制链路照旧用原始值。
+  let m3dSmooth = null;
+  const JITTER_DEADBAND = 0.4; // 度：小于这个幅度的变化视为噪声，直接忽略（静止时彻底不动）
+  const JITTER_ALPHA = 0.35;   // 指数平滑系数：越小越稳、越大越跟手。真机运动时肉眼跟不出延迟
   // 按 ElectronBot 官方 RobotController 的轴/符号驱动 6 关节。
   // angles 顺序 = robot.JointNames: [头部俯仰,左臂横滚,左臂俯仰,右臂横滚,右臂俯仰,身体旋转]
   function drive3D(angles) {
     lastJointAngles = angles;
     const j = model3dJoints;
     if (!j || !j.body) return;
-    if (j.head) j.head.rotation.x = angles[0] * D2R;
-    if (j.armRollLeft) j.armRollLeft.rotation.z = angles[1] * D2R;
-    if (j.armPitchLeft) j.armPitchLeft.rotation.x = -angles[2] * D2R;  // 俯仰：手性相反，取负让正角度朝前
-    if (j.armRollRight) j.armRollRight.rotation.z = -angles[3] * D2R;
-    if (j.armPitchRight) j.armPitchRight.rotation.x = -angles[4] * D2R;
-    if (j.body) j.body.rotation.y = angles[5] * D2R;
+    // 死区 + 指数平滑：静止时完全不动，真动起来又能跟上（幅度远大于死区，一两帧就收敛）。
+    if (!m3dSmooth || m3dSmooth.length !== angles.length) {
+      m3dSmooth = angles.slice(); // 首帧直接采用，避免从 0 慢慢爬过去
+    } else {
+      for (let i = 0; i < angles.length; i++) {
+        const d = angles[i] - m3dSmooth[i];
+        if (Math.abs(d) < JITTER_DEADBAND) continue;         // 噪声：忽略
+        m3dSmooth[i] += d * JITTER_ALPHA;                    // 真运动：平滑跟随
+      }
+    }
+    const a = m3dSmooth;
+    if (j.head) j.head.rotation.x = a[0] * D2R;
+    if (j.armRollLeft) j.armRollLeft.rotation.z = a[1] * D2R;
+    if (j.armPitchLeft) j.armPitchLeft.rotation.x = -a[2] * D2R;  // 俯仰：手性相反，取负让正角度朝前
+    if (j.armRollRight) j.armRollRight.rotation.z = -a[3] * D2R;
+    if (j.armPitchRight) j.armPitchRight.rotation.x = -a[4] * D2R;
+    if (j.body) j.body.rotation.y = a[5] * D2R;
   }
   // ARM_DONOR：手臂从哪个模型取。精英版自带的是短粗款，换成经典版的细长手臂。
   // 两个 glb 共用同一套骨架(armRoll*/armPitch*)和同一世界坐标——身体/头的包围盒逐位相同，
@@ -681,6 +699,16 @@
     if (vol && typeof io.device_volume === 'number' && io.device_volume > 0) {
       vol.value = io.device_volume; if (volv) volv.textContent = io.device_volume;
     }
+    const servo = $('io-servo_enable');
+    if (servo && typeof io.servo_enable === 'boolean') {
+      servo.checked = io.servo_enable;
+      renderServoNote(io.servo_enable);
+    }
+  }
+  // 舵机总开关的说明文案：关时提示可手动摆姿，开时提示已上扭矩。
+  function renderServoNote(on) {
+    const n = $('io-servo_enable-note');
+    if (n) n.textContent = on ? '开：舵机已上扭矩，可执行动作' : '关：不上扭矩，可手动摆姿';
   }
   // 音色区可见性：仅 MiniMax/OpenAI 引擎可选音色；小智/本地引擎给一句说明，不再空着像坏了。
   function curEngine() { const e = $('io-tts_engine'); return e ? e.value : 'minimax'; }
@@ -741,6 +769,31 @@
     if (vol) {
       vol.addEventListener('input', () => { if (volv) volv.textContent = vol.value; });
       vol.addEventListener('change', () => { send(CliType.SetVolume, { volume: parseInt(vol.value, 10) }); toast('设备音量 = ' + vol.value); });
+    }
+    // 舵机总开关：勾选即时下发（后端落盘 + 驱动下一帧生效）。开时提醒确认舵机 I²C 已通，
+    // 否则主控固件会因对舵机无限重试而卡死整机（见 config.IO.ServoEnable 注释）。
+    const servo = $('io-servo_enable');
+    if (servo) {
+      servo.addEventListener('change', () => {
+        send(CliType.SetIO, { servo_enable: servo.checked });
+        renderServoNote(servo.checked);
+        toast(servo.checked ? '舵机已上扭矩（若舵机 I²C 未通，整机可能卡死）' : '舵机已卸力，可手动摆姿');
+      });
+    }
+    // 安全退出：走 /api/shutdown（仅本机可调）→ 与 Ctrl+C 同一条优雅退出路径：驱动把手上这一帧
+    // Sync 完整走完，再关设备。直接结束进程会把传输掐断在半帧中间，固件永久自旋、只能拔电源。
+    const shut = $('btn-shutdown');
+    if (shut) {
+      shut.addEventListener('click', async () => {
+        if (!confirm('关闭程序？会先把机器人安全断开（等当前帧发完），然后退出。')) return;
+        shut.disabled = true;
+        try {
+          const r = await fetch('/api/shutdown', { method: 'POST' });
+          toast(r.ok ? '正在安全退出…机器人已干净断开' : '退出失败：' + (await r.text()));
+        } catch (e) {
+          toast('正在安全退出…'); // 服务已关掉，连接被断开是预期的
+        }
+      });
     }
     // 使用场景预设：一键设 audio_in + audio_out。
     document.querySelectorAll('input[name="io-scene"]').forEach((r) => {

@@ -39,6 +39,33 @@ func TestCameraReadFrames(t *testing.T) {
 	}
 }
 
+// TestFFmpegFilter 验证滤镜链：rotate/mirror 必须真的进 -vf（此前只有 macOS 那条路认，
+// ffmpeg 这条路把它们丢了，配了没反应），且顺序为「先旋转、再镜像、最后缩放」。
+func TestFFmpegFilter(t *testing.T) {
+	cases := []struct {
+		name   string
+		rotate int
+		mirror bool
+		want   string
+	}{
+		{"不转不翻", 0, false, "scale=240:240"},
+		{"顺时针90", 90, false, "transpose=1,scale=240:240"},
+		{"180", 180, false, "transpose=1,transpose=1,scale=240:240"},
+		{"顺时针270", 270, false, "transpose=2,scale=240:240"},
+		{"仅镜像", 0, true, "hflip,scale=240:240"},
+		{"先转后翻", 90, true, "transpose=1,hflip,scale=240:240"},
+		{"负角度归一", -90, false, "transpose=2,scale=240:240"},
+		{"非法角度当0", 45, false, "scale=240:240"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ffmpegFilter(c.rotate, c.mirror, 240, 240); got != c.want {
+				t.Fatalf("rotate=%d mirror=%v: 期望 %q 实际 %q", c.rotate, c.mirror, c.want, got)
+			}
+		})
+	}
+}
+
 // TestCompositorCameraPriority 验证：开启摄像头后优先取摄像头帧。
 func TestCompositorCameraPriority(t *testing.T) {
 	cam := NewCameraSource(nil)

@@ -218,6 +218,9 @@ type SetIOCommand struct {
 	AudioOut  string `json:"audio_out,omitempty"`
 	TTSEngine string `json:"tts_engine,omitempty"`
 	ImageOut  string `json:"image_out,omitempty"`
+	// ServoEnable 用指针：舵机总开关的 false 是有意义的取值（关扭矩），
+	// 不能与"本次命令没带这个字段"混为一谈，故 nil 才表示不改动。
+	ServoEnable *bool `json:"servo_enable,omitempty"`
 }
 
 // Type 实现 Payload。

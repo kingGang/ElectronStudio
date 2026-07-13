@@ -67,10 +67,19 @@ const (
 	segStride       = segImageBytes + tailImageBytes  // 每段图像总长 = 43200
 	imageBytes      = segments * segStride            // 整帧图像 = 172800
 
-	readTimeoutMs  = 5000 // 读 32 字节就绪/反馈包的超时（对照官方 ReceivePacket 的 5000ms）。
-	                      // 必须足够长：读发生在每段图像之前，中途超时会让该帧只写一半 → 设备花屏。
-	                      // 设备 Sync 已与 UI 解耦于独立 goroutine，长超时不拖累网页镜像帧率。
-	writeTimeoutMs = 2000 // 写 bulk 包的超时（对照官方 TransmitPacket）
+	// readTimeoutMs：【首帧】读 32 字节就绪包的超时（对照官方 ReceivePacket 的 5000ms）。
+	// 刚连上时设备可能还没进入收发循环（连接后就绪窗口），必须等足，绝不能提前放弃。
+	readTimeoutMs = 5000
+	// readTimeoutSteadyMs：【稳态】读请求包的超时。跑起来之后设备每 ~8ms 就发一个请求包
+	// （30fps × 4 段），迟迟不来基本就是这个包被同一 hub 上的等时音频流挤掉了——此时越早认定
+	// "丢了、直接发图接回 lockstep"越好（见 bulkRetry）。
+	//
+	// 【为什么不沿用 5000】：官方之所以敢用 5s，是因为它超时后无限重读、根本不指望自愈；而我们
+	// 靠超时来【判定丢包】，5s 就意味着每丢一个包，整个同步循环白等 5 秒——设备屏和网页镜像
+	// 一起冻住 5 秒。真机浸泡：10 分钟触发 15 次，等于每 40 秒卡一下 5 秒，肉眼非常明显。
+	// 500ms 已是正常响应时延(~8ms)的 60 倍余量，既不会误判，卡顿也降到几乎无感。
+	readTimeoutSteadyMs = 500
+	writeTimeoutMs      = 2000 // 写 bulk 包的超时（对照官方 TransmitPacket）
 )
 
 // 编译期校验：整帧字节数须与屏幕尺寸及通用常量一致。

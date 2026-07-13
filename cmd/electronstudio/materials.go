@@ -24,6 +24,7 @@ import (
 	"image/png"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -45,6 +46,41 @@ const (
 	videoTimeout      = 90 * time.Second // ffmpeg 抽帧超时，防异常输入卡死
 )
 
+// handleShutdown 触发【优雅退出】：走的是与 Ctrl+C 完全相同的路径——取消根 ctx →
+// 驱动把手上这一帧 Sync 完整走完 → 再关闭设备（见 main 里那串 defer 的注释）。
+//
+// 【为什么需要它】：固件的一帧是 4 段严格 lockstep、收发全是无超时自旋。进程被【强杀】
+// （Stop-Process -Force / 任务管理器结束进程 / 崩溃）时，传输断在半帧中间，MCU 就永远停在
+// while(receivedPacketLen != 224) 上等那个再也不会来的尾包 → 主控硬死，只能拔电源放电。
+// TerminateProcess 不可捕获，defer 一行都不会跑——所以【必须有一条不依赖信号的干净退出路径】，
+// 否则想安全地停掉程序，就只能去翻那个跑着它的终端窗口按 Ctrl+C。
+//
+// 【只允许回环地址】：服务默认监听 0.0.0.0，同一局域网里任何人都能打到这个接口。一个能远程
+// 杀进程的裸接口是不可接受的，故在这里按 RemoteAddr 硬性拒绝非本机来源。
+func (a *app) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "仅支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || !net.ParseIP(host).IsLoopback() {
+		a.log.Warn("拒绝非本机的退出请求", "from", r.RemoteAddr)
+		http.Error(w, "仅允许本机调用", http.StatusForbidden)
+		return
+	}
+	if a.shutdown == nil {
+		http.Error(w, "退出未就绪", http.StatusServiceUnavailable)
+		return
+	}
+	a.log.Info("收到优雅退出请求，正在收工（等当前帧 Sync 完再关设备）")
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"ok":true}`))
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush() // 先把响应吐给调用方，再动手停服务（否则连接会被一起关掉、调用方看到的是"连接重置"）
+	}
+	go a.shutdown()
+}
+
 // videoExts 是服务端 ffmpeg 抽帧支持的视频扩展名（直接 POST 原始视频到 /api/materials 时用，可选）。
 // 注意：前端 UI 的视频走「浏览器抽帧 → /api/material-frames」，不需要 ffmpeg。
 var videoExts = map[string]bool{
@@ -53,6 +89,7 @@ var videoExts = map[string]bool{
 
 // materialRoutes 在 HTTP mux 上挂载素材管理的 REST 接口。
 func (a *app) materialRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/shutdown", a.handleShutdown) // 优雅退出（仅回环地址可调）
 	mux.HandleFunc("/api/materials", a.handleMaterialUpload)
 	mux.HandleFunc("/api/material-frames", a.handleMaterialFrames)
 	mux.HandleFunc("/api/material-thumb", a.handleMaterialThumb)

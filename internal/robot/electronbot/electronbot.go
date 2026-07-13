@@ -84,11 +84,29 @@ func loadLibusb() (*libusbAPI, error) {
 // 【绝不 open/claim】，因此不会触发设备的“连接后就绪窗口”。真正的 Connect（首次 open）
 // 留给驱动循环做——只有进程的首次 open 才能可靠命中就绪窗口（实测：connectRobot 若先
 // open 一次会“用掉”首次机会，之后驱动里的重连很难再命中）。
-func Probe() bool {
+// ProbeErr 与 Probe 相同，但把"libusb 根本没装"和"设备没插/没枚举"区分开。
+//
+// 【为什么要分开】：以前两者都只是 return false，上层统一打一句"未探测到 ElectronBot，使用 Mock"。
+// 于是 libusb 缺失（Windows 上 libusb-1.0.dll 不在工作目录/PATH）时，现象是"机器人插着、驱动
+// 也正常，程序却说没探测到"，日志里一个字的线索都没有——真机排查时这一步能吃掉好几个小时。
+func ProbeErr() (bool, error) {
 	lib, err := loadLibusb()
-	if err != nil || lib.Init(0) != 0 {
-		return false
+	if err != nil {
+		return false, err // libusb 没装：这是【环境问题】，不是"设备没插"
 	}
+	if lib.Init(0) != 0 {
+		return false, fmt.Errorf("electronbot: libusb 初始化失败")
+	}
+	return probeWith(lib), nil
+}
+
+func Probe() bool {
+	ok, _ := ProbeErr()
+	return ok
+}
+
+// probeWith 用已加载的 libusb 扫一遍总线，看有没有受支持的设备。
+func probeWith(lib *libusbAPI) bool {
 	defer lib.Exit(0)
 
 	var listPtr unsafe.Pointer
@@ -133,6 +151,10 @@ type Device struct {
 	// closing 由 Close 置位：让"永不放弃"的读握手在重试间隙尽快退出、释放 mu，
 	// 否则设备停发就绪包时优雅退出会被卡死（读不返回→mu 不放→Close 死等）。
 	closing atomic.Bool
+	// everSynced：本次连接是否已经成功跑通过至少一帧。首帧要死等设备进入收发循环（连接后就绪
+	// 窗口），此时 IN 读超时【不能】当作"请求包丢了"去发图，否则一上来就把它搞错位。跑通一帧后
+	// 才启用 IN 读超时的 lockstep 自愈（见 bulkRetry）。
+	everSynced atomic.Bool
 	speed   string // USB 连接速度，如 "USB 2.0"/"USB 3.0"（连接时读取，供 UI 展示）
 	// pipeRecover：累计被 clear_halt 原地恢复的 PIPE 停滞次数。macOS libusb 瞬时故障的诊断计数——
 	// 节流打印，证明“跑一会儿就死”的真凶已被无损拦截(而非把设备搞掉线)。
@@ -143,6 +165,8 @@ type Device struct {
 	feedbackLost atomic.Uint64
 	// zlpLost：累计写失败的零长包次数（不重试、按已送达继续，见 bulkWriteZLPBestEffort）。
 	zlpLost atomic.Uint64
+	// writeAssumed：累计"数据包报告成功但 transferred=0"的写（同样不重发、按已送达继续，见 bulkRetry）。
+	writeAssumed atomic.Uint64
 
 	image []byte               // 整帧图像缓冲（240×240×3），跨 Sync 保留
 	extra [extraDataBytes]byte  // 待下发的 extraData（使能 + 舵机设定）
@@ -203,6 +227,7 @@ func (d *Device) Connect() error {
 	d.lib = lib
 	d.handle = handle
 	d.speed = speedString(lib.GetDeviceSpeed(lib.GetDevice(handle))) // USB 连接速度(2.0/3.0)，供 UI 展示
+	d.everSynced.Store(false)                                        // 新连接：首帧重新按"死等就绪窗口"处理
 	d.connected.Store(true)
 	d.log.Info("ElectronBot 已连接", "name", dev.name, "vid", dev.vid, "pid", dev.pid, "速度", d.speed)
 	return nil
@@ -235,24 +260,30 @@ func (d *Device) Speed() string {
 	return d.speed
 }
 
-// Reset 对设备做一次 USB 端口级复位（软重启其 USB 栈），用于解开固件卡死/失步态而
-// 无需物理拔插。复位后设备通常会重新枚举（NOT_FOUND），此时自动重连。
-func (d *Device) Reset() error {
-	d.mu.Lock()
-	lib, h := d.lib, d.handle
-	d.mu.Unlock()
-	if lib == nil || h == 0 {
-		return fmt.Errorf("electronbot: 未连接，无法复位")
-	}
-	if ret := lib.ResetDevice(h); ret == 0 {
-		d.log.Info("设备已软复位（handle 仍有效）")
-		return nil
-	}
-	// 复位导致重新枚举：清理旧 handle 后重连。
-	d.log.Info("设备软复位后重新枚举，重连中…")
-	_ = d.Close()
-	return d.Connect()
-}
+// 【固件被掐死在半帧里，只能断电复位——两条"免拔电源"的自愈路都试过了，都不成立】
+//
+// 症状：上一个进程被【强杀】（Stop-Process -Force / 任务管理器 / 崩溃）时，Close() 的优雅退出
+// 没机会跑，传输断在半帧中间。固件收帧是无超时自旋——
+//
+//	ReceiveUsbPacketUntilSizeIs: while (usbBuffer.receivedPacketLen != _count);  // 死等主机发完这一帧
+//
+// ——于是它永远停在那句 while 上等剩下的数据，不再发请求包。之后任何进程连上去都是"连上后第一次
+// IN 读就超时"（首帧就超时 = 设备带着旧伤，不是本次运行搞坏的，据此可一眼区分）。
+//
+// 试过的两条路（2026-07-13 真机实测，都别再走）：
+//
+//  1. libusb_reset_device（USB 端口级复位）：复位确实执行了（返回 0），之后 IN 读照样全部超时。
+//     它只重置设备的 USB 外设/端口状态，而固件卡在【应用主循环】的 while 里，那个循环压根不看
+//     USB 复位事件，receivedPacketLen 也不会因此改变。
+//
+//  2. 盲发一整帧把它"喂饱"（4 段 × (84×512+ZLP) + 224 尾包，不读反馈）：看起来成功了——IN 读
+//     恢复、零重试、Sync 不再报错。但设备其实是【僵尸】：屏幕不再刷新、6 轴反馈恒为精确的 0.00
+//     （正常应带 ±0.5° 的电位器噪声）。它把一个"会明确报错、会提示用户断电"的故障，变成了
+//     "看着一切正常、实际全死"的静默故障——比原来的问题更危险，故已回滚。
+//
+// 结论：固件真卡死就只能断电（拔线 ≥15 秒放净电容）。传输层的职责是【如实报错】，让驱动去提示
+// 用户，而不是假装自己救回来了。真正该做的是【别把它掐死】——优雅退出(Ctrl+C → Close 等当前帧
+// 走完)是安全的，强杀不是。
 
 // SetImage 实现 robot.Transport：设置下一帧画面（RGB888，240×240）。
 func (d *Device) SetImage(rgb888 []byte) error {
@@ -286,9 +317,36 @@ const errNoDevice = -4 // LIBUSB_ERROR_NO_DEVICE
 // 清掉停滞后【重试】该传输，而非当掉线去 reopen（reopen 的 churn 会把固件彻底搞掉线）。
 const errPipe = -9 // LIBUSB_ERROR_PIPE
 
-// errTimeout：LIBUSB_ERROR_TIMEOUT。macOS 上超时的传输取消得不干净，会把整条管道堵住（后续传输
-// 全部跟着超时），所以遇到它也要 clear_halt 把管道捞回来——不能只是原地重发。
+// errTimeout：LIBUSB_ERROR_TIMEOUT。传输没在期限内完成——【但端点并没有 stall】。
 const errTimeout = -7
+
+// shouldClearHalt 判断某个 bulk 错误码该不该 clear_halt。
+//
+// 【超时不是 stall，超时后 clear_halt 会把设备搞死】。libusb_clear_halt 发的是
+// CLEAR_FEATURE(ENDPOINT_HALT)，它会把主机与设备两侧的【数据翻转位(data toggle)】一并复位。
+// 端点真 stall(PIPE) 时这是标准动作；但 bulk 超时时端点根本没坏，只是这次传输没按时完成
+// （MCU 正忙着刷 LCD，或被同一 hub 上 USB 声卡的等时流挤了一下——本机实测：麦克风关掉后
+// 3 分钟零重试，48kHz 开着 37 次、16kHz 开着 13 次，重试次数与音频码率成正比）。
+//
+// 此时复位 toggle，固件那台正处在 4 段 lockstep 中途的状态机就与主机对不上了：后续包要么被
+// 设备当重复包丢弃、要么被重复接收，rxDataOffset 就此错位，再也等不到那个"长度=224"的尾包
+// → 无超时自旋 → 主控硬死，只能断电复位。于是一次【本可恢复】的超时被我们亲手变成了永久失步。
+//
+// 官方 .NET SDK(maker-community/ElectronBot.DotNet 的 TransmitPacket/ReceivePacket)超时后
+// 只是【原地重发同一个包】，clear_halt 一次都不调、ResetDevice 在新固件那条路里也被注释掉了。
+// 那才是对的：设备迟早会把请求包发出来，重发即可接上。
+//
+// 唯一的例外是 macOS：IOKit 上超时的传输取消得不干净，会把整条管道堵死（一个 ZLP 超时后紧接着
+// 每个 512 数据包都超时，端点整整死 12 秒），那是平台缺陷，只能靠 clear_halt 捞回来。
+func shouldClearHalt(ret int32, goos string) bool {
+	switch ret {
+	case errPipe:
+		return true // 端点真 stall：任何平台都该清
+	case errTimeout:
+		return goos == "darwin" // 只有 macOS 的超时会堵死管道；别处清了反而把固件搞失步
+	}
+	return false
+}
 
 // syncBackstop：单次 bulk 传输的“真卡死”兜底时长。远大于任何 macOS libusb 瞬时故障(PIPE停滞/单次
 // 超时，至多数秒)，正常与瞬时故障下永不命中；命中即认定固件真卡死，交上层复位并提示断电。
@@ -306,6 +364,10 @@ func (d *Device) Sync() error {
 		return fmt.Errorf("electronbot: 未连接")
 	}
 	err := d.syncFrame()
+	if err == nil {
+		// 首帧跑通：设备已进入收发循环，之后 IN 读超时可按"请求包丢了"自愈（见 bulkRetry）。
+		d.everSynced.Store(true)
+	}
 	if errors.Is(err, errDeviceLost) {
 		d.teardownLocked() // 设备没了：释放死 handle，置未连接（Connect 可重新打开）
 	}
@@ -452,12 +514,13 @@ func (d *Device) bulkWriteZLPBestEffort(ep uint8) error {
 		return errDeviceLost
 	}
 	if ret != 0 {
-		// 超时的传输在 macOS/IOKit 上取消得不干净，会把整条 OUT 管道堵住——真机日志：一个 ZLP 超时后
-		// 【紧接着每一个 512 数据包都超时】，端点整整死了 12 秒。clear_halt 会中止管道上残留的传输
-		// 并复位两端的数据翻转位，是把它捞回来的标准动作。
-		d.lib.ClearHalt(d.handle, ep)
+		// 同 bulkRetry：超时【不】clear_halt——复位 toggle 会让固件的 lockstep 失步、硬死。
+		// 仅真 stall(PIPE) 才清；macOS 的超时是平台缺陷，例外处理。见 shouldClearHalt。
+		if shouldClearHalt(ret, runtime.GOOS) {
+			d.lib.ClearHalt(d.handle, ep)
+		}
 		if n := d.zlpLost.Add(1); n%50 == 1 { // 节流打印：只在第 1、51、101… 次报
-			d.log.Warn("零长包写失败，已 clear_halt 清管道并按已送达继续", "ret", ret, "累计", n)
+			d.log.Warn("零长包写失败，按已送达继续", "ret", ret, "累计", n)
 		}
 	}
 	return nil
@@ -468,8 +531,14 @@ func (d *Device) bulkWriteExact(ep uint8, p []byte) error {
 	return d.bulkRetry(ep, uintptr(unsafe.Pointer(&p[0])), int32(len(p)), writeTimeoutMs)
 }
 
+// bulkReadExact 读请求/反馈包。首帧用长超时死等设备进入收发循环；跑通之后改用短超时——
+// 稳态下超时即判定"请求包已丢"，等得越久，同步循环白冻的时间就越长（见 readTimeoutSteadyMs）。
 func (d *Device) bulkReadExact(ep uint8, p []byte) error {
-	return d.bulkRetry(ep, uintptr(unsafe.Pointer(&p[0])), int32(len(p)), readTimeoutMs)
+	timeout := uint32(readTimeoutMs)
+	if d.everSynced.Load() {
+		timeout = readTimeoutSteadyMs
+	}
+	return d.bulkRetry(ep, uintptr(unsafe.Pointer(&p[0])), int32(len(p)), timeout)
 }
 
 // bulkRetry 执行一次 bulk 传输并按官方语义【无限原地重试】，直到读/写满 length、确实掉线或正在关闭。
@@ -507,6 +576,47 @@ func (d *Device) bulkRetry(ep uint8, ptr uintptr, length int32, timeoutMs uint32
 		if ep&0x80 != 0 && ret == 0 && transferred == 0 && length > 0 {
 			return errFeedbackLost
 		}
+		// 【同一个丢包，在 Windows 上表现为超时而非零长读】。上面那条只认 macOS 的表现形式
+		// (ret=0/transferred=0)，于是 Windows 上这条自愈路径从未被触发，直接掉进死局：
+		//
+		//	设备：请求包已交给 USB 核心 → TxState 清零 → 往下走 → 卡在 ReceiveUsbPacketUntilSizeIs(224) 等我们发图
+		//	主机：请求包被同一 hub 上 USB 声卡的等时流挤掉了 → 读不到 → 按"没收到"重读
+		//	→ 它不会再发、我们不会去写，两边对着干瞪眼 → 12s 兜底判死 → 断电复位
+		//
+		// 真机实锤：卡死前的重试【无一例外全在 IN 端点(0x81)】，OUT 写从来没失败过——就是"设备
+		// 不再发请求包"这一种死法。麦克风关掉后 3 分钟零重试；48kHz 开着 37 次、16kHz 开着 13 次，
+		// 重试次数与音频码率成正比，正是等时流挤掉 IN 包的指纹。
+		//
+		// 所以 IN 读超时也按"请求包已丢、设备正在等图"处理，直接接回 lockstep。代价只是这一帧沿用
+		// 上一帧的关节反馈；而原地重读的代价是 100% 必死。
+		//
+		// 【但连上后的第一帧例外】：那时设备可能还没进入收发循环（连接后就绪窗口），此刻贸然发图会
+		// 让它一上来就错位。首帧仍按官方语义死等到底，只有跑通过至少一帧之后才启用这条自愈。
+		if ep&0x80 != 0 && ret == errTimeout && length > 0 && d.everSynced.Load() {
+			return errFeedbackLost
+		}
+		// 【OUT 端点上"传输成功、却一个字节都没写出去"】——与 IN 的零长读完全对称，同样【绝不能重发】。
+		//
+		// WinUSB 已经把这个包交给了主机控制器，设备多半已经收到，只是完成状态被回报成了 0 字节
+		// （同一 hub 上 USB 声卡的等时流一挤就会出现）。此时重发，设备的 rxDataOffset 就多走一个包
+		// → 它再也等不到那个"长度=224"的尾包 → 无超时自旋 → 主控硬死、只能断电复位。
+		//
+		// 真机实锤（14:26 那次浸泡）：
+		//
+		//	bulk 重试 ep=0x1 ret=0 transferred=0/512   ← 零长写，我们重发了
+		//	bulk 重试 ep=0x1 ret=-7 × 6                 ← 紧接着 OUT 上所有写全部超时
+		//	兜底超时 → 断开 → 固件死
+		//
+		// 按已送达继续，代价至多是这一段图错一个包（512B≈170 像素，屏幕闪一下），而且下一个 224
+		// 尾包会把 offset 归零自动复原。这与 bulkWriteZLPBestEffort 对零长包的处置是同一个道理，
+		// 只是那里只覆盖了 ZLP，漏了数据包本身。
+		if ep&0x80 == 0 && ret == 0 && transferred == 0 && length > 0 {
+			if n := d.writeAssumed.Add(1); n%50 == 1 { // 节流打印：第 1、51、101… 次报
+				d.log.Warn("数据包零长写(报告成功但 0 字节)，按已送达继续——重发会让固件失步硬死",
+					"length", length, "累计", n)
+			}
+			return nil
+		}
 		// 每一次重试都记账。【失步只可能从这里发生】：一次没送达/送了两遍的写，就会让固件的
 		// rxDataOffset 错位、再也等不到那个"长度=224"的尾包 → 无超时自旋 → 主控硬死。所以要能看见
 		// 卡死【之前】到底重试过什么(尤其是 OUT 端点的写)，否则只能靠猜。前若干次打全量细节。
@@ -515,14 +625,10 @@ func (d *Device) bulkRetry(ep uint8, ptr uintptr, length int32, timeoutMs uint32
 			d.log.Warn("bulk 重试", "序号", n, "ep", fmt.Sprintf("0x%x", ep), "ret", ret,
 				"transferred", transferred, "length", length)
 		}
-		// 【超时也要清管道】。以前只在 PIPE(-9) 时 clear_halt，超时(-7) 直接原地重发——但 macOS/IOKit
-		// 上超时的传输取消得不干净，会把整条管道堵死：真机日志里一个 ZLP 超时之后，紧接着【每一个 512
-		// 数据包都超时】，OUT 端点整整死了 12 秒，最后兜底超时 → reopen → 固件硬死。clear_halt 会中止
-		// 管道上残留的传输、并复位两端的数据翻转位，是把卡住的端点捞回来的标准动作。
-		if ret == errTimeout || ret == errPipe {
+		if shouldClearHalt(ret, runtime.GOOS) {
 			d.lib.ClearHalt(d.handle, ep)
 			if n := d.pipeRecover.Add(1); n%200 == 0 {
-				d.log.Info("管道停滞/超时已 clear_halt 原地恢复(若是旧代码这些早把设备搞死了)", "累计次数", n)
+				d.log.Info("管道停滞已 clear_halt 原地恢复", "累计次数", n)
 			}
 		}
 		// 其余(超时/短读等)一律原地重试，绝不中途放弃——否则把固件卡死。

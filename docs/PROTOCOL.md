@@ -60,10 +60,13 @@
               { "id": "ollama:qwen2.5", "name": "Qwen2.5", "provider": "ollama" },
               { "id": "openai:gpt-4o",  "name": "GPT-4o",  "provider": "openai" } ] }
 }}
-// status.payload 另含 io: { audio_in, audio_out, tts_engine, image_out, device_volume(0~100) }。
+// status.payload 另含 io: { audio_in, audio_out, tts_engine, image_out, device_volume(0~100),
+//   servo_enable(bool，舵机总开关：false 时不上扭矩、可手动摆姿) }。
 // 另含 camera(bool，是否配置摄像头) / camera_on(bool，当前是否开启，前端据此同步切换按钮)。
 // 设置类命令（前端→后端，设置页用，均即时落盘并广播新 status）：
-//   set_io { audio_in/audio_out/tts_engine/image_out }
+//   set_io { audio_in/audio_out/tts_engine/image_out/servo_enable }
+//     servo_enable 是 bool 且省略即不改动（false 有意义），其余为字符串、空串即不改动。
+//     切换 servo_enable 即时生效：驱动下一帧按新值下发使能位，无需重启。
 //   set_device { persona, persona_source, voice }
 //   set_volume { volume: 0~100 }    // 设备扬声器音量（macOS 经 playto 设 USB 声卡）
 

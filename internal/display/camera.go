@@ -6,10 +6,34 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/kingGang/ElectronStudio/internal/robot"
 )
+
+// ffmpegFilter 拼出送屏前的滤镜链：先按 rotate 转正、再按 mirror 左右翻，最后缩放到屏幕尺寸。
+// 顺序与 macOS 进程内采集(incam_darwin.m：先旋转后镜像)一致，两条路出图才一样。
+//
+// 之所以要旋转：精英版把摄像头模组横着装进头里，出图天生躺倒（初代是正装的，rotate=0 即可）。
+// 此前 rotate/mirror 只在 macOS 的进程内采集里生效，ffmpeg 这条路（Windows/Linux/树莓派）
+// 压根没接，配了也没反应。
+func ffmpegFilter(rotate int, mirror bool, w, h int) string {
+	var vf []string
+	switch ((rotate % 360) + 360) % 360 {
+	case 90: // 顺时针 90°
+		vf = append(vf, "transpose=1")
+	case 180:
+		vf = append(vf, "transpose=1", "transpose=1")
+	case 270: // 顺时针 270° = 逆时针 90°
+		vf = append(vf, "transpose=2")
+	}
+	if mirror {
+		vf = append(vf, "hflip")
+	}
+	vf = append(vf, fmt.Sprintf("scale=%d:%d", w, h))
+	return strings.Join(vf, ",")
+}
 
 // CameraConfig 配置摄像头采集（由 ffmpeg 抓取 UVC 摄像头并缩放为 240×240 RGB24）。
 type CameraConfig struct {
@@ -106,7 +130,15 @@ func (c *CameraSource) Start(ctx context.Context, cfg CameraConfig) error {
 		if ffmpeg == "" {
 			ffmpeg = "ffmpeg"
 		}
-		args := []string{"-loglevel", "error", "-f", cfg.InputFormat}
+		// -fflags nobuffer：别为了平滑而攒帧，采到就吐（真正的丢旧帧在 pumpPipe 里做）。
+		//
+		// 【别加 -flags low_delay】：它是解码器标志，对 dshow 原始采集无意义，而且真机上会让
+		// dshow 直接报 "Could not set video options" → I/O error，摄像头根本起不来。
+		args := []string{
+			"-loglevel", "error",
+			"-fflags", "nobuffer",
+			"-f", cfg.InputFormat,
+		}
 		// avfoundation 等需要在 -i 前指定支持的分辨率/帧率，否则报 Input/output error。
 		if cfg.Framerate != "" {
 			args = append(args, "-framerate", cfg.Framerate)
@@ -116,7 +148,7 @@ func (c *CameraSource) Start(ctx context.Context, cfg CameraConfig) error {
 		}
 		args = append(args,
 			"-i", cfg.Input,
-			"-vf", fmt.Sprintf("scale=%d:%d", scrW, scrH),
+			"-vf", ffmpegFilter(cfg.Rotate, cfg.Mirror, scrW, scrH),
 			"-pix_fmt", "rgb24",
 			"-f", "rawvideo", "-",
 		)
@@ -134,11 +166,17 @@ func (c *CameraSource) Start(ctx context.Context, cfg CameraConfig) error {
 	c.cmd = cmd
 	c.running = true
 	if cfg.ScreenMode {
-		c.pipe = stdout // 屏幕模式：不起并发读帧 goroutine，交给设备同步 owner 串行 ReadFrame
+		// 屏幕模式：起一个【只读管道】的泵，把最新一帧放进 1 格 channel（丢旧补新），
+		// ReadFrame 从 channel 取——见 pumpPipe 的注释，这是画面延迟的根治。
+		c.pipe = stdout
+		c.frameCh = make(chan []byte, 1)
+		c.done = make(chan struct{})
 	}
 	c.mu.Unlock()
 
-	if !cfg.ScreenMode {
+	if cfg.ScreenMode {
+		go c.pumpPipe(stdout)
+	} else {
 		go c.readFrames(stdout)
 	}
 	go func() {
@@ -158,45 +196,43 @@ func (c *CameraSource) Start(ctx context.Context, cfg CameraConfig) error {
 // 拉到的帧同时存为 latest 供 Snapshot（vision 抓帧）。流结束/已停返回 nil。
 func (c *CameraSource) ReadFrame() []byte {
 	c.mu.Lock()
-	inproc := c.inproc
 	ch := c.frameCh
 	done := c.done
-	p := c.pipe
-	if len(c.rbuf) != robot.ImageBytesRGB888 {
-		c.rbuf = make([]byte, robot.ImageBytesRGB888)
-	}
-	buf := c.rbuf
 	c.mu.Unlock()
 
-	if inproc {
-		// 进程内采集:阻塞等下一帧回调(pushInprocFrame 已存好 latest)。Stop 关 done 即解阻塞返回 nil。
-		if ch == nil {
-			return nil
-		}
-		select {
-		case frame := <-ch:
-			return frame
-		case <-done:
-			return nil
-		}
-	}
-
-	if p == nil {
+	// 两种采集后端（macOS 进程内 AVFoundation / 各平台 ffmpeg 子进程）现在都通过同一个
+	// 1 格「丢旧补新」channel 供帧，故取帧路径统一：阻塞等下一帧，Stop 关 done 即解阻塞返回 nil。
+	if ch == nil {
 		return nil
 	}
-	if _, err := io.ReadFull(p, buf); err != nil {
-		return nil // 流结束或进程退出（Stop 关管道即从这里解阻塞）
+	select {
+	case frame := <-ch:
+		return frame
+	case <-done:
+		return nil
 	}
-	out := make([]byte, len(buf))
-	copy(out, buf)
-	c.mu.Lock()
-	if len(c.latest) != len(buf) {
-		c.latest = make([]byte, len(buf))
+}
+
+// pumpPipe 把 ffmpeg 的裸帧流泵进「丢旧补新」的 1 格 channel（ScreenMode 专用）。
+//
+// 【为什么必须有它——画面延迟的根治】：以前 ReadFrame 直接 io.ReadFull(管道)，而管道是 FIFO，
+// 每次取到的是【最老】的一帧。ffmpeg 以摄像头固有帧率生产（这台 UVC 只支持 30fps，改不了），
+// 而 USB 同步实测只能消费约 17fps——多出来的帧就在 ffmpeg 内部队列和管道里排队，积压稳定之后
+// 画面恒定滞后一整个队列深度：人动了，屏幕要过好几百毫秒才跟上，而且【永远追不回来】。
+//
+// 泵把管道抽干、只留最新一帧：不管生产多快，同步 owner 拿到的永远是刚采到的那一帧，延迟被钉死
+// 在一帧以内。这正是 macOS 进程内采集那条路早就在做的事（pushInprocFrame 的丢旧补新），
+// ffmpeg 这条路一直漏了。
+func (c *CameraSource) pumpPipe(r io.Reader) {
+	buf := make([]byte, robot.ImageBytesRGB888)
+	for {
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return // 流结束/进程退出（Stop 关管道即从这里解阻塞）
+		}
+		cp := make([]byte, len(buf))
+		copy(cp, buf)
+		c.pushInprocFrame(cp) // 存 latest（供 vision 抓帧）+ 丢旧补新塞进 channel
 	}
-	copy(c.latest, buf)
-	c.seq++
-	c.mu.Unlock()
-	return out
 }
 
 // pushInprocFrame 接收进程内采集的一帧(由 incam 回调，AVFoundation 串行队列线程)：存为 latest
@@ -291,15 +327,17 @@ func (c *CameraSource) Stop() {
 	c.running = false
 	c.latest = nil
 	c.mu.Unlock()
+	// 两条采集路径现在都让 ReadFrame 阻塞在 frameCh 上，所以【都】要关 done 才能解阻塞。
+	// 不关 frameCh：在途的发送方（incam 回调 / pumpPipe）还可能往里塞，关了会 panic。
+	if done != nil {
+		close(done)
+	}
 	if inproc {
 		incamStop() // 停 AVFoundation 采集（之后不再有 pushInprocFrame 回调）
-		if done != nil {
-			close(done) // 解阻塞 ReadFrame（不关 frameCh，避免在途回调发送方 panic）
-		}
 		return
 	}
 	if pipe != nil {
-		_ = pipe.Close() // 解阻塞 ReadFrame
+		_ = pipe.Close() // 让 pumpPipe 的 ReadFull 出错返回、goroutine 退出
 	}
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()

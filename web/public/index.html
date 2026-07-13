@@ -279,6 +279,15 @@
               <option value="off">关闭</option>
             </select>
           </label>
+          <label class="io-row" title="总开关。关闭时舵机不上扭矩、可手动摆姿（角度照常下发）。舵机 I²C 未接通时开启会让主控固件因无限重试而卡死整机——确认脑壳里舵机能正常控制后再开。">
+            <span>舵机总开关</span>
+            <input type="checkbox" id="io-servo_enable" />
+            <b id="io-servo_enable-note" class="muted" style="flex:1">关：不上扭矩，可手动摆姿</b>
+          </label>
+          <label class="io-row" title="等驱动把手上这一帧完整发完，再关闭设备、退出程序。直接结束进程（任务管理器/强杀）会把传输掐断在半帧中间，主控固件会永久卡死，只能拔电源放电才能救回来。">
+            <span>安全退出</span>
+            <button id="btn-shutdown" style="flex:1">关闭程序（安全断开机器人）</button>
+          </label>
         </div>
       </details>
     </section>

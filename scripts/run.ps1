@@ -36,6 +36,34 @@ function Die($m) { Write-Host "错误: $m" -ForegroundColor Red; exit 1 }
 # 1) 前置检查
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) { Die "未找到 go，请先安装 Go (>=1.23)：https://go.dev/dl/" }
 
+# 1b) libusb：连真机(ElectronBot)必需的【运行期】依赖。缺了它 electronbot.Probe() 会静默失败、
+#     直接回退 Mock——表现就是"机器人明明插着，程序却说没探测到"，极难排查。
+#     .gitignore 里有 *.dll，所以它不入库；跟语音模型一样，缺则按需下载。
+$LibusbDll = Join-Path $Root 'libusb-1.0.dll'
+if (-not (Test-Path $LibusbDll)) {
+  Log "下载 libusb（连真机必需；Windows 上 LoadLibrary 会在工作目录找它）"
+  $ver = '1.0.28'
+  $url = "https://github.com/libusb/libusb/releases/download/v$ver/libusb-$ver.7z"
+  if ($Mirror) { $url = $Mirror.TrimEnd('/') + '/' + $url }
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) "libusb-$ver"
+  New-Item -ItemType Directory -Force $tmp | Out-Null
+  $pkg = Join-Path $tmp 'libusb.7z'
+  try {
+    curl.exe -sSL --fail --max-time 180 -o $pkg $url
+    # tar(bsdtar) 是 Win10+ 自带的，能解 7z；不额外依赖 7-Zip。
+    Push-Location $tmp; tar.exe -xf $pkg; Pop-Location
+    $src = Join-Path $tmp 'VS2022\MS64\dll\libusb-1.0.dll'   # x64 MSVC 版，与 amd64 的 Go 二进制匹配
+    if (-not (Test-Path $src)) { throw "解压后未找到 $src" }
+    Copy-Item $src $LibusbDll -Force
+    Log "libusb 就绪：$LibusbDll"
+  }
+  catch {
+    Write-Host "警告: 下载 libusb 失败（$($_.Exception.Message)）。真机将连不上、自动回退 Mock。" -ForegroundColor Yellow
+    Write-Host "      可手动从 https://github.com/libusb/libusb/releases 取 VS2022/MS64/dll/libusb-1.0.dll 放到仓库根目录。" -ForegroundColor Yellow
+  }
+  finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+}
+
 $Py = $null
 if (-not $NoSidecar) {
   foreach ($c in 'python', 'py', 'python3') { if (Get-Command $c -ErrorAction SilentlyContinue) { $Py = $c; break } }

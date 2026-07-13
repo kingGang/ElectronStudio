@@ -34,9 +34,11 @@
 |------|------|
 | **Linux / 树莓派** | `sudo apt install libusb-1.0-0`；建议加 udev 规则免 root：`SUBSYSTEM=="usb", ATTrs{idVendor}=="1001", ATTRS{idProduct}=="8023", MODE="0666"` |
 | **macOS** | `brew install libusb` |
-| **Windows** | 安装 libusb 运行库（提供 `libusb-1.0.dll`，可随程序分发到同目录）；并用 [Zadig](https://zadig.akeo.ie/) 给 ElectronBot 安装 **WinUSB** 驱动 |
+| **Windows** | `scripts/run.ps1` 会自动下载 `libusb-1.0.dll` 到仓库根目录（缺则下，已有则跳过）。手动装的话：从 [libusb releases](https://github.com/libusb/libusb/releases) 取 `VS2022/MS64/dll/libusb-1.0.dll` 放到**可执行文件同目录或工作目录**。驱动方面，免驱固件（精英版 5241:5241）自带 WinUSB 即插即用；初代（1001:8023）需用 [Zadig](https://zadig.akeo.ie/) 装 **WinUSB** 驱动 |
 
 > 主程序自身用 `CGO_ENABLED=0` 交叉编译，不需要 C 工具链；libusb 仅在运行时按设备需要加载。
+>
+> **`libusb-1.0.dll` 不入库**（`.gitignore` 里有 `*.dll`）。它一旦缺失，`electronbot.Probe()` 会**静默失败并回退 Mock**——现象是"机器人明明插着、驱动也正常，程序却说没探测到"，日志里一个字都没有。排查真机连不上时，**先确认这个 dll 在不在**。
 
 ## USB 拓扑：一线多设备
 

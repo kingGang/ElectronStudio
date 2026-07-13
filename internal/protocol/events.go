@@ -112,6 +112,7 @@ type IOStatus struct {
 	TTSEngine    string `json:"tts_engine"`    // minimax | sidecar
 	ImageOut     string `json:"image_out"`     // device | page | both | off
 	DeviceVolume int    `json:"device_volume"` // 设备扬声器音量 0~100
+	ServoEnable  bool   `json:"servo_enable"`  // 舵机总开关：false 时不上扭矩（可手动摆姿）
 }
 
 // Type 实现 Payload。

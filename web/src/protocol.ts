@@ -67,6 +67,7 @@ export interface SetIOCommand {
   audio_out?: string
   tts_engine?: string
   image_out?: string
+  servo_enable?: boolean // 舵机总开关；省略=不改动（false 是有意义的取值：卸力）
 }
 
 export interface ScheduleAddCommand {
@@ -165,6 +166,7 @@ export interface IOStatus {
   tts_engine: string    // minimax | openai | sidecar
   image_out: string     // device | page | both | off
   device_volume: number // 设备扬声器音量 0~100
+  servo_enable: boolean // 舵机总开关：false 时不上扭矩（可手动摆姿）
 }
 
 export interface VoiceStateEvent {
