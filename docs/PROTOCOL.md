@@ -95,6 +95,7 @@
 | `remove_model` | `RemoveModelCommand` | 删除大模型（`id`），写入配置文件 |
 | `material_delete` | `MaterialDeleteCommand` | 删除一段屏幕表情素材（`name`），删后热重载并广播 `materials` |
 | `party` | `PartyCommand` | 一键蹦迪：同时放歌 + 无限循环跳 `dance`（踩拍变脸），可选 `query` 指定曲目；停止用 `interrupt` + `music`(`stop`) |
+| `reenable` | `ReenableCommand` | 给舵机重新上扭矩（下发一次 enable 0→1 跳变）。舵机的过流/堵转保护锁存后会「能应答 I²C、能报位置，但电机不转」，只有重新使能能解锁；驱动也会自动检测并重试 |
 
 > 注：屏幕表情素材的**上传**是二进制文件，不走 WebSocket，而走下方的 HTTP REST 接口。
 

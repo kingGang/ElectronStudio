@@ -260,3 +260,14 @@ type SetVolumeCommand struct {
 
 // Type 实现 Payload。
 func (SetVolumeCommand) Type() Type { return TypeSetVolume }
+
+// ---------------------------------------------------------------------------
+// reenable —— 舵机重新上扭矩
+// ---------------------------------------------------------------------------
+
+// ReenableCommand 让驱动下发一次 enable 0→1 跳变，给舵机重新上扭矩。
+// 舵机的过流/堵转保护一旦锁存，就会"能应答 I²C、能报位置，但电机不转"，只有重新使能能解锁。
+type ReenableCommand struct{}
+
+// Type 实现 Payload。
+func (ReenableCommand) Type() Type { return TypeReenable }

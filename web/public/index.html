@@ -109,7 +109,8 @@
     <section class="panel">
       <div class="panel-head">
         <h2>手动调试（6 轴）</h2>
-        <label class="enable-toggle"><input type="checkbox" id="jog-enable" /> 舵机使能（舵机 I²C 未通时勿勾，会卡死固件）</label>
+        <label class="enable-toggle"><input type="checkbox" id="jog-enable" /> 舵机使能</label>
+        <button id="jog-reenable" title="舵机过载/堵转保护锁存后会「能报位置但不转」，点这里重新上扭矩解锁（驱动也会自动检测重试）">重新使能舵机</button>
       </div>
       <div class="joints" id="joints"></div>
     </section>

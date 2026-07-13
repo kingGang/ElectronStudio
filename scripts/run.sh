@@ -99,6 +99,15 @@ fi
 
 if [ "$SETUP_ONLY" -eq 1 ]; then log "准备完成（--setup-only）。"; exit 0; fi
 
+# 5.5) 国内 API 不走代理。Go 默认 ProxyFromEnvironment，程序继承 shell 的 HTTP(S)_PROXY 后，
+# 连国内的模型/音乐服务也会被塞进代理绕一圈——实测 MiniMax 经代理 3.0s、直连 1.3s（慢 2.3 倍），
+# 长回答时更容易拖到超时。这里只给本程序追加 no_proxy 白名单，不动系统/shell 的代理设置。
+# 需要经代理访问的境外服务（OpenAI 等）不受影响，照常走代理。
+BYPASS="localhost,127.0.0.1,::1,api.minimaxi.com,.minimaxi.com,.qq.com,.kuwo.cn"
+export no_proxy="${no_proxy:+$no_proxy,}$BYPASS"
+export NO_PROXY="$no_proxy"
+[ -n "${HTTP_PROXY:-$http_proxy}" ] && log "代理白名单(不走代理): $BYPASS"
+
 # 6) 启动 sidecar（后台）+ 主程序；退出时清理 sidecar
 SIDE_PID=""
 cleanup() { [ -n "$SIDE_PID" ] && kill "$SIDE_PID" 2>/dev/null || true; }

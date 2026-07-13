@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -183,22 +184,22 @@ type app struct {
 	wakeCache   map[string][]byte    // 唤醒人声应答缓存(短语→mp3)，第二次起秒回
 	wakeMu      sync.Mutex
 	wakeIdx     atomic.Uint32 // 轮换唤醒应答语
-	genimg      *genImgStore         // 生成图暂存(供页面 HTTP 取回)
-	genaudio    *genImgStore         // 生成音频(音乐)暂存(供页面 HTTP 取回)
+	genimg      *genImgStore  // 生成图暂存(供页面 HTTP 取回)
+	genaudio    *genImgStore  // 生成音频(音乐)暂存(供页面 HTTP 取回)
 	weather     *weather.Client
 
-	speakMu       sync.Mutex         // 保护 speakCancel / turnCancel
-	speakCancel   context.CancelFunc // 取消进行中的一段语音(MiniMax 合成/设备播放)，用于打断 barge-in
-	turnCancel    context.CancelFunc // 取消进行中的对话(LLM 流)；新一轮 handleChat 先打断上一轮，杜绝多轮并发交错、回复乱序
+	speakMu     sync.Mutex         // 保护 speakCancel / turnCancel
+	speakCancel context.CancelFunc // 取消进行中的一段语音(MiniMax 合成/设备播放)，用于打断 barge-in
+	turnCancel  context.CancelFunc // 取消进行中的对话(LLM 流)；新一轮 handleChat 先打断上一轮，杜绝多轮并发交错、回复乱序
 
-	asrMu      sync.Mutex  // 保护 asrPending / asrTimer
-	asrPending string      // 累积"一次说话被 VAD 切成的多段 ASR"
-	asrTimer   *time.Timer // 防抖：最后一段后静默一会儿才发起【一次】对话，避免话没说完就调 LLM、触发限速
-	audioStreamed atomic.Bool        // 本轮是否已用小智流式音频播放（true 则收尾的 speak 不再重复合成）
-	sched       *scheduler.Scheduler
-	schedPath   string
-	tools       *tools.Registry
-	log         *slog.Logger
+	asrMu         sync.Mutex  // 保护 asrPending / asrTimer
+	asrPending    string      // 累积"一次说话被 VAD 切成的多段 ASR"
+	asrTimer      *time.Timer // 防抖：最后一段后静默一会儿才发起【一次】对话，避免话没说完就调 LLM、触发限速
+	audioStreamed atomic.Bool // 本轮是否已用小智流式音频播放（true 则收尾的 speak 不再重复合成）
+	sched         *scheduler.Scheduler
+	schedPath     string
+	tools         *tools.Registry
+	log           *slog.Logger
 
 	frameSeq atomic.Uint32 // 屏幕镜像帧序号
 
@@ -587,9 +588,9 @@ func connectRobot(cfg *config.Config, log *slog.Logger) robot.Transport {
 // findPlaytoHelper 定位 macOS 的 playto 音频 helper（把声音定向到指定 USB 声卡）。
 // 依次找：可执行文件同级的 sidecars/audio/playto、当前目录下的同路径、最后 PATH 里的 playto。
 // 找不到返回空串。
-func findPlaytoHelper() string                  { return findAudioHelper("playto") }
-func findAudioHelper(name string) string         { return findHelper("audio", name) }
-func findCamcapHelper() string                   { return findHelper("video", "camcap") }
+func findPlaytoHelper() string           { return findAudioHelper("playto") }
+func findAudioHelper(name string) string { return findHelper("audio", name) }
+func findCamcapHelper() string           { return findHelper("video", "camcap") }
 
 // findHelper 在 exe 同级 / 工作目录的 sidecars/<subdir>/ 下、再 PATH 里查找原生小工具
 // （audio: playto/musicto；video: camcap）。找不到返回空串，调用方回退。
@@ -949,6 +950,9 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 			go a.handleParty(ctx, cmd.Query) // 一键蹦迪：放歌 + 跳舞，放后台
 		}
 
+	case protocol.TypeReenable:
+		a.driver.Reenable() // 舵机过载保护锁存后手动解锁（驱动也会自动检测并重试）
+
 	case protocol.TypeMusic:
 		if cmd, err := protocol.As[protocol.MusicCommand](in.Env); err == nil {
 			go a.handleMusic(ctx, cmd)
@@ -1236,7 +1240,7 @@ func (a *app) handleChatWithTools(ctx context.Context, text string) {
 			})
 		})
 	if err != nil {
-		a.srv.Broadcast(protocol.ErrorEvent{Code: "llm_error", Message: err.Error()})
+		reportLLMErr(a, ctx, "llm_error", err)
 		a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
 		return
 	}
@@ -1257,7 +1261,7 @@ func (a *app) handleChatStreaming(ctx context.Context, text string) {
 	// 3) 流式生成助手回复。
 	ch, err := a.llm.Chat(ctx, llm.Request{Messages: a.historySnapshot()})
 	if err != nil {
-		a.srv.Broadcast(protocol.ErrorEvent{Code: "llm_error", Message: err.Error()})
+		reportLLMErr(a, ctx, "llm_error", err)
 		a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
 		return
 	}
@@ -1283,7 +1287,7 @@ func (a *app) handleChatStreaming(ctx context.Context, text string) {
 
 	for chunk := range ch {
 		if chunk.Err != nil {
-			a.srv.Broadcast(protocol.ErrorEvent{Code: "llm_stream", Message: chunk.Err.Error()})
+			reportLLMErr(a, ctx, "llm_stream", chunk.Err)
 			break
 		}
 		if chunk.Done {
@@ -1530,27 +1534,29 @@ func (a *app) handleGreet(ctx context.Context) {
 // defaultPartyQuery 是「一键蹦迪」默认曲目（节奏感强）；搜不到则只跳舞。
 const defaultPartyQuery = "最炫民族风"
 
-// handleParty 一键蹦迪：同时放歌 + 无限循环跳 dance（踩拍变脸）。
-// 立刻起舞（即时反馈），并发去放歌（网络搜索有延迟，失败则只跳舞不报错）。
+// handleParty 一键蹦迪：放歌 + 无限循环跳 dance（踩拍变脸）。
 // 停止由前端发 interrupt（停舞）+ music stop（停歌）完成。
+//
+// 【先出声、再起舞】：放歌要经过搜索→取播放地址→下载，少则一两秒。以前是立刻起舞、并发去放歌，
+// 于是舞先跳、歌后响，整段听起来就是"音乐慢半拍"。现在等 SearchAndPlay 返回（此时音频已交给
+// 播放器、马上出声）才起舞，起点对齐。放歌失败则退回只跳舞，不至于点了没反应。
 func (a *app) handleParty(ctx context.Context, query string) {
 	if query == "" {
 		query = defaultPartyQuery
 	}
-	if err := a.chor.Play(ctx, "dance", -1); err != nil {
-		a.log.Warn("蹦迪：起舞失败", "err", err)
-		a.srv.Broadcast(protocol.ErrorEvent{Code: "party", Message: "起舞失败：" + err.Error()})
-		return
-	}
-	go func() {
-		if _, err := a.music.SearchAndPlay(ctx, query); err != nil {
-			a.log.Warn("蹦迪：放歌失败，仅跳舞", "query", query, "err", err)
-		}
-	}()
 	a.srv.Broadcast(protocol.ChatEvent{
 		ID: a.nextMsgID(), Role: protocol.RoleAssistant,
 		Content: "🪩 开跳！正在放《" + query + "》，点「打断」即可停。", Status: protocol.ChatFinal,
 	})
+	go func() {
+		if _, err := a.music.SearchAndPlay(ctx, query); err != nil {
+			a.log.Warn("蹦迪：放歌失败，仅跳舞", "query", query, "err", err)
+		}
+		if err := a.chor.Play(ctx, "dance", -1); err != nil {
+			a.log.Warn("蹦迪：起舞失败", "err", err)
+			a.srv.Broadcast(protocol.ErrorEvent{Code: "party", Message: "起舞失败：" + err.Error()})
+		}
+	}()
 	a.log.Info("一键蹦迪", "query", query)
 }
 
@@ -1652,10 +1658,10 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 			PID:       0x8023,
 			FPS:       30,
 		},
-		ASR:     protocol.ServiceStatus{Running: ss.ASRRunning, Detail: ss.Detail},
-		TTS:     protocol.ServiceStatus{Running: ss.TTSRunning, Detail: ss.Detail},
-		LLM:     protocol.LLMStatus{Active: a.llm.ActiveID(), Available: models},
-		Actions: actions,
+		ASR:      protocol.ServiceStatus{Running: ss.ASRRunning, Detail: ss.Detail},
+		TTS:      protocol.ServiceStatus{Running: ss.TTSRunning, Detail: ss.Detail},
+		LLM:      protocol.LLMStatus{Active: a.llm.ActiveID(), Available: models},
+		Actions:  actions,
 		Camera:   a.camera != nil,
 		CameraOn: a.cameraOn.Load(),
 		IO: protocol.IOStatus{
@@ -1768,4 +1774,18 @@ func (a *app) historySnapshot() []llm.Message {
 
 func (a *app) nextMsgID() string {
 	return fmt.Sprintf("m%d", a.msgSeq.Add(1))
+}
+
+// reportLLMErr 把大模型错误报给页面——但【我们自己取消的那次请求不算错误】。
+//
+// 一次说话被 ASR 切成几段、或者用户接着又说了一句，handleChat 就会 turnCancel 掉上一轮（这是有意
+// 设计的：保证一次只处理一轮、回复不乱序）。被取消的 HTTP 请求会返回 "context canceled"，以前原样
+// 弹成红色错误条，看起来就像"大模型经常超时/失败"，其实什么事都没有。
+func reportLLMErr(a *app, ctx context.Context, code string, err error) {
+	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+		a.log.Debug("对话已被新一轮打断（非错误）", "err", err)
+		return
+	}
+	a.log.Warn("大模型调用失败", "code", code, "err", err)
+	a.srv.Broadcast(protocol.ErrorEvent{Code: code, Message: err.Error()})
 }

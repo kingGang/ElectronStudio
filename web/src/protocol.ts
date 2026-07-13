@@ -59,6 +59,7 @@ export const ClientType = {
   SetDevice: 'set_device',
   SetVolume: 'set_volume',
   Party: 'party',
+  Reenable: 'reenable',
 } as const
 
 export interface SetIOCommand {

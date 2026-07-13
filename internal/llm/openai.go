@@ -47,12 +47,18 @@ func NewOpenAICompat(cfg OpenAIConfig) *OpenAICompat {
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
+	// 【不要用 http.Client.Timeout】——它是"整个请求含读完响应体"的硬死线，而对话是流式 SSE：
+	// 响应体边生成边读，一旦模型说得久一点（推理模型、长回答、工具多轮）就会在说到一半时被我们
+	// 自己掐断、报"超时"。正确的约束是【首字节】：服务器迟迟不开口才算超时，开口之后爱说多久说多久。
+	// 整轮的取消交给 ctx（新一轮对话会 cancel 上一轮，见 handleChat 的 turnCancel）。
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = timeout // 首字节超时
 	return &OpenAICompat{
 		info:    Info{ID: id, Name: name, Provider: "openai"},
 		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
 		apiKey:  cfg.APIKey,
 		model:   cfg.Model,
-		client:  &http.Client{Timeout: timeout},
+		client:  &http.Client{Transport: tr},
 	}
 }
 
@@ -235,14 +241,24 @@ type streamChunk struct {
 
 // Chat 实现 Provider：发起流式请求并把增量转成 Chunk。
 func (p *OpenAICompat) Chat(ctx context.Context, req Request) (<-chan Chunk, error) {
+	// 兜底上限：首字节有 ResponseHeaderTimeout 管着，但服务器"开了口又中途哑掉"时读会一直阻塞。
+	// 给整条流一个宽松的上限（远大于任何正常回答），只用来防挂死，正常永不命中。
+	ctx, cancel := context.WithTimeout(ctx, streamMaxDuration)
 	resp, err := p.post(ctx, p.buildRequest(req, true))
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	out := make(chan Chunk)
-	go p.stream(ctx, resp, out)
+	go func() {
+		defer cancel()
+		p.stream(ctx, resp, out)
+	}()
 	return out, nil
 }
+
+// streamMaxDuration 是单条流式回答的兜底上限（防服务器中途哑掉导致读阻塞）。
+const streamMaxDuration = 10 * time.Minute
 
 // stream 解析 SSE 响应并把增量推入 out，结束/出错后关闭 out。
 func (p *OpenAICompat) stream(ctx context.Context, resp *http.Response, out chan<- Chunk) {

@@ -39,6 +39,25 @@ type Driver struct {
 	// 串行 读→Sync，仿官方 EmoticonActionFrameService 单一串行发送），期间不跑自由 ticker、
 	// 也无独立读帧 goroutine——消除"并发读管道帧"与 libusb 争抢卡死设备屏的路径。
 	framePull atomic.Pointer[func() []byte]
+
+	// reenableFrames > 0 时，这么多帧内强制下发 enable=0。归零后恢复正常使能，于是设备侧看到一次
+	// 0→1 跳变——固件正是靠这个跳变才会重新给舵机上扭矩：
+	//
+	//	if (isEnabled != (bool) ptr[0]) { isEnabled = ptr[0]; electron.SetJointEnable(isEnabled); }
+	//
+	// 舵机自己的过流/堵转保护一旦锁存，就会"能应答 I²C、能报位置，但电机不转"（真机实测：目标角
+	// 怎么变，读回都是一个死数）。只有重新使能才解锁。见 syncLoop 里的失力检测。
+	reenableFrames int
+}
+
+// Reenable 请求给舵机重新上扭矩（下发一次 enable 0→1 跳变）。舵机过载保护锁存后靠它解锁。
+func (d *Driver) Reenable() {
+	d.mu.Lock()
+	if d.reenableFrames < reenablePulseFrames {
+		d.reenableFrames = reenablePulseFrames
+	}
+	d.mu.Unlock()
+	d.log.Info("重新使能舵机（下发 enable 0→1 跳变）")
 }
 
 // SetServoEnable 设置舵机总开关。false 时无论上层怎么 enable，下发给设备的使能位都是 0
@@ -47,6 +66,82 @@ func (d *Driver) SetServoEnable(on bool) {
 	d.mu.Lock()
 	d.servoEnable = on
 	d.mu.Unlock()
+}
+
+// 舵机失力（过流/堵转保护锁存：能应答 I²C、能报位置，但电机不转）的检测与自愈参数。
+const (
+	reenablePulseFrames = 3                       // 重新使能脉冲：连续几帧下发 enable=0，制造 0→1 跳变
+	limpSettleTime      = 1200 * time.Millisecond // 目标角保持不变多久后才开始判定（等舵机走到位）
+	limpTolerance       = 15                      // 读回与下发相差多少度算"没跟上"
+	limpConfirmTime     = 2 * time.Second         // 持续这么久仍不跟随，才判定失力（避开瞬时噪声）
+	limpCooldown        = 20 * time.Second        // 两次自动重新使能之间的最短间隔，防止反复抽搐
+	limpMaxAttempts     = 3                       // 连续这么多次救不回来就放弃（避免无休止 toggle）
+)
+
+// limpWatch 盯着"下发角度 vs 读回角度"：目标静止一段时间后仍有轴长期对不上，就判定该轴失力，
+// 自动下发一次 enable 0→1 跳变把它解锁（固件收到跳变才会重新给舵机上扭矩）。
+//
+// 【只在目标静止时判定】：运动中舵机本来就落后于关键帧，那不是失力。
+// 【姿态一变就清账】：避免把一次正常的大幅运动误判成失力。
+type limpWatch struct {
+	lastPose   robot.Joints
+	stableFrom time.Time // 目标角保持不变的起始时刻
+	badFrom    time.Time // 开始持续不跟随的时刻（零值=当前跟得上）
+	lastFix    time.Time // 上次自动重新使能的时刻
+	attempts   int       // 连续救援次数
+}
+
+func (w *limpWatch) check(d *Driver, pose, fb robot.Joints, enabled bool) {
+	now := time.Now()
+	if !enabled { // 没上扭矩，本来就不该跟随
+		w.stableFrom, w.badFrom = time.Time{}, time.Time{}
+		w.lastPose = pose
+		return
+	}
+	if pose != w.lastPose { // 目标变了：重新计时，之前的账一笔勾销
+		w.lastPose, w.stableFrom, w.badFrom = pose, now, time.Time{}
+		return
+	}
+	if w.stableFrom.IsZero() || now.Sub(w.stableFrom) < limpSettleTime {
+		return // 还没静止够久，舵机可能正在走过去
+	}
+	worst, worstJoint := float32(0), -1
+	for i := range pose {
+		if dev := abs32(fb[i] - pose[i]); dev > limpTolerance && dev > worst {
+			worst, worstJoint = dev, i
+		}
+	}
+	if worstJoint < 0 { // 都跟得上：清账，救援计数归零
+		w.badFrom, w.attempts = time.Time{}, 0
+		return
+	}
+	if w.badFrom.IsZero() {
+		w.badFrom = now
+		return
+	}
+	if now.Sub(w.badFrom) < limpConfirmTime || now.Sub(w.lastFix) < limpCooldown {
+		return
+	}
+	if w.attempts >= limpMaxAttempts {
+		return // 救不回来了，别再抽搐；日志已提示过
+	}
+	w.attempts++
+	w.lastFix, w.badFrom = now, time.Time{}
+	d.log.Warn("舵机疑似失力（能报位置但不跟随），自动重新使能",
+		"关节", robot.JointNames[worstJoint], "下发", pose[worstJoint], "读回", fb[worstJoint],
+		"第几次", w.attempts)
+	d.Reenable()
+	if w.attempts >= limpMaxAttempts {
+		d.log.Warn("舵机自动重新使能多次仍不跟随，停止重试——请检查该舵机是否堵转/机械卡死",
+			"关节", robot.JointNames[worstJoint])
+	}
+}
+
+func abs32(f float32) float32 {
+	if f < 0 {
+		return -f
+	}
+	return f
 }
 
 // SetJointTrim 设置 6 轴机械零位补偿(度)。装配公差让"角度 0"不一定是端正姿态（例如头部归零时略微
@@ -189,6 +284,7 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 	// 退避重连：没命中就重连，但间隔逐次翻倍封顶——频繁 Close+Connect（churn）正是把固件
 	// 搞进“停发就绪包”深度卡死的元凶，越没命中越要少碰它。连续 stuckAfter 次仍无就绪包，
 	// 就判定卡死、回调上层提示用户断电复位（churn 救不回，只有彻底断电放电才行）。
+	var limp limpWatch // 舵机失力检测（能报位置但不转）→ 自动重新使能
 	backoff := 2 * time.Second
 	const backoffMax = 10 * time.Second
 	const stuckAfter = 5
@@ -244,6 +340,10 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 			}
 			d.mu.Lock()
 			pose, enable, servoOK, trim := d.pose, d.enable, d.servoEnable, d.trim
+			if d.reenableFrames > 0 { // 重新使能脉冲：这几帧强行发 enable=0，之后的 0→1 跳变解锁舵机
+				d.reenableFrames--
+				enable = false
+			}
 			d.mu.Unlock()
 			_ = d.bot.SetJointAngles(applyTrim(pose, trim), enable && servoOK) // 总开关关时永不使能
 			if err := d.bot.Sync(); err != nil {
@@ -251,8 +351,10 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 			} else {
 				synced = true
 				tick++
+				fb := stripTrim(d.bot.JointAngles(), trim)
+				limp.check(d, pose, fb, enable && servoOK) // 失力检测 → 必要时自动重新使能
 				if tick%3 == 0 && d.onJoints != nil {
-					d.onJoints(stripTrim(d.bot.JointAngles(), trim))
+					d.onJoints(fb)
 				}
 			}
 		}

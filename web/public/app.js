@@ -17,7 +17,7 @@
   const CliType = {
     SendText: 'send_text', Mic: 'mic', Interrupt: 'interrupt',
     PlayAction: 'play_action', SetEmotion: 'set_emotion',
-    SelectModel: 'select_model', JogJoint: 'jog_joint',
+    SelectModel: 'select_model', JogJoint: 'jog_joint', Reenable: 'reenable',
     AddModel: 'add_model', RemoveModel: 'remove_model',
     Follow: 'follow', RecordStart: 'record_start', RecordFrame: 'record_frame',
     RecordStop: 'record_stop', DeleteAction: 'delete_action',
@@ -30,8 +30,8 @@
   const JOINT_NAMES = ['头部俯仰', '左臂横滚', '左臂俯仰', '右臂横滚', '右臂俯仰', '身体旋转'];
   const JOINT_COUNT = 6;
   // 各关节角度限制(度)，与后端 robot.JointLimits 同步：头-15~15 / 横滚0~30 / 俯仰-20~180 / 身体-90~90。
-  // 右臂俯仰上限 160：真机实测 167 就顶到机械限位堵转（会把主控 I²C 卡死），取 160 留余量。
-  const JOINT_LIMITS = [[-15, 15], [0, 30], [-20, 180], [0, 30], [-20, 160], [-90, 90]];
+  // 两臂俯仰上限 150：真机实测 167 顶到机械限位堵转（会把主控 I²C 卡死）、160 手会撞到头。
+  const JOINT_LIMITS = [[-15, 15], [0, 30], [-20, 150], [0, 30], [-20, 150], [-90, 90]];
   const clampJoint = (i, a) => Math.max(JOINT_LIMITS[i][0], Math.min(JOINT_LIMITS[i][1], a));
   const VOICE_LABEL = { idle: '待命', connecting: '连接中', listening: '聆听中…', thinking: '思考中…', speaking: '回应中…' };
 
@@ -46,6 +46,7 @@
     mic: $('btn-mic'), interrupt: $('btn-interrupt'), toast: $('toast'), camera: $('btn-camera'),
     // 编排页
     actionList: $('action-list'), joints: $('joints'), jogEnable: $('jog-enable'), choreoStop: $('choreo-stop'),
+    jogReenable: $('jog-reenable'),
     // 设置页
     modelList: $('model-list'), setASR: $('set-asr'), setTTS: $('set-tts'),
     setUSB: $('set-usb'), setVidPid: $('set-vidpid'), setFPS: $('set-fps'),
@@ -104,13 +105,39 @@
     if (j.armPitchRight) j.armPitchRight.rotation.x = -angles[4] * D2R;
     if (j.body) j.body.rotation.y = angles[5] * D2R;
   }
+  // ARM_DONOR：手臂从哪个模型取。精英版自带的是短粗款，换成经典版的细长手臂。
+  // 两个 glb 共用同一套骨架(armRoll*/armPitch*)和同一世界坐标——身体/头的包围盒逐位相同，
+  // 手臂枢轴也烘焙在网格顶点里，所以直接把经典版 armPitch* 下的网格搬过来即可，无需任何变换。
+  const ARM_DONOR = { elite: 'classic' };
+  // graftArms 用 donorRoot 的手臂网格替换 root 的：只换 armPitch* 底下的网格，骨架节点不动
+  // （关节仍由 drive3D 驱动 root 自己的 armRoll*/armPitch*）。换上来的手臂沿用【本模型自带手臂的
+  // 材质】，这样颜色/质感和外壳其余部分一致，不会一只手臂突兀地是另一套配色。
+  function graftArms(root, donorRoot) {
+    for (const joint of ['armPitchLeft', 'armPitchRight']) {
+      const dst = root.getObjectByName(joint), src = donorRoot.getObjectByName(joint);
+      if (!dst || !src) continue;
+      let mat = null;
+      dst.traverse((o) => { if (!mat && o.isMesh && o.material) mat = o.material; }); // 记下原材质
+      for (const mesh of [...dst.children]) dst.remove(mesh);  // 摘掉自带手臂
+      for (const mesh of [...src.children]) dst.add(mesh);     // 挂上捐赠者的手臂（自动改父）
+      if (mat) dst.traverse((o) => { if (o.isMesh) o.material = mat; }); // 套回本模型的配色
+    }
+  }
   // 加载（或切换）一个模型到已有场景；移除旧模型，重新抓关节、归位相机。
   function loadModel3D(url) {
     const st = $('model3d-status');
     if (m3dRoot) { m3dScene.remove(m3dRoot); m3dRoot = null; window.electronbotModel = null; }
     model3dJoints = null;
     st.textContent = '加载模型中…';
-    new THREE.GLTFLoader().load(url, (gltf) => {
+    const donor = ARM_DONOR[currentModel];
+    const withArms = (gltf, next) => {          // 需要换手臂就先把捐赠模型也拉下来
+      if (!donor) return next(gltf);
+      new THREE.GLTFLoader().load(MODEL_URLS[donor], (d) => {
+        graftArms(gltf.scene, d.scene);
+        next(gltf);
+      }, null, () => next(gltf));               // 捐赠模型加载失败：退回自带手臂，不影响主模型
+    };
+    new THREE.GLTFLoader().load(url, (gltf) => withArms(gltf, (gltf) => {
       const root = gltf.scene;
       model3dJoints = {
         armRollLeft: root.getObjectByName('armRollLeft'),
@@ -131,7 +158,7 @@
       addScreen(model3dJoints.head, SCREEN_CFG[currentModel]); // 头部贴上实时屏幕画面
       if (lastJointAngles) drive3D(lastJointAngles);
       st.textContent = '拖动旋转 / 滚轮缩放；动作/关节会驱动模型';
-    }, (e) => { if (e.total) st.textContent = '加载中 ' + Math.round((e.loaded / e.total) * 100) + '%'; },
+    }), (e) => { if (e.total) st.textContent = '加载中 ' + Math.round((e.loaded / e.total) * 100) + '%'; },
       (err) => { st.textContent = '模型加载失败'; console.error(err); });
   }
   // 在头部加一块屏幕平面，贴上设备屏的实时镜像画面（el.mirror canvas）。
@@ -555,6 +582,8 @@
     });
   }
   el.choreoStop.addEventListener('click', () => send(CliType.Interrupt, { reason: 'choreo-stop' }));
+  // 重新使能舵机：过载/堵转保护锁存后，舵机会「能报位置但电机不转」，只有 enable 0→1 跳变能解锁。
+  el.jogReenable.addEventListener('click', () => { send(CliType.Reenable, {}); toast('已重新给舵机上扭矩'); });
 
   // 跟随设备 + 示教录制。
   function setupRecord() {

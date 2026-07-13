@@ -286,6 +286,10 @@ const errNoDevice = -4 // LIBUSB_ERROR_NO_DEVICE
 // 清掉停滞后【重试】该传输，而非当掉线去 reopen（reopen 的 churn 会把固件彻底搞掉线）。
 const errPipe = -9 // LIBUSB_ERROR_PIPE
 
+// errTimeout：LIBUSB_ERROR_TIMEOUT。macOS 上超时的传输取消得不干净，会把整条管道堵住（后续传输
+// 全部跟着超时），所以遇到它也要 clear_halt 把管道捞回来——不能只是原地重发。
+const errTimeout = -7
+
 // syncBackstop：单次 bulk 传输的“真卡死”兜底时长。远大于任何 macOS libusb 瞬时故障(PIPE停滞/单次
 // 超时，至多数秒)，正常与瞬时故障下永不命中；命中即认定固件真卡死，交上层复位并提示断电。
 const syncBackstop = 12 * time.Second
@@ -448,8 +452,12 @@ func (d *Device) bulkWriteZLPBestEffort(ep uint8) error {
 		return errDeviceLost
 	}
 	if ret != 0 {
+		// 超时的传输在 macOS/IOKit 上取消得不干净，会把整条 OUT 管道堵住——真机日志：一个 ZLP 超时后
+		// 【紧接着每一个 512 数据包都超时】，端点整整死了 12 秒。clear_halt 会中止管道上残留的传输
+		// 并复位两端的数据翻转位，是把它捞回来的标准动作。
+		d.lib.ClearHalt(d.handle, ep)
 		if n := d.zlpLost.Add(1); n%50 == 1 { // 节流打印：只在第 1、51、101… 次报
-			d.log.Warn("零长包写失败，按已送达继续(重试它会把固件卡死)", "ret", ret, "累计", n)
+			d.log.Warn("零长包写失败，已 clear_halt 清管道并按已送达继续", "ret", ret, "累计", n)
 		}
 	}
 	return nil
@@ -507,10 +515,14 @@ func (d *Device) bulkRetry(ep uint8, ptr uintptr, length int32, timeoutMs uint32
 			d.log.Warn("bulk 重试", "序号", n, "ep", fmt.Sprintf("0x%x", ep), "ret", ret,
 				"transferred", transferred, "length", length)
 		}
-		if ret == errPipe {
-			d.lib.ClearHalt(d.handle, ep) // 清管道停滞后原地重试(macOS libusb 已知瞬时故障，非掉线)
+		// 【超时也要清管道】。以前只在 PIPE(-9) 时 clear_halt，超时(-7) 直接原地重发——但 macOS/IOKit
+		// 上超时的传输取消得不干净，会把整条管道堵死：真机日志里一个 ZLP 超时之后，紧接着【每一个 512
+		// 数据包都超时】，OUT 端点整整死了 12 秒，最后兜底超时 → reopen → 固件硬死。clear_halt 会中止
+		// 管道上残留的传输、并复位两端的数据翻转位，是把卡住的端点捞回来的标准动作。
+		if ret == errTimeout || ret == errPipe {
+			d.lib.ClearHalt(d.handle, ep)
 			if n := d.pipeRecover.Add(1); n%200 == 0 {
-				d.log.Info("PIPE 停滞已 clear_halt 原地恢复(若是旧代码这些早把设备搞死了)", "累计次数", n)
+				d.log.Info("管道停滞/超时已 clear_halt 原地恢复(若是旧代码这些早把设备搞死了)", "累计次数", n)
 			}
 		}
 		// 其余(超时/短读等)一律原地重试，绝不中途放弃——否则把固件卡死。
