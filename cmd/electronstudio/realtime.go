@@ -136,7 +136,7 @@ func (a *app) startRealtimeSession(parent context.Context) {
 	sess := &realtimeSession{client: client, cancel: cancel}
 	sess.idle = time.AfterFunc(realtimeIdleTimeout, func() {
 		a.log.Info("实时会话静默超时，结束")
-		a.stopRealtimeSession()
+		a.playGoodbyeAndStop() // 超时退出也播告别（退出必有反馈）
 	})
 	a.rtMu.Lock()
 	a.rtSession = sess
@@ -171,6 +171,19 @@ func (a *app) startRealtimeSession(parent context.Context) {
 		_ = sc.StreamStart(sctx)
 		scc()
 	}()
+}
+
+// playGoodbyeAndStop 播告别语后结束会话——所有"用户可感知的退出"(语音退出命令 / 静默超时)都走它，
+// 保证退出一定有语音反馈。先 abort 掉上一轮还在播的音频，让告别能立刻播；估时播完再真正关会话。
+func (a *app) playGoodbyeAndStop() {
+	if sc, ok := a.speech.(*speech.Sidecar); ok {
+		sc.Stop() // 停掉上一轮尚未播完的音频，让告别立刻插播
+		pctx, pc := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = sc.PlayPCM(pctx, goodbyePCM, 24000)
+		pc()
+		time.Sleep(promptSecs(goodbyePCM)) // 等告别播完再关
+	}
+	a.stopRealtimeSession()
 }
 
 // stopRealtimeSession 结束当前会话：停麦克风上行、关云端连接。幂等。
@@ -216,6 +229,10 @@ func (a *app) feedRealtimeAudio(pcm []byte) {
 // consumeRealtime 消费云端下行事件：音频→设备喇叭、转写→UI、函数调用→本地执行、打断→停播放。
 func (a *app) consumeRealtime(ctx context.Context, sess *realtimeSession) {
 	sc, _ := a.speech.(*speech.Sidecar)
+	// 本轮回复的下行音频统计：云端把整段音频一股脑 burst 下来、response.done 时远没播完，
+	// 据总字节估算真实播放时长，让口型/半双工麦克风持续到音频真正播完。
+	var audioBytes int
+	var firstAudio time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -234,10 +251,17 @@ func (a *app) consumeRealtime(ctx context.Context, sess *realtimeSession) {
 					_ = sc.StreamStop(sctx)
 					c()
 				}
+				audioBytes = 0
+				firstAudio = time.Time{}
 				a.screen.SetSpeaking(true) // 驱动表情口型，与对话同步
 			case realtime.KindAudio:
-				// 口型跟真实音量走：算这块下行 PCM 的 RMS 喂给表情脸，嘴按说话响度张合、贴合对话。
-				a.screen.SetMouthLevel(pcmMouthLevel(ev.Audio))
+				// 累计音频字节 + 记首块时刻，用于估算真实播放时长(见 KindResponseDone)。
+				// 注意：云端把整段音频【一股脑 burst 下来】，不是实时节奏，所以【不】按到达节奏算 RMS
+				// 驱动口型(会快得离谱、且提前放完)——改由说话态的固定节奏张合，覆盖整段播放时长。
+				if firstAudio.IsZero() {
+					firstAudio = time.Now()
+				}
+				audioBytes += len(ev.Audio)
 				if sc != nil {
 					pctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 					if err := sc.PlayPCM(pctx, ev.Audio, 24000); err != nil { // 云端下行 pcm 24k
@@ -261,32 +285,29 @@ func (a *app) consumeRealtime(ctx context.Context, sess *realtimeSession) {
 				// 不会被清），估时播完再关。告别音频与对话音色一致（见 goodbyePCM）。
 				if isExitCommand(ev.Text) {
 					a.log.Info("收到语音退出命令，播报告别后结束", "text", ev.Text)
-					if sc != nil {
-						sc.Stop() // abort：停掉上一轮尚未播完的音频
-						go func() {
-							pctx, pc := context.WithTimeout(context.Background(), 5*time.Second)
-							_ = sc.PlayPCM(pctx, goodbyePCM, 24000)
-							pc()
-							time.Sleep(promptSecs(goodbyePCM)) // 等告别播完再关会话
-							a.stopRealtimeSession()
-						}()
-					} else {
-						go a.stopRealtimeSession()
-					}
-					return // 会话即将关闭，退出消费循环
+					go a.playGoodbyeAndStop() // 播告别再关（退出必有反馈）
+					return                    // 会话即将关闭，退出消费循环
 				}
 			case realtime.KindSpeechStarted:
 				// 半双工下机器人说话时上行已停，故收到它=用户正常开口，不需要打断动作。
 			case realtime.KindFunctionCall:
 				go a.runRealtimeTool(ctx, sess, ev)
 			case realtime.KindResponseDone:
-				// 机器人说完 → 恢复上行麦克风，重新听用户；嘴合上。
-				a.screen.SetSpeaking(false)
-				if sc != nil {
-					sctx, c := context.WithTimeout(context.Background(), 3*time.Second)
-					_ = sc.StreamStart(sctx)
-					c()
-				}
+				// response.done 只表示云端【发完】音频，sidecar 还在按真实时长播——据总字节估播放时长，
+				// 让口型和半双工麦克风都【等音频真正播完】再收：否则嘴提前停(后面不动)、麦提前开(回音)。
+				playDur := time.Duration(audioBytes) * time.Second / (2 * 24000) // 24kHz mono int16
+				remain := playDur - time.Since(firstAudio)
+				go func() {
+					if remain > 0 {
+						time.Sleep(remain)
+					}
+					a.screen.SetSpeaking(false) // 音频真播完了，嘴合上
+					if sc != nil {
+						sctx, c := context.WithTimeout(context.Background(), 3*time.Second)
+						_ = sc.StreamStart(sctx) // 播完再恢复麦克风，避免机器人听到自己的尾音
+						c()
+					}
+				}()
 			case realtime.KindError:
 				a.log.Warn("实时会话错误", "msg", ev.Text)
 			}
