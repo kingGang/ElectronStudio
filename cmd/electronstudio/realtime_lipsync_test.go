@@ -2,6 +2,24 @@ package main
 
 import "testing"
 
+// sentimentEmotion：按关键词把对话文本判成表情。
+func TestSentimentEmotion(t *testing.T) {
+	cases := map[string]string{
+		"哈哈太好了，我很开心":  "happy",
+		"哇，居然是真的":     "surprised",
+		"唉，有点难过":      "sad",
+		"真讨厌，气死了":     "angry",
+		"这个好奇怪，我不懂":   "confused",
+		"今天要下雨，记得带伞":  "neutral",
+		"":            "neutral",
+	}
+	for text, want := range cases {
+		if got := sentimentEmotion(text); got != want {
+			t.Errorf("sentimentEmotion(%q)=%q, 期望 %q", text, got, want)
+		}
+	}
+}
+
 // pcmMouthLevel：静音/空→0，大声→张嘴。
 func TestPcmMouthLevel(t *testing.T) {
 	if l := pcmMouthLevel(make([]byte, 480)); l != 0 {

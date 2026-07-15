@@ -31,9 +31,47 @@ func promptSecs(pcm []byte) time.Duration {
 // realtimeSession 是一次进行中的实时语音会话。生命周期：唤醒词命中 → start，静默超时 /
 // 显式结束 → stop。会话内麦克风原始音频经 sidecar 转发上云，云端回音直播到设备喇叭。
 type realtimeSession struct {
-	client *realtime.Client
-	cancel context.CancelFunc
-	idle   *time.Timer // 静默计时：超时自动结束会话（省流量与费用）
+	client   *realtime.Client
+	cancel   context.CancelFunc
+	idle     *time.Timer // 静默计时：超时自动结束会话（省流量与费用）
+	lastUser string      // 用户上一句（助手回复中性时用它共情定表情）
+}
+
+// emotionKeywords 是情绪关键词表（按优先级，命中多者胜、并列取靠前）。用于按对话内容自动定表情。
+var emotionKeywords = []struct {
+	emo string
+	kws []string
+}{
+	{"happy", []string{"哈哈", "嘿嘿", "嘻嘻", "开心", "太好了", "好耶", "真好", "不错", "棒", "喜欢", "高兴", "开森", "赞", "耶", "好呀", "好的呀", "😄", "😊", "🎉"}},
+	{"surprised", []string{"哇", "哇塞", "天哪", "我的天", "居然", "竟然", "不会吧", "真的假的", "太厉害", "没想到", "厉害了", "wow", "😮", "😲"}},
+	{"sad", []string{"难过", "伤心", "抱歉", "对不起", "遗憾", "可惜", "呜呜", "失望", "难受", "委屈", "心疼", "😢", "😭"}},
+	{"angry", []string{"生气", "讨厌", "气死", "可恶", "烦死", "岂有此理", "愤怒", "气人", "过分", "😠", "😡"}},
+	{"confused", []string{"奇怪", "不懂", "为什么", "怎么会", "搞不懂", "疑惑", "不明白", "啥意思", "🤔"}},
+}
+
+// sentimentEmotion 按关键词粗略判断文本情绪，返回 6 情绪之一或 "neutral"。给实时对话自动定表情用。
+func sentimentEmotion(text string) string {
+	if text == "" {
+		return "neutral"
+	}
+	bestEmo, bestN := "neutral", 0
+	for _, g := range emotionKeywords {
+		n := 0
+		for _, k := range g.kws {
+			n += strings.Count(text, k)
+		}
+		if n > bestN {
+			bestN, bestEmo = n, g.emo
+		}
+	}
+	return bestEmo
+}
+
+// setFaceEmotion 只改【表情脸】+ 广播情绪(供 UI)，【不】触发同名动作——实时对话按语义频繁变表情，
+// 不该每句都让机器人做一次肢体动作(既吵又费舵机)。
+func (a *app) setFaceEmotion(e string) {
+	a.screen.SetEmotion(e)
+	a.srv.Broadcast(protocol.EmotionEvent{Emotion: protocol.Emotion(e)})
 }
 
 // realtimeIdleTimeout：这么久没有新的用户音频/回复，就结束会话（下次唤醒再建）。
@@ -153,7 +191,8 @@ func (a *app) stopRealtimeSession() {
 	}
 	sess.cancel()
 	_ = sess.client.Close()
-	a.screen.SetSpeaking(false) // 会话结束，嘴合上、停口型
+	a.screen.SetSpeaking(false)    // 会话结束，嘴合上、停口型
+	a.screen.SetEmotion("neutral") // 回到中性表情，别停在最后一句的情绪上
 	a.log.Info("实时语音会话已结束")
 	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
 }
@@ -207,7 +246,14 @@ func (a *app) consumeRealtime(ctx context.Context, sess *realtimeSession) {
 				}
 			case realtime.KindAssistantText:
 				a.srv.Broadcast(protocol.ChatEvent{Role: "assistant", Content: ev.Text, Status: "done"})
+				// 按语义自动定表情：机器人说的话是啥情绪，脸就是啥；它中性时，共情用户上一句。
+				emo := sentimentEmotion(ev.Text)
+				if emo == "neutral" {
+					emo = sentimentEmotion(sess.lastUser)
+				}
+				a.setFaceEmotion(emo)
 			case realtime.KindUserTranscript:
+				sess.lastUser = ev.Text
 				a.srv.Broadcast(protocol.ASREvent{Text: ev.Text, Final: true})
 				// 语音退出：说"退出/退下/再见"等 → 播预录的 Qwen 音色告别语，播完关会话。
 				// 先 abort 掉上一轮还在播的音频（否则退出后它还会把上句讲完），再播告别（abort 之后入队，

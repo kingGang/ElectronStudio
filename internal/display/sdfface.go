@@ -232,8 +232,12 @@ func (s *SDFFaceSource) step() {
 		}
 		return n
 	}
-	s.sacX = se(s.sacX, s.sacTX)
-	s.sacY = se(s.sacY, s.sacTY)
+	tx, ty := s.sacTX, s.sacTY
+	if s.speaking { // 说话时收敛视线、看着对方，显得专注（说话态基础表情）
+		tx, ty = tx*0.3, ty*0.3
+	}
+	s.sacX = se(s.sacX, tx)
+	s.sacY = se(s.sacY, ty)
 	if s.tick-s.levelTick > 5 && s.level > 0 {
 		s.level *= 0.7
 		if s.level < 0.02 {
