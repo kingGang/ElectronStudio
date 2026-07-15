@@ -55,22 +55,39 @@ type faceParams struct {
 	gazeY     float64    // 视线垂直 -1..1
 	mouthCurve float64   // 嘴角 -1皱..+1笑（neutral 也带点微笑更可爱）
 	mouthOpen  float64   // 0..1 张嘴基线（surprised）
-	tilt       float64   // 头倾(弧度，confused)
-	asym       float64   // 左右不对称(confused)
-	col        [3]float64 // 眼/嘴主色（会按情绪微调：sad偏蓝/angry偏红）
+	tilt       float64    // 头倾(弧度，confused)
+	asym       float64    // 左右不对称(confused)
+	colA       [3]float64 // 眼睛【上部】渐变色（顶色，通常更亮更青）
+	colB       [3]float64 // 眼睛【下部】渐变色（底色，通常更深偏蓝）——上下双色让颜色更丰富、有质感
 }
 
 var (
-	sdfMint  = [3]float64{190, 245, 232} // 柔和薄荷（眼/嘴主色）
-	sdfSadC  = [3]float64{158, 206, 246} // 悲伤淡蓝
-	sdfAngC  = [3]float64{246, 188, 194} // 愤怒淡红（可爱不刺眼）
-	sdfHi    = [3]float64{244, 255, 253} // 高光白
-	sdfPupil = [3]float64{28, 96, 92}    // 眼珠（比眼身深的青，随视线移动；不用死黑，免得生硬）
+	sdfHi    = [3]float64{236, 255, 252} // 高光白
+	sdfPupil = [3]float64{6, 70, 96}     // 眼珠/虹膜（深青，随视线移动；不用绿/死黑）
 )
+
+// 情绪→眼睛上下渐变色对（top,bottom）。刻意用高纯度色：实机自发光屏 + 辉光会把浅色冲白，
+// 饱和的渐变才通透、有"宝石感"，颜色也更丰富。
+func emotionColors(e string) (top, bot [3]float64) {
+	switch e {
+	case "happy":
+		return [3]float64{150, 246, 196}, [3]float64{46, 176, 240} // 亮青绿 → 青蓝
+	case "sad":
+		return [3]float64{96, 166, 248}, [3]float64{74, 92, 226} // 蓝 → 靛
+	case "angry":
+		return [3]float64{252, 150, 96}, [3]float64{232, 52, 118} // 橙 → 红品
+	case "surprised":
+		return [3]float64{132, 246, 236}, [3]float64{70, 158, 252} // 亮青 → 蓝
+	case "confused":
+		return [3]float64{158, 236, 206}, [3]float64{96, 206, 224} // 薄荷 → 青
+	default: // neutral
+		return [3]float64{110, 242, 224}, [3]float64{40, 146, 236} // 青绿 → 蓝
+	}
+}
 
 // emotionTarget 给出某情绪的目标表情参数。
 func emotionTarget(e string) faceParams {
-	p := faceParams{eyeOpen: 1, eyeScale: 1, mouthCurve: 0.42, col: sdfMint}
+	p := faceParams{eyeOpen: 1, eyeScale: 1, mouthCurve: 0.42}
 	switch e {
 	case "happy":
 		p.squint = 0.55
@@ -81,13 +98,11 @@ func emotionTarget(e string) faceParams {
 		p.gazeY = 0.32
 		p.mouthCurve = -0.55
 		p.eyeOpen = 0.92
-		p.col = sdfSadC
 	case "angry":
 		p.lidTop = 0.32
 		p.lidAngle = 0.55
 		p.mouthCurve = -0.38
 		p.eyeScale = 0.98
-		p.col = sdfAngC
 	case "surprised":
 		p.eyeScale = 1.30
 		p.mouthOpen = 0.72
@@ -98,6 +113,7 @@ func emotionTarget(e string) faceParams {
 		p.lidTop = 0.12
 		p.mouthCurve = -0.08
 	}
+	p.colA, p.colB = emotionColors(e)
 	return p
 }
 
@@ -188,7 +204,8 @@ func (s *SDFFaceSource) step() {
 	c.tilt = e(c.tilt, t.tilt)
 	c.asym = e(c.asym, t.asym)
 	for i := 0; i < 3; i++ {
-		c.col[i] = e(c.col[i], t.col[i])
+		c.colA[i] = e(c.colA[i], t.colA[i])
+		c.colB[i] = e(c.colB[i], t.colB[i])
 	}
 
 	if s.blinkT > 0 {
@@ -263,9 +280,10 @@ func (s *SDFFaceSource) visualKey() uint64 {
 	add(s.mouthOpenEff())
 	add(s.cur.tilt)
 	add(s.cur.asym)
-	add(s.cur.col[0])
-	add(s.cur.col[1])
-	add(s.cur.col[2])
+	for i := 0; i < 3; i++ {
+		add(s.cur.colA[i])
+		add(s.cur.colB[i])
+	}
 	return h
 }
 
@@ -337,6 +355,19 @@ func composite(acc *[3]float64, col [3]float64, c float64) {
 	acc[2] = lerpf(acc[2], col[2], c)
 }
 
+// mix3 在两颜色间线性插值（用于眼睛上下双色渐变）。
+func mix3(a, b [3]float64, t float64) [3]float64 {
+	return [3]float64{lerpf(a[0], b[0], t), lerpf(a[1], b[1], t), lerpf(a[2], b[2], t)}
+}
+
+// eyeGrad 眼睛某像素的填充色：上(top)→下(bot)双色渐变，叠加顶部提亮的 gloss 光泽，像发光宝石。
+func eyeGrad(top, bot [3]float64, py, cy, hh float64) [3]float64 {
+	t := clampf((py-(cy-hh))/(2*hh), 0, 1)
+	c := mix3(top, bot, t)
+	gloss := 1.12 - 0.30*t // 顶亮底暗
+	return [3]float64{clampf(c[0]*gloss, 0, 255), clampf(c[1]*gloss, 0, 255), clampf(c[2]*gloss, 0, 255)}
+}
+
 // eyeSDF 计算一只眼的距离：圆角矩形 + 开心下切(∩) + 上眼睑下压/倾斜。sign 区分左右(倾斜镜像)。
 func eyeSDF(px, py, cx, cy, hw, hh, rC float64, squint, lidTop, lidAngle, sign float64) float64 {
 	d := sdfRoundBox(px, py, cx, cy, hw, hh, rC)
@@ -381,13 +412,14 @@ func (s *SDFFaceSource) render() {
 	blink := s.blinkVal()
 	eyeOpen := clampf(s.cur.eyeOpen*(1-blink), 0, 1)
 	mo := s.mouthOpenEff()
-	col := s.cur.col
+	colA, colB := s.cur.colA, s.cur.colB // 眼睛上下渐变色
+	glowCol := colA                      // 辉光用亮顶色，光晕更通透
 	sq, lt, la := s.cur.squint, s.cur.lidTop, s.cur.lidAngle
 	tilt := s.cur.tilt
 	ct, stt := math.Cos(tilt), math.Sin(tilt)
 
-	hw := 26.0 * s.cur.eyeScale
-	hhFull := 31.0 * s.cur.eyeScale
+	hw := 29.0 * s.cur.eyeScale // 眼睛更大更饱满
+	hhFull := 34.0 * s.cur.eyeScale
 	hh := math.Max(3, hhFull*eyeOpen)
 	rC := math.Min(hw, hh) * 0.88
 	rScale := 1 - 0.14*s.cur.asym // confused 右眼略小
@@ -440,16 +472,20 @@ func (s *SDFFaceSource) render() {
 
 			// 辉光（填充之下向外扩散成 bloom）。收紧半径，别让左右眼的光在中间糊成一坨、
 			// 也别铺满整屏——实机小屏上要"发光的眼"而不是"一片光雾"。
-			addGlow(&acc, col, dL, 10, 0.9)
-			addGlow(&acc, col, dR, 10, 0.9)
+			addGlow(&acc, glowCol, dL, 11, 0.9)
+			addGlow(&acc, glowCol, dR, 11, 0.9)
 			if dM < 1e8 {
-				addGlow(&acc, col, dM, 8, 0.7)
+				addGlow(&acc, glowCol, dM, 8, 0.7)
 			}
-			// 实体填充。
-			composite(&acc, col, cov(dL))
-			composite(&acc, col, cov(dR))
+			// 实体填充：眼睛上下双色渐变 + 顶部提亮(gloss)，颜色更丰富、有宝石质感；嘴用亮顶色。
+			if cL := cov(dL); cL > 0 {
+				composite(&acc, eyeGrad(colA, colB, py, eyeY, hh), cL)
+			}
+			if cR := cov(dR); cR > 0 {
+				composite(&acc, eyeGrad(colA, colB, py, eyeY, hh*rScale), cR)
+			}
 			if dM < 1e8 {
-				composite(&acc, col, cov(dM))
+				composite(&acc, colA, cov(dM))
 			}
 			// 眼珠（随视线移动）+ 高光。
 			drawEyeball(&acc, px, py, lcx, eyeY, hw, hh, gx, gy, hiA, dL)

@@ -11,11 +11,14 @@ func TestSDFEmotionTargetsDistinct(t *testing.T) {
 	if emotionTarget("happy").squint <= 0 {
 		t.Error("happy 应眯眼(squint>0)")
 	}
-	if a := emotionTarget("angry"); a.col[0] <= a.col[2] {
-		t.Error("angry 主色应偏红(col.R>col.B)")
+	if a := emotionTarget("angry"); a.colA[0] <= a.colA[2] {
+		t.Error("angry 顶色应偏红(colA.R>colA.B)")
 	}
-	if s := emotionTarget("sad"); s.col[2] <= s.col[0] {
-		t.Error("sad 主色应偏蓝(col.B>col.R)")
+	if s := emotionTarget("sad"); s.colB[2] <= s.colB[0] {
+		t.Error("sad 底色应偏蓝(colB.B>colB.R)")
+	}
+	if n := emotionTarget("neutral"); n.colA == n.colB {
+		t.Error("眼睛应为上下双色渐变(colA!=colB)")
 	}
 	if emotionTarget("sad").lidAngle >= 0 {
 		t.Error("sad 上眼睑应外端低(lidAngle<0)")
