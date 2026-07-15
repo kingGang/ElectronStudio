@@ -52,9 +52,7 @@ var (
 	sdfMint  = [3]float64{190, 245, 232} // 柔和薄荷（眼/嘴主色）
 	sdfSadC  = [3]float64{158, 206, 246} // 悲伤淡蓝
 	sdfAngC  = [3]float64{246, 188, 194} // 愤怒淡红（可爱不刺眼）
-	sdfHi    = [3]float64{244, 255, 253} // 高光白
-	sdfBgCtr = [3]float64{40, 58, 60}    // 背景中心（暖一点的深青灰）
-	sdfBgEdge = [3]float64{12, 20, 30}   // 背景边缘（更深偏蓝）
+	sdfHi = [3]float64{244, 255, 253} // 高光白
 )
 
 // emotionTarget 给出某情绪的目标表情参数。
@@ -376,14 +374,10 @@ func (s *SDFFaceSource) render() {
 			px := cx0 + fx*ct - fy*stt // 头倾：反旋转到脸坐标
 			py := cy0 + fx*stt + fy*ct
 
-			// 背景：深青灰径向渐变（中心亮、边缘深）。
+			// 背景【纯黑】：设备是自发光 LCD，只有黑=像素灭，发光的眼/嘴才有对比度、才亮眼。
+			// （渐变背景会点亮整屏、把辉光糊成一片低对比的蓝雾——实机实测很糟。）
 			rr := math.Hypot(fx, fy)
-			bt := clampf(rr/135, 0, 1)
-			acc := [3]float64{
-				lerpf(sdfBgCtr[0], sdfBgEdge[0], bt),
-				lerpf(sdfBgCtr[1], sdfBgEdge[1], bt),
-				lerpf(sdfBgCtr[2], sdfBgEdge[2], bt),
-			}
+			acc := [3]float64{0, 0, 0}
 
 			// 眼 SDF。
 			dL := eyeSDF(px, py, lcx, eyeY, hw, hh, rC, sq, lt, la, +1)
@@ -405,11 +399,12 @@ func (s *SDFFaceSource) render() {
 				}
 			}
 
-			// 辉光（在填充之下，向外扩散形成 bloom）。
-			addGlow(&acc, col, dL, 16, 0.95)
-			addGlow(&acc, col, dR, 16, 0.95)
+			// 辉光（填充之下向外扩散成 bloom）。收紧半径，别让左右眼的光在中间糊成一坨、
+			// 也别铺满整屏——实机小屏上要"发光的眼"而不是"一片光雾"。
+			addGlow(&acc, col, dL, 10, 0.9)
+			addGlow(&acc, col, dR, 10, 0.9)
 			if dM < 1e8 {
-				addGlow(&acc, col, dM, 12, 0.75)
+				addGlow(&acc, col, dM, 8, 0.7)
 			}
 			// 实体填充。
 			composite(&acc, col, cov(dL))
