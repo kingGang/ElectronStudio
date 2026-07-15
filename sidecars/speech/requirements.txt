@@ -5,3 +5,5 @@ sounddevice>=0.4.6    # 麦克风采集 + 扬声器播放
 websockets>=12.0      # 与 Go 主程序的 WebSocket 桥接
 numpy>=1.24
 soundfile>=0.12.1     # 解码播放主程序送来的音频(如小智自带 TTS 的 Ogg/Opus)；内置 libsndfile，免 ffmpeg
+sentencepiece>=0.2.0  # 唤醒词：sherpa_onnx.text2token 把纯文本唤醒词转 token 时需要
+pypinyin>=0.50        # 唤醒词：中文唤醒词转拼音(ppinyin)token 时需要

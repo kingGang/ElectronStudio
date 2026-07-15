@@ -51,7 +51,8 @@ type sidecarMsg struct {
 	Text     string  `json:"text,omitempty"`
 	Final    bool    `json:"final,omitempty"`
 	Format   string  `json:"format,omitempty"` // type=play：音频容器格式（如 ogg）
-	Data     string  `json:"data,omitempty"`   // type=play：base64 编码的音频字节
+	Data     string  `json:"data,omitempty"`   // type=play/play_pcm/audio：base64 音频字节
+	SampleRate int   `json:"sample_rate,omitempty"` // type=play_pcm：PCM 采样率（默认 24000）
 }
 
 // NewSidecar 创建一个连接到 wsURL 的语音 sidecar 客户端（尚未连接，需调用 Start）。
@@ -182,6 +183,13 @@ func toEvent(m sidecarMsg) (Event, bool) {
 		return Event{Kind: KindVAD, Speaking: m.Speaking, Level: m.Level}, true
 	case KindASR:
 		return Event{Kind: KindASR, Text: m.Text, Final: m.Final}, true
+	case KindAudio:
+		// realtime 上行：base64 PCM → 原始字节，转发给云端。解码失败则丢弃这一块。
+		pcm, err := base64.StdEncoding.DecodeString(m.Data)
+		if err != nil {
+			return Event{}, false
+		}
+		return Event{Kind: KindAudio, PCM: pcm}, true
 	default:
 		return Event{}, false
 	}
@@ -200,6 +208,27 @@ func (s *Sidecar) PlayAudio(ctx context.Context, format string, data []byte) err
 		Type:   "play",
 		Format: format,
 		Data:   base64.StdEncoding.EncodeToString(data),
+	})
+}
+
+// StreamStart 让 sidecar 开始把麦克风原始音频（16k/单声道/int16）以 audio 事件上行，
+// 供 realtime 模式转发给云端语音大模型。本地 ASR 在此期间暂停。
+func (s *Sidecar) StreamStart(ctx context.Context) error {
+	return s.send(ctx, sidecarMsg{Type: "stream_start"})
+}
+
+// StreamStop 停止麦克风原始音频上行（恢复本地 ASR 链路）。
+func (s *Sidecar) StreamStop(ctx context.Context) error {
+	return s.send(ctx, sidecarMsg{Type: "stream_stop"})
+}
+
+// PlayPCM 让 sidecar 播放一段裸 PCM（realtime 云端 TTS 分片）。sampleRate 通常 24000。
+// 与 Speak/PlayAudio 共用同一条串行播放线程，abort 会一并清空。
+func (s *Sidecar) PlayPCM(ctx context.Context, pcm []byte, sampleRate int) error {
+	return s.send(ctx, sidecarMsg{
+		Type:       "play_pcm",
+		Data:       base64.StdEncoding.EncodeToString(pcm),
+		SampleRate: sampleRate,
 	})
 }
 

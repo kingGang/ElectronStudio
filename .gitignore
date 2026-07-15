@@ -33,6 +33,11 @@ __pycache__/
 *.bin
 !**/.gitkeep
 
+# 唤醒词(KWS)模型入库：体积 ~12MB，换机器免重下（sherpa-onnx zipformer wenetspeech）。
+# 因被 /sidecars/speech/models/ 与 *.onnx 双重忽略，无法用 ! 规则救回（git 不进被忽略的目录），
+# 故这几个文件是用 `git add -f` 强制纳入跟踪的：encoder/decoder/joiner.onnx + tokens.txt。
+# keywords.txt 由 sidecar 启动时按 config 的唤醒词自动生成，保持忽略（不 add）。
+
 # ===== 运行期数据（用户配置/录制/表情素材，不入库） =====
 /bin/
 /config.json

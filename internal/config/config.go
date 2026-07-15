@@ -55,6 +55,18 @@ type NetSpeechASR struct {
 	Model   string `json:"model,omitempty"` // 如 whisper-1
 }
 
+// RealtimeConfig 配置端到端实时语音对话（OpenAI-Realtime 兼容后端：qwen / glm）。
+// 启用后，唤醒词命中即建立云端会话，麦克风原始音频经 sidecar 转发上云，云端做 VAD/ASR/LLM/TTS，
+// 回音直播到设备喇叭；函数调用回传本地 tools 执行。空/enabled=false 时走原有本地链路。
+type RealtimeConfig struct {
+	Enabled  bool   `json:"enabled,omitempty"`
+	Provider string `json:"provider,omitempty"` // qwen（默认）| glm
+	WSBase   string `json:"ws_base,omitempty"`  // 如 wss://<workspace>.cn-beijing.maas.aliyuncs.com；空用后端默认
+	Model    string `json:"model,omitempty"`    // 如 qwen3.5-omni-flash-realtime（唯一支持工具的两个之一）
+	APIKey   string `json:"api_key,omitempty"`
+	Voice    string `json:"voice,omitempty"` // 音色；空用后端/部署默认（某些 MaaS 部署不认特定音色，留空最稳）
+}
+
 // GestureConfig 描述手势 sidecar 配置。
 type GestureConfig struct {
 	SidecarURL string `json:"sidecar_url,omitempty"`
@@ -164,8 +176,9 @@ type Config struct {
 	Persona       string  `json:"persona,omitempty"`        // 设备角色/人设（作为系统提示的人设部分）
 	PersonaSource string  `json:"persona_source,omitempty"` // local(用本机角色) | model(用模型自带角色,如小智服务端设定)，默认 local
 	Voice         string  `json:"voice,omitempty"`          // 声音音色（覆盖当前 TTS 引擎的音色）
-	Speech  SpeechConfig  `json:"speech"`
-	Gesture GestureConfig `json:"gesture"`
+	Speech   SpeechConfig   `json:"speech"`
+	Realtime RealtimeConfig `json:"realtime,omitempty"`
+	Gesture  GestureConfig  `json:"gesture"`
 	Camera  CameraConfig  `json:"camera"`
 	Music   MusicConfig   `json:"music"`
 	IO      IOConfig      `json:"io"`

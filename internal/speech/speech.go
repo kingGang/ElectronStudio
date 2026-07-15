@@ -17,16 +17,18 @@ import "context"
 type EventKind string
 
 const (
-	KindWake EventKind = "wake" // 命中唤醒词
-	KindVAD  EventKind = "vad"  // 语音活动变化
-	KindASR  EventKind = "asr"  // 语音识别结果
+	KindWake  EventKind = "wake"  // 命中唤醒词
+	KindVAD   EventKind = "vad"   // 语音活动变化
+	KindASR   EventKind = "asr"   // 语音识别结果
+	KindAudio EventKind = "audio" // realtime 上行：麦克风原始 PCM（16k/单声道/int16）
 )
 
 // Event 是来自 sidecar 的一条上行语音事件。
 // 不同 Kind 使用的字段不同：
-//   - Wake：Keyword
-//   - VAD ：Speaking、Level
-//   - ASR ：Text、Final
+//   - Wake ：Keyword
+//   - VAD  ：Speaking、Level
+//   - ASR  ：Text、Final
+//   - Audio：PCM（realtime 模式的原始麦克风音频，转发给云端语音大模型）
 type Event struct {
 	Kind     EventKind
 	Keyword  string  // Wake：命中的唤醒词
@@ -34,6 +36,7 @@ type Event struct {
 	Level    float32 // VAD：归一化电平 [0,1]
 	Text     string  // ASR：识别文本
 	Final    bool    // ASR：是否为最终结果
+	PCM      []byte  // Audio：原始 PCM 字节（16k/单声道/int16）
 }
 
 // Status 描述语音子服务的运行状态，用于上报给前端。

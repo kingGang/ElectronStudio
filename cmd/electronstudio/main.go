@@ -45,6 +45,7 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/music"
 	"github.com/kingGang/ElectronStudio/internal/netspeech"
 	"github.com/kingGang/ElectronStudio/internal/protocol"
+	"github.com/kingGang/ElectronStudio/internal/realtime"
 	"github.com/kingGang/ElectronStudio/internal/robot"
 	"github.com/kingGang/ElectronStudio/internal/robot/electronbot"
 	"github.com/kingGang/ElectronStudio/internal/scheduler"
@@ -205,6 +206,10 @@ type app struct {
 	schedPath     string
 	tools         *tools.Registry
 	log           *slog.Logger
+
+	rtMu      sync.Mutex        // 保护 rtSession
+	rtSession *realtimeSession  // 当前实时语音会话（nil=未在会话中）；见 realtime.go
+	rtBackend realtime.Backend  // 实时后端（qwen/glm），启动时按配置构造；nil=未启用实时
 
 	frameSeq atomic.Uint32 // 屏幕镜像帧序号
 
@@ -481,6 +486,13 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 
 	// 工具：注册可供大模型调用的工具（设备控制 / 情绪 / 动作 / 信息 / 音乐 / 天气 / 提醒 / 图片）。
 	a.tools = buildTools(a)
+
+	// 实时语音后端（可选）：配置了 realtime.enabled 且带 key 时构造。唤醒后建云端会话，
+	// 麦克风原始音频上云、云端回音直播到设备喇叭、函数调用回本地 tools 执行。
+	a.rtBackend = buildRealtimeBackend(cfg.Realtime)
+	if a.rtBackend != nil {
+		log.Info("已启用实时语音对话", "provider", cfg.Realtime.Provider, "model", cfg.Realtime.Model)
+	}
 	return a, nil
 }
 
@@ -841,6 +853,22 @@ func (a *app) handleSpeechEvent(ctx context.Context, ev speech.Event) {
 	if a.cfg.IO.AudioInOr() != "device" {
 		return
 	}
+	// 实时模式：唤醒即建云端会话，麦克风原始音频直接上云（云端做 VAD/ASR/LLM/TTS）。
+	// 本地 ASR 那条路（KindASR→debounceChat）在此模式下不会触发——sidecar 收到 stream_start
+	// 后就停发 asr、改发 audio，见 sidecar.py。
+	if a.realtimeEnabled() {
+		switch ev.Kind {
+		case speech.KindWake:
+			a.srv.Broadcast(protocol.WakeEvent{Keyword: ev.Keyword})
+			a.startRealtimeSession(ctx) // 建立/续期会话
+		case speech.KindVAD:
+			a.srv.Broadcast(protocol.VADEvent{Speaking: ev.Speaking, Level: ev.Level})
+		case speech.KindAudio:
+			a.feedRealtimeAudio(ev.PCM) // 麦克风原始音频推给云端
+		}
+		return
+	}
+
 	switch ev.Kind {
 	case speech.KindWake:
 		a.srv.Broadcast(protocol.WakeEvent{Keyword: ev.Keyword})

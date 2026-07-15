@@ -8,8 +8,13 @@
     sidecar → 主程序：{"type":"wake","keyword":...}
                       {"type":"vad","speaking":bool,"level":float}
                       {"type":"asr","text":...,"final":bool}
-    主程序 → sidecar：{"type":"speak","text":...}
-                      {"type":"abort"}
+                      {"type":"audio","data":<base64 PCM>}   # realtime 上行：麦克风原始音频
+                                                             #   16k/单声道/int16，仅 stream_start 后
+    主程序 → sidecar：{"type":"speak","text":...}            # 本地 TTS 合成播放
+                      {"type":"play","data":<base64 编码音频>} # 播一段已编码音频(Ogg/mp3…)
+                      {"type":"play_pcm","data":<base64 PCM>,"sample_rate":24000}  # realtime 下行：裸 PCM 分片
+                      {"type":"stream_start"} / {"type":"stream_stop"}  # 开/关麦克风原始音频上行
+                      {"type":"abort"}                         # 打断：清空播放队列 + 停当前播放
 
 模型由 sherpa-onnx 提供（ASR=SenseVoice，VAD=Silero，TTS=VITS，可选 KWS 唤醒）。
 请先用 download_models.{sh,ps1} 下载模型，并按 config.example.json 配置路径。
@@ -216,10 +221,22 @@ class Session:
         self._kws_stream = self.eng.spotter.create_stream() if self.eng.spotter else None
         self._awake_until = 0.0  # 门控模式：>now 时处于收听窗口内才转写
 
+        # realtime 模式：主程序发 stream_start 后，麦克风原始 PCM 直接流给主程序（转发给云端
+        # 端到端语音大模型），本地【不】再跑 ASR。stream_stop 关闭。唤醒词仍在本地跑（省流量）。
+        self._streaming = False
+
         # 播放队列 + 单线程串行播放：保证「逐句流式」音频按到达顺序、不重叠地播。
         self._play_q: "queue.Queue" = queue.Queue()
         self._play_thread = threading.Thread(target=self._play_worker, daemon=True)
         self._play_thread.start()
+
+        # realtime 云端 TTS 的【连续流】播放器：云端把音频切成几十毫秒的碎块下发，若逐块 sd.play+wait，
+        # 块间会有 WS 到达间隔 + 播放启停的空隙 → 声音一卡一卡。改用一个常驻 OutputStream + 环形缓冲：
+        # play_pcm 只把样本追加进缓冲，音频回调连续取、不足补零，块与块之间无缝衔接。
+        self._pcm_buf = np.zeros(0, dtype=np.float32)  # 待播样本（受 _pcm_lock 保护）
+        self._pcm_lock = threading.Lock()
+        self._pcm_stream = None                        # 懒启动的 sd.OutputStream
+        self._pcm_sr = 24000                           # 云端下行采样率（play_pcm 携带，默认 24k）
 
     # ---- 麦克风 ----
     def _mic_callback(self, indata, frames, time_info, status):
@@ -249,6 +266,10 @@ class Session:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+        if self._pcm_stream:  # 关闭 realtime 连续流播放器，释放扬声器
+            self._pcm_stream.stop()
+            self._pcm_stream.close()
+            self._pcm_stream = None
 
     # ---- 向主程序发事件（在事件循环线程中调用）----
     async def _emit(self, msg: dict):
@@ -280,6 +301,13 @@ class Session:
                     print(f"[wake] 命中唤醒词: {kw}", file=sys.stderr)
                     await self._emit({"type": "wake", "keyword": kw})
 
+            # 1.5) realtime 流：把麦克风原始 PCM（16k/单声道/int16 → base64）直接推给主程序，
+            #      由主程序转发给云端语音大模型（服务端自做 VAD/ASR/LLM/TTS）。此模式下【跳过】
+            #      本地 ASR（下面第 3 段），但 VAD 电平仍上报（驱动前端波形）、唤醒词仍在本地。
+            if self._streaming:
+                pcm16 = np.clip(block * 32767.0, -32768, 32767).astype("<i2").tobytes()
+                await self._emit({"type": "audio", "data": base64.b64encode(pcm16).decode("ascii")})
+
             # 2) VAD：喂入并上报说话状态 + 电平（驱动前端波形）。
             #    噪声门只作用于 VAD：低于门限的块当静音，滤掉恒定噪声底，VAD 才能正确收尾分段；
             #    KWS 不受影响（上面用的是未过门的 block），唤醒词不被切碎。
@@ -295,6 +323,11 @@ class Session:
 
             # 3) 完整语音段就绪 → （门控）离线识别 → 上报最终结果。
             #    门控模式(wake.enabled)：只有在唤醒窗口内才转写，否则丢弃语音段、不搭理。
+            #    realtime 流模式下【不】本地识别（云端做 ASR），但仍要清空 VAD 段队列避免积压。
+            if self._streaming:
+                while not self.eng.vad.empty():
+                    self.eng.vad.pop()
+                continue
             while not self.eng.vad.empty():
                 segment = self.eng.vad.front
                 samples = np.array(segment.samples, dtype=np.float32)  # 必须在 pop() 之前读，front 是内部引用，pop 后失效→空段
@@ -319,6 +352,13 @@ class Session:
 
     # ---- 处理来自主程序的下行命令（speak / abort）----
     async def handle_incoming(self):
+        try:
+            await self._handle_incoming_loop()
+        except websockets.ConnectionClosed:
+            pass  # 主程序断开是正常收尾，不当异常
+        self._running = False
+
+    async def _handle_incoming_loop(self):
         async for raw in self.ws:
             try:
                 msg = json.loads(raw)
@@ -333,10 +373,55 @@ class Session:
                 data = msg.get("data", "")
                 if data:
                     self._play_q.put(("audio", base64.b64decode(data)))
+            elif msg.get("type") == "play_pcm":
+                # realtime 云端下发的裸 PCM 分片（默认 24k/单声道/int16 base64）。走【连续流】播放器
+                # （_feed_pcm），碎块无缝衔接、不卡顿；不走 _play_q 的逐块 sd.play（那会块间有空隙）。
+                data = msg.get("data", "")
+                if data:
+                    sr = int(msg.get("sample_rate", 24000))
+                    self._feed_pcm(base64.b64decode(data), sr)
+            elif msg.get("type") == "stream_start":
+                self._streaming = True  # 开始把麦克风原始音频推给主程序
+                print("[stream] 开始上行麦克风原始音频（realtime）", file=sys.stderr)
+            elif msg.get("type") == "stream_stop":
+                self._streaming = False
+                print("[stream] 停止上行", file=sys.stderr)
             elif msg.get("type") == "abort":
-                self._drain_play()  # 清空待播队列
-                sd.stop()           # 立即停止当前播放
-        self._running = False
+                self._drain_play()  # 清空待播队列（speak/ogg 逐句播放）
+                self._stop_pcm()    # 清空 realtime 连续流缓冲（打断机器人当前发言）
+                sd.stop()           # 立即停止 sd.play 的当前播放
+
+    # ---- realtime 连续 PCM 流播放（无缝衔接碎块，消除卡顿）----
+    def _pcm_callback(self, outdata, frames, time_info, status):
+        """音频线程回调：从缓冲连续取 frames 个样本，不足补零（欠载时静音而非卡顿）。"""
+        with self._pcm_lock:
+            n = min(frames, len(self._pcm_buf))
+            if n > 0:
+                outdata[:n, 0] = self._pcm_buf[:n]
+                self._pcm_buf = self._pcm_buf[n:]
+            if n < frames:
+                outdata[n:, 0] = 0.0  # 欠载补零，避免爆音/卡顿
+
+    def _feed_pcm(self, raw: bytes, sr: int):
+        """把一块裸 int16 PCM 追加进连续流缓冲；首次调用时懒启动 OutputStream。"""
+        samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+        if self._pcm_stream is None or sr != self._pcm_sr:
+            if self._pcm_stream is not None:
+                self._pcm_stream.stop(); self._pcm_stream.close()
+            self._pcm_sr = sr
+            self._pcm_stream = sd.OutputStream(
+                samplerate=sr, channels=1, dtype="float32",
+                blocksize=0, callback=self._pcm_callback,
+                device=self.cfg.output_device,
+            )
+            self._pcm_stream.start()
+        with self._pcm_lock:
+            self._pcm_buf = np.concatenate([self._pcm_buf, samples])
+
+    def _stop_pcm(self):
+        """打断：清空连续流缓冲（下一帧回调即静音）。"""
+        with self._pcm_lock:
+            self._pcm_buf = np.zeros(0, dtype=np.float32)
 
     def _drain_play(self):
         """清空播放队列（打断时用）。"""

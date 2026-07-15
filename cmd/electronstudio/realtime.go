@@ -1,0 +1,268 @@
+package main
+
+import (
+	"context"
+	_ "embed"
+	"encoding/json"
+	"strings"
+	"time"
+
+	"github.com/kingGang/ElectronStudio/internal/config"
+	"github.com/kingGang/ElectronStudio/internal/protocol"
+	"github.com/kingGang/ElectronStudio/internal/realtime"
+	"github.com/kingGang/ElectronStudio/internal/speech"
+)
+
+// 唤醒/退出提示语，用 Qwen 音色预先录好（与实时对话音色一致，不用假的本地 TTS）。
+// 裸 PCM：24kHz / 单声道 / int16 小端。录制脚本见 scratchpad/record_prompts.py。
+//
+//go:embed assets/greeting.pcm
+var greetingPCM []byte
+
+//go:embed assets/goodbye.pcm
+var goodbyePCM []byte
+
+// promptSecs 估算一段 24k/单声道/int16 PCM 的播放秒数（用于播完再开麦/关会话的定时）。
+func promptSecs(pcm []byte) time.Duration {
+	return time.Duration(float64(len(pcm))/2/24000*float64(time.Second)) + 300*time.Millisecond
+}
+
+// realtimeSession 是一次进行中的实时语音会话。生命周期：唤醒词命中 → start，静默超时 /
+// 显式结束 → stop。会话内麦克风原始音频经 sidecar 转发上云，云端回音直播到设备喇叭。
+type realtimeSession struct {
+	client *realtime.Client
+	cancel context.CancelFunc
+	idle   *time.Timer // 静默计时：超时自动结束会话（省流量与费用）
+}
+
+// realtimeIdleTimeout：这么久没有新的用户音频/回复，就结束会话（下次唤醒再建）。
+const realtimeIdleTimeout = 30 * time.Second
+
+// buildRealtimeBackend 按配置构造实时后端；未启用或缺 key 返回 nil。
+func buildRealtimeBackend(cfg config.RealtimeConfig) realtime.Backend {
+	if !cfg.Enabled || cfg.APIKey == "" {
+		return nil
+	}
+	switch cfg.Provider {
+	case "", "qwen":
+		return &realtime.QwenBackend{WSBase: cfg.WSBase, Model: cfg.Model, APIKey: cfg.APIKey, Voice: cfg.Voice}
+	// case "glm": 待实现 GLMBackend
+	default:
+		return nil
+	}
+}
+
+// realtimeEnabled 报告实时语音是否可用（配置开启且后端已就绪）。
+func (a *app) realtimeEnabled() bool { return a.rtBackend != nil }
+
+// toolDefs 把当前工具注册表转换为 realtime 的中立工具定义（字段一一对应）。
+func (a *app) toolDefs() []realtime.ToolDef {
+	specs := a.tools.Specs()
+	out := make([]realtime.ToolDef, 0, len(specs))
+	for _, s := range specs {
+		out = append(out, realtime.ToolDef{Name: s.Name, Description: s.Description, Parameters: s.Parameters})
+	}
+	return out
+}
+
+// startRealtimeSession 在唤醒时建立会话：连云端、开麦克风原始音频上行、起事件消费循环。
+// 已在会话中则只续期静默计时。
+func (a *app) startRealtimeSession(parent context.Context) {
+	a.rtMu.Lock()
+	if a.rtSession != nil {
+		a.rtSession.idle.Reset(realtimeIdleTimeout)
+		a.rtMu.Unlock()
+		return
+	}
+	a.rtMu.Unlock()
+
+	client := realtime.New(a.rtBackend, a.log)
+	ctx, cancel := context.WithCancel(parent)
+	persona := buildSystemPrompt(a.cfg.Persona)
+	if err := client.Connect(ctx, persona, a.toolDefs()); err != nil {
+		a.log.Warn("实时会话建立失败", "err", err)
+		cancel()
+		return
+	}
+	sess := &realtimeSession{client: client, cancel: cancel}
+	sess.idle = time.AfterFunc(realtimeIdleTimeout, func() {
+		a.log.Info("实时会话静默超时，结束")
+		a.stopRealtimeSession()
+	})
+	a.rtMu.Lock()
+	a.rtSession = sess
+	a.rtMu.Unlock()
+
+	a.log.Info("实时语音会话已开始")
+	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceListening})
+	go a.consumeRealtime(ctx, sess)
+
+	// 唤醒反馈 + 延迟开麦：播预录的 Qwen 音色问候语（与对话音色一致），估时等它播完再【首次】开麦。
+	//
+	// 【为什么不让云端实时说问候】：试过会话刚建立就 SendText 让云端打招呼——那一瞬间 session 还没
+	// 就绪，云端只建 item、不生成 response；而首次开麦曾绑在问候的 response.done 上，于是问候没
+	// response → 麦永远不开 → 唤醒后毫无反应（踩过这个坑）。故首次开麦【不依赖云端】：播固定音频 +
+	// 固定延迟这条可靠路径。音色一致靠预录（见 greetingPCM）。
+	go func() {
+		sc, ok := a.speech.(*speech.Sidecar)
+		if !ok {
+			return
+		}
+		pctx, pc := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = sc.PlayPCM(pctx, greetingPCM, 24000)
+		pc()
+		time.Sleep(promptSecs(greetingPCM)) // 等问候播完再开麦，免得机器人把自己的问候当用户输入
+		a.rtMu.Lock()
+		still := a.rtSession == sess // 期间可能已被退出/超时结束
+		a.rtMu.Unlock()
+		if !still {
+			return
+		}
+		sctx, scc := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = sc.StreamStart(sctx)
+		scc()
+	}()
+}
+
+// stopRealtimeSession 结束当前会话：停麦克风上行、关云端连接。幂等。
+func (a *app) stopRealtimeSession() {
+	a.rtMu.Lock()
+	sess := a.rtSession
+	a.rtSession = nil
+	a.rtMu.Unlock()
+	if sess == nil {
+		return
+	}
+	sess.idle.Stop()
+	// 注意【不在这里 abort】：退出时若还有告别语在播，abort 会把它截断。上一轮残留音频的 abort
+	// 由退出分支自己在 SendText 告别【之前】做（见 consumeRealtime）。这里只停上行 + 关连接。
+	if sc, ok := a.speech.(*speech.Sidecar); ok {
+		ctx, c := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = sc.StreamStop(ctx)
+		c()
+	}
+	sess.cancel()
+	_ = sess.client.Close()
+	a.log.Info("实时语音会话已结束")
+	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
+}
+
+// feedRealtimeAudio 把一块麦克风原始音频推给云端（KindAudio 事件调用）。会话未开则忽略。
+func (a *app) feedRealtimeAudio(pcm []byte) {
+	a.rtMu.Lock()
+	sess := a.rtSession
+	a.rtMu.Unlock()
+	if sess == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := sess.client.PushAudio(ctx, pcm); err != nil {
+		a.log.Debug("推送实时音频失败", "err", err)
+	}
+}
+
+// consumeRealtime 消费云端下行事件：音频→设备喇叭、转写→UI、函数调用→本地执行、打断→停播放。
+func (a *app) consumeRealtime(ctx context.Context, sess *realtimeSession) {
+	sc, _ := a.speech.(*speech.Sidecar)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-sess.client.Events():
+			if !ok {
+				return
+			}
+			sess.idle.Reset(realtimeIdleTimeout) // 有活动就续期
+			switch ev.Kind {
+			case realtime.KindResponseStarted:
+				// 机器人开始说话 → 【半双工】暂停上行麦克风。否则设备麦离喇叭近，机器人会听到
+				// 自己的回音 → 云端 VAD 不停触发 → 自我打断/无限对话（实测过，喇叭永远出不了声）。
+				if sc != nil {
+					sctx, c := context.WithTimeout(context.Background(), 3*time.Second)
+					_ = sc.StreamStop(sctx)
+					c()
+				}
+			case realtime.KindAudio:
+				if sc != nil {
+					pctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+					if err := sc.PlayPCM(pctx, ev.Audio, 24000); err != nil { // 云端下行 pcm 24k
+						a.log.Warn("实时音频送设备失败", "err", err)
+					}
+					c()
+				}
+			case realtime.KindAssistantText:
+				a.srv.Broadcast(protocol.ChatEvent{Role: "assistant", Content: ev.Text, Status: "done"})
+			case realtime.KindUserTranscript:
+				a.srv.Broadcast(protocol.ASREvent{Text: ev.Text, Final: true})
+				// 语音退出：说"退出/退下/再见"等 → 播预录的 Qwen 音色告别语，播完关会话。
+				// 先 abort 掉上一轮还在播的音频（否则退出后它还会把上句讲完），再播告别（abort 之后入队，
+				// 不会被清），估时播完再关。告别音频与对话音色一致（见 goodbyePCM）。
+				if isExitCommand(ev.Text) {
+					a.log.Info("收到语音退出命令，播报告别后结束", "text", ev.Text)
+					if sc != nil {
+						sc.Stop() // abort：停掉上一轮尚未播完的音频
+						go func() {
+							pctx, pc := context.WithTimeout(context.Background(), 5*time.Second)
+							_ = sc.PlayPCM(pctx, goodbyePCM, 24000)
+							pc()
+							time.Sleep(promptSecs(goodbyePCM)) // 等告别播完再关会话
+							a.stopRealtimeSession()
+						}()
+					} else {
+						go a.stopRealtimeSession()
+					}
+					return // 会话即将关闭，退出消费循环
+				}
+			case realtime.KindSpeechStarted:
+				// 半双工下机器人说话时上行已停，故收到它=用户正常开口，不需要打断动作。
+			case realtime.KindFunctionCall:
+				go a.runRealtimeTool(ctx, sess, ev)
+			case realtime.KindResponseDone:
+				// 机器人说完 → 恢复上行麦克风，重新听用户。
+				if sc != nil {
+					sctx, c := context.WithTimeout(context.Background(), 3*time.Second)
+					_ = sc.StreamStart(sctx)
+					c()
+				}
+			case realtime.KindError:
+				a.log.Warn("实时会话错误", "msg", ev.Text)
+			}
+		}
+	}
+}
+
+// runRealtimeTool 执行一次云端请求的工具调用并把结果回传，触发云端基于结果续答。
+func (a *app) runRealtimeTool(ctx context.Context, sess *realtimeSession, ev realtime.Event) {
+	result, err := a.tools.Execute(ctx, ev.FuncName, ev.FuncArgs)
+	if err != nil {
+		a.log.Warn("实时工具执行失败", "name", ev.FuncName, "err", err)
+		result = toolErrJSON(err) // 把错误也回传给模型，让它自然告知用户
+	}
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := sess.client.SendFunctionResult(rctx, ev.CallID, result); err != nil {
+		a.log.Warn("回传工具结果失败", "err", err)
+	}
+}
+
+// toolErrJSON 把工具错误包装成一段 JSON 结果字符串回给模型。
+func toolErrJSON(err error) string {
+	b, _ := json.Marshal(map[string]string{"error": err.Error()})
+	return string(b)
+}
+
+// exitPhrases 是主动结束实时会话的语音命令关键词。用【包含】匹配，故写得明确些、避免误伤
+// （如不用单字"关闭"，否则"关闭台灯"会误退出）。
+var exitPhrases = []string{"退出", "再见", "拜拜", "结束对话", "结束会话", "关闭对话", "退下", "不聊了", "先这样", "下线"}
+
+// isExitCommand 判断一句用户转写是否为"退出实时对话"命令。
+func isExitCommand(text string) bool {
+	t := strings.Trim(strings.TrimSpace(text), "，。！？,.!?、 ")
+	for _, w := range exitPhrases {
+		if strings.Contains(t, w) {
+			return true
+		}
+	}
+	return false
+}
