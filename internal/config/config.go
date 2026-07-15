@@ -176,6 +176,7 @@ type Config struct {
 	Persona       string  `json:"persona,omitempty"`        // 设备角色/人设（作为系统提示的人设部分）
 	PersonaSource string  `json:"persona_source,omitempty"` // local(用本机角色) | model(用模型自带角色,如小智服务端设定)，默认 local
 	Voice         string  `json:"voice,omitempty"`          // 声音音色（覆盖当前 TTS 引擎的音色）
+	Face          string  `json:"face,omitempty"`           // 兜底表情脸：sdf(SDF 实时表情,默认) | classic(老程序脸)
 	Speech   SpeechConfig   `json:"speech"`
 	Realtime RealtimeConfig `json:"realtime,omitempty"`
 	Gesture  GestureConfig  `json:"gesture"`
@@ -212,6 +213,14 @@ func (c *Config) PersonaSourceOr() string {
 		return "model"
 	}
 	return "local"
+}
+
+// FaceOr 返回兜底表情脸类型，默认 sdf（SDF 实时表情）。填 classic 用老程序脸。
+func (c *Config) FaceOr() string {
+	if c.Face == "classic" {
+		return "classic"
+	}
+	return "sdf"
 }
 
 func orStr(v, def string) string {

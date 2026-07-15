@@ -23,3 +23,17 @@ type Face interface {
 	SetEmotion(emotion string) // AI / 用户设定当前情绪
 	SetSpeaking(speaking bool)  // TTS 播放期间为 true，用于口型动画
 }
+
+// FallbackFace 是兜底表情脸：在 Face 之上加 Invalidate（从摄像头切回时强制重画一帧，
+// 覆盖屏上残留）。程序动画脸 EmotionSource 与 SDF 脸 SDFFaceSource 都实现它，
+// 可由 config.face 选择其一作为 Compositor 的兜底。
+type FallbackFace interface {
+	Face
+	Invalidate()
+}
+
+// MouthLeveler 是可选能力：按真实说话音量(0..1)驱动口型，让嘴与对话同步。
+// SDFFaceSource 实现它；上层(如实时语音下行 RMS)可据此高频喂入。EmotionSource 不实现（节奏兜底）。
+type MouthLeveler interface {
+	SetMouthLevel(level float64)
+}

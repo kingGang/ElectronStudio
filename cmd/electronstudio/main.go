@@ -354,9 +354,16 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		})
 	}
 
-	// 画面源：摄像头(可选) + 离线素材片 + 程序实时动画脸(眨眼/口型, 兜底)。
+	// 画面源：摄像头(可选) + 离线素材片 + 实时动画脸(眨眼/口型, 兜底)。
 	// 统一设备驱动以固定帧率把"姿态 + 画面"一并 Sync 给设备，并把同一帧广播给 UI，实现镜像同步。
-	face := display.NewEmotionSource()
+	// 兜底脸按 config.face 选：sdf(SDF 实时表情,默认,边缘平滑、情绪连续 morph) | classic(老程序脸)。
+	var face display.FallbackFace
+	if cfg.FaceOr() == "classic" {
+		face = display.NewEmotionSource()
+	} else {
+		face = display.NewSDFFaceSource()
+	}
+	log.Info("表情脸", "type", cfg.FaceOr())
 	a.emotionsDir = filepath.Join(filepath.Dir(cfgPath), "emotions")
 	// 首次运行把内置默认表情播种到 emotions/（一生一次，尊重用户后续删除）。
 	if n, err := display.SeedDefaultEmotions(a.emotionsDir); err != nil {

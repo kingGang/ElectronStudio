@@ -14,9 +14,9 @@ type Compositor struct {
 	still      []byte // 临时静态图（最高优先级，如 MiniMax 生成图）；nil 表示无
 	stillTicks int    // 静态图剩余显示帧数
 
-	camera   *CameraSource  // 可为 nil
-	clip     *ClipSource    // 可为 nil
-	fallback *EmotionSource // 始终存在
+	camera   *CameraSource // 可为 nil
+	clip     *ClipSource   // 可为 nil
+	fallback FallbackFace  // 始终存在（EmotionSource 或 SDFFaceSource）
 }
 
 // ShowImage 在设备屏上临时显示一张静态图（240×240 RGB888）持续 seconds 秒，
@@ -36,8 +36,8 @@ func (c *Compositor) ShowImage(rgb []byte, seconds int) {
 	c.mu.Unlock()
 }
 
-// NewCompositor 创建组合源。camera / clip 可为 nil。
-func NewCompositor(camera *CameraSource, clip *ClipSource, fallback *EmotionSource) *Compositor {
+// NewCompositor 创建组合源。camera / clip 可为 nil；fallback 为兜底脸（程序脸或 SDF 脸）。
+func NewCompositor(camera *CameraSource, clip *ClipSource, fallback FallbackFace) *Compositor {
 	return &Compositor{emotion: "neutral", camera: camera, clip: clip, fallback: fallback}
 }
 
@@ -55,6 +55,13 @@ func (c *Compositor) SetEmotion(e string) {
 // SetSpeaking 实现 Face（口型仅作用于程序脸）。
 func (c *Compositor) SetSpeaking(b bool) {
 	c.fallback.SetSpeaking(b)
+}
+
+// SetMouthLevel 按真实说话音量(0..1)驱动口型，让嘴与对话同步。兜底脸支持时(SDF 脸)才生效。
+func (c *Compositor) SetMouthLevel(level float64) {
+	if ml, ok := c.fallback.(MouthLeveler); ok {
+		ml.SetMouthLevel(level)
+	}
 }
 
 // SetCamera 切换是否显示摄像头画面。关闭时强制程序脸重渲染，以覆盖屏上的摄像头残留帧。

@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"math"
 	"strings"
 	"time"
 
@@ -152,6 +153,7 @@ func (a *app) stopRealtimeSession() {
 	}
 	sess.cancel()
 	_ = sess.client.Close()
+	a.screen.SetSpeaking(false) // 会话结束，嘴合上、停口型
 	a.log.Info("实时语音会话已结束")
 	a.srv.Broadcast(protocol.VoiceStateEvent{State: protocol.VoiceIdle})
 }
@@ -192,7 +194,10 @@ func (a *app) consumeRealtime(ctx context.Context, sess *realtimeSession) {
 					_ = sc.StreamStop(sctx)
 					c()
 				}
+				a.screen.SetSpeaking(true) // 驱动表情口型，与对话同步
 			case realtime.KindAudio:
+				// 口型跟真实音量走：算这块下行 PCM 的 RMS 喂给表情脸，嘴按说话响度张合、贴合对话。
+				a.screen.SetMouthLevel(pcmMouthLevel(ev.Audio))
 				if sc != nil {
 					pctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 					if err := sc.PlayPCM(pctx, ev.Audio, 24000); err != nil { // 云端下行 pcm 24k
@@ -228,7 +233,8 @@ func (a *app) consumeRealtime(ctx context.Context, sess *realtimeSession) {
 			case realtime.KindFunctionCall:
 				go a.runRealtimeTool(ctx, sess, ev)
 			case realtime.KindResponseDone:
-				// 机器人说完 → 恢复上行麦克风，重新听用户。
+				// 机器人说完 → 恢复上行麦克风，重新听用户；嘴合上。
+				a.screen.SetSpeaking(false)
 				if sc != nil {
 					sctx, c := context.WithTimeout(context.Background(), 3*time.Second)
 					_ = sc.StreamStart(sctx)
@@ -239,6 +245,22 @@ func (a *app) consumeRealtime(ctx context.Context, sess *realtimeSession) {
 			}
 		}
 	}
+}
+
+// pcmMouthLevel 计算一块 PCM16 音频的 RMS 并映射到口型开合 0..1，让嘴按说话响度张合。
+func pcmMouthLevel(pcm []byte) float64 {
+	n := len(pcm) / 2
+	if n == 0 {
+		return 0
+	}
+	var sum float64
+	for i := 0; i+1 < len(pcm); i += 2 {
+		s := int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8)
+		f := float64(s) / 32768.0
+		sum += f * f
+	}
+	rms := math.Sqrt(sum / float64(n))
+	return math.Min(rms*4.5, 1) // 语音 RMS 常在 0.05~0.25，增益后铺满 0..1
 }
 
 // runRealtimeTool 执行一次云端请求的工具调用并把结果回传，触发云端基于结果续答。
