@@ -63,7 +63,7 @@ type faceParams struct {
 
 var (
 	sdfHi    = [3]float64{236, 255, 252} // 高光白
-	sdfPupil = [3]float64{6, 70, 96}     // 眼珠/虹膜（深青，随视线移动；不用绿/死黑）
+	sdfPupil = [3]float64{26, 132, 158}  // 眼珠/虹膜（偏亮的青蓝，随视线移动；别太深，免得在实机上掏成黑洞）
 )
 
 // 情绪→眼睛上下渐变色对（top,bottom）。刻意用高纯度色：实机自发光屏 + 辉光会把浅色冲白，
@@ -249,6 +249,11 @@ func (s *SDFFaceSource) blinkVal() float64 {
 	return math.Sin(math.Pi * float64(s.blinkT) / float64(s.blinkDur+1))
 }
 
+// breath 返回辉光的"呼吸"系数（~4.2s 一个周期，±30%）：让光晕一呼一吸地涨落，更有生命感。
+func (s *SDFFaceSource) breath() float64 {
+	return 1 + 0.3*math.Sin(float64(s.tick)*0.05)
+}
+
 func (s *SDFFaceSource) mouthOpenEff() float64 {
 	mo := s.cur.mouthOpen
 	if s.speaking || s.level > 0.02 {
@@ -284,6 +289,7 @@ func (s *SDFFaceSource) visualKey() uint64 {
 		add(s.cur.colA[i])
 		add(s.cur.colB[i])
 	}
+	add(s.breath()) // 呼吸脉动：光晕涨落时也要推帧（量化后约 ~10fps 级别，护 USB）
 	return h
 }
 
@@ -336,7 +342,7 @@ func addGlow(acc *[3]float64, col [3]float64, d, radius, strength float64) {
 	if d > radius*3.5 {
 		return
 	}
-	g := strength * math.Exp(-math.Max(d, 0)/radius)
+	g := clampf(strength*math.Exp(-math.Max(d, 0)/radius), 0, 1) // 呼吸时 strength 可能 >1，夹住免过曝
 	if g <= 0.002 {
 		return
 	}
@@ -391,9 +397,9 @@ func drawEyeball(acc *[3]float64, px, py, cx, cy, hw, hh, gx, gy, alpha, dEye fl
 	if a <= 0.02 {
 		return
 	}
-	pcx := cx + gx*hw*0.42 // 眼珠随视线移动
-	pcy := cy + gy*hh*0.38
-	pr := hw * 0.5
+	pcx := cx + gx*hw*0.4 // 眼珠随视线移动
+	pcy := cy + gy*hh*0.34
+	pr := hw * 0.4 // 眼珠小一点，别把眼睛掏成一个大黑洞（实机上会碎成横条）
 	composite(acc, sdfPupil, cov(sdfEllipse(px, py, pcx, pcy, pr, pr*1.05))*a) // 眼珠
 	// 双高光（眼珠上偏上，跟着眼珠一起动）
 	composite(acc, sdfHi, cov(math.Hypot(px-(pcx-pr*0.32), py-(pcy-pr*0.42))-pr*0.28)*a)
@@ -414,6 +420,7 @@ func (s *SDFFaceSource) render() {
 	mo := s.mouthOpenEff()
 	colA, colB := s.cur.colA, s.cur.colB // 眼睛上下渐变色
 	glowCol := colA                      // 辉光用亮顶色，光晕更通透
+	br := s.breath()                     // 呼吸脉动系数
 	sq, lt, la := s.cur.squint, s.cur.lidTop, s.cur.lidAngle
 	tilt := s.cur.tilt
 	ct, stt := math.Cos(tilt), math.Sin(tilt)
@@ -472,10 +479,10 @@ func (s *SDFFaceSource) render() {
 
 			// 辉光（填充之下向外扩散成 bloom）。收紧半径，别让左右眼的光在中间糊成一坨、
 			// 也别铺满整屏——实机小屏上要"发光的眼"而不是"一片光雾"。
-			addGlow(&acc, glowCol, dL, 11, 0.9)
-			addGlow(&acc, glowCol, dR, 11, 0.9)
+			addGlow(&acc, glowCol, dL, 11, 0.85*br)
+			addGlow(&acc, glowCol, dR, 11, 0.85*br)
 			if dM < 1e8 {
-				addGlow(&acc, glowCol, dM, 8, 0.7)
+				addGlow(&acc, glowCol, dM, 8, 0.66*br)
 			}
 			// 实体填充：眼睛上下双色渐变 + 顶部提亮(gloss)，颜色更丰富、有宝石质感；嘴用亮顶色。
 			if cL := cov(dL); cL > 0 {
