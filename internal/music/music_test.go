@@ -66,11 +66,11 @@ func TestKuwoParse(t *testing.T) {
 // TestQQSearchParse 验证新版 musicu.fcg 搜索响应解析（多歌手拼接）。
 func TestQQSearchParse(t *testing.T) {
 	var r qqSearchResp
-	body := `{"req_1":{"data":{"body":{"song":{"list":[{"mid":"abc123","name":"晴天","singer":[{"name":"周杰伦"},{"name":"嘉宾"}],"interval":269}]}}}}}`
+	body := `{"req":{"data":{"body":{"song":{"list":[{"mid":"abc123","name":"晴天","singer":[{"name":"周杰伦"},{"name":"嘉宾"}],"interval":269}]}}}}}`
 	if err := json.Unmarshal([]byte(body), &r); err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
-	l := r.Req1.Data.Body.Song.List
+	l := r.Req.Data.Body.Song.List
 	if len(l) != 1 || l[0].Mid != "abc123" || l[0].Name != "晴天" || len(l[0].Singer) != 2 || l[0].Interval != 269 {
 		t.Fatalf("解析错误: %+v", l)
 	}

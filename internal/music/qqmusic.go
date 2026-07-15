@@ -98,10 +98,12 @@ func (q *QQMusicSearcher) cookieHeader() string {
 // 取流会返回 104009 登录态校验失败；"10000" 才能配合登录 cookie 拿到 purl。
 const qqGUID = "10000"
 
-// qqSearchResp 对应新版 musicu.fcg 搜索模块响应：req_1.data.body.song.list[]。
-// （旧的 c.y.qq.com/client_search_cp 已废弃，匿名直接 500。）
+// qqSearchResp 对应新版 musicu.fcg 搜索模块响应：req.data.body.song.list[]。
+// （旧的 c.y.qq.com/client_search_cp 已废弃/404；musicu.fcg 若 comm 用 ct=24,cv=0
+// 会返回 code=0 但空列表——软拒绝，必须用 ct="19",cv="1859" 才出结果，见 Search。）
 type qqSearchResp struct {
-	Req1 struct {
+	Req struct {
+		Code int `json:"code"` // 0=正常；2001 多为限流/请求被判非法（带异常 cookie 或空格编成 '+' 都会触发）
 		Data struct {
 			Body struct {
 				Song struct {
@@ -116,7 +118,7 @@ type qqSearchResp struct {
 				} `json:"song"`
 			} `json:"body"`
 		} `json:"data"`
-	} `json:"req_1"`
+	} `json:"req"`
 }
 
 type qqVkeyResp struct {
@@ -131,12 +133,24 @@ type qqVkeyResp struct {
 	} `json:"req_0"`
 }
 
-func (q *QQMusicSearcher) do(ctx context.Context, rawURL string, out any) error {
+// fcgURL 组装 musicu.fcg 的请求地址。空格【必须】编成 %20：url.QueryEscape 会把空格编成 '+'，
+// 而 QQ 不把 '+' 当空格——带空格的查询（如“纯音乐 钢琴”）会被判为非法请求，直接 code=2001 空结果。
+func fcgURL(payload []byte) string {
+	return "https://u.y.qq.com/cgi-bin/musicu.fcg?format=json&data=" +
+		strings.ReplaceAll(url.QueryEscape(string(payload)), "+", "%20")
+}
+
+// do 发起一次 musicu.fcg 请求。withCookie 决定是否附带登录 cookie：
+// 搜索是免登录的，且实测【带上过期/异常的登录 cookie 反而会被判为非法请求(code=2001)返回空结果】，
+// 故搜索必须匿名(withCookie=false)；只有取流(vkey)需要 cookie 才能拿到账号可播的 purl。
+func (q *QQMusicSearcher) do(ctx context.Context, rawURL string, out any, withCookie bool) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Referer", "https://y.qq.com/")
-	if ck := q.cookieHeader(); ck != "" {
-		req.Header.Set("Cookie", ck)
+	if withCookie {
+		if ck := q.cookieHeader(); ck != "" {
+			req.Header.Set("Cookie", ck)
+		}
 	}
 	resp, err := q.client.Do(req)
 	if err != nil {
@@ -150,26 +164,36 @@ func (q *QQMusicSearcher) do(ctx context.Context, rawURL string, out any) error 
 }
 
 // Search 实现 Searcher（走新版 musicu.fcg 搜索模块，匿名可用）。
+// 关键：comm 必须是 ct="19",cv="1859"（字符串），且请求键用 "req"。实测 ct=24/cv=0 会被
+// 软拒绝（code=0 但空列表），QQ 2024+ 收紧了桌面端搜索的客户端版本校验。
 func (q *QQMusicSearcher) Search(ctx context.Context, query string) ([]Track, error) {
 	reqData := map[string]any{
-		"req_1": map[string]any{
+		"comm": map[string]any{"ct": "19", "cv": "1859", "uin": "0"},
+		"req": map[string]any{
 			"module": "music.search.SearchCgiService",
 			"method": "DoSearchForQQMusicDesktop",
 			"param": map[string]any{
+				"grp":          1,
+				"num_per_page": "20",
+				"page_num":     "1",
 				"query":        query,
-				"num_per_page": 10,
-				"page_num":     1,
+				"search_type":  "0",
 			},
 		},
 	}
 	payload, _ := json.Marshal(reqData)
-	u := "https://u.y.qq.com/cgi-bin/musicu.fcg?format=json&data=" + url.QueryEscape(string(payload))
+	u := fcgURL(payload)
 	q.throttle()
 	var r qqSearchResp
-	if err := q.do(ctx, u, &r); err != nil {
+	if err := q.do(ctx, u, &r, false); err != nil { // 搜索匿名：带 cookie 会被判非法(2001)
 		return nil, err
 	}
-	list := r.Req1.Data.Body.Song.List
+	list := r.Req.Data.Body.Song.List
+	// code!=0 且空列表：多为 QQ 限流(2001)，把 code 带进错误便于区分“真没搜到”与“被限流”。
+	if len(list) == 0 && r.Req.Code != 0 {
+		q.backoff()
+		return nil, fmt.Errorf("music: qq 搜索被拒 code=%d（多为限流，稍后重试）", r.Req.Code)
+	}
 	tracks := make([]Track, 0, len(list))
 	for _, it := range list {
 		names := make([]string, 0, len(it.Singer))
@@ -218,10 +242,10 @@ func (q *QQMusicSearcher) ResolveURL(ctx context.Context, t Track) (string, erro
 		"comm":     map[string]any{"uin": uin, "format": "json", "ct": 24, "cv": 0},
 	}
 	payload, _ := json.Marshal(reqData)
-	u := "https://u.y.qq.com/cgi-bin/musicu.fcg?format=json&data=" + url.QueryEscape(string(payload))
+	u := fcgURL(payload)
 	q.throttle()
 	var r qqVkeyResp
-	if err := q.do(ctx, u, &r); err != nil {
+	if err := q.do(ctx, u, &r, true); err != nil { // 取流需登录 cookie 才能拿到账号可播 purl
 		q.backoff()
 		return "", err
 	}
