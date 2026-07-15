@@ -13,6 +13,7 @@ type Compositor struct {
 
 	still      []byte // 临时静态图（最高优先级，如 MiniMax 生成图）；nil 表示无
 	stillTicks int    // 静态图剩余显示帧数
+	clipsOff   bool   // true 时跳过离线素材片，全部情绪交给兜底脸（SDF 模式：实时表情接管一切）
 
 	camera   *CameraSource // 可为 nil
 	clip     *ClipSource   // 可为 nil
@@ -64,6 +65,15 @@ func (c *Compositor) SetMouthLevel(level float64) {
 	}
 }
 
+// SetClipsEnabled 开关离线素材片层。关闭时所有情绪都由兜底脸（如 SDF 实时表情）渲染，
+// 不再被 emotions/ 里的默认/上传素材盖住。SDF 模式下由 main 关掉，让实时表情真正显现。
+func (c *Compositor) SetClipsEnabled(on bool) {
+	c.mu.Lock()
+	c.clipsOff = !on
+	c.mu.Unlock()
+	c.fallback.Invalidate() // 切换即强制兜底脸重画一帧，覆盖屏上残留
+}
+
 // SetCamera 切换是否显示摄像头画面。关闭时强制程序脸重渲染，以覆盖屏上的摄像头残留帧。
 func (c *Compositor) SetCamera(on bool) {
 	c.mu.Lock()
@@ -79,6 +89,7 @@ func (c *Compositor) Frame() []byte {
 	c.mu.Lock()
 	e := c.emotion
 	cam := c.showCamera
+	clipsOff := c.clipsOff
 	// 静态图最高优先级：在 TTL 内每帧返回它；到期清除并让程序脸重渲染覆盖。
 	if c.still != nil && c.stillTicks > 0 {
 		c.stillTicks--
@@ -97,7 +108,8 @@ func (c *Compositor) Frame() []byte {
 		return c.camera.Frame()
 	}
 	// 单次调用原子地判定“该情绪有无素材”并取帧，避免 Has()+Frame() 之间的竞态。
-	if c.clip != nil {
+	// clipsOff（SDF 模式）时跳过素材层，直接用兜底脸渲染所有情绪。
+	if !clipsOff && c.clip != nil {
 		if f := c.clip.FrameFor(e); f != nil {
 			return f
 		}

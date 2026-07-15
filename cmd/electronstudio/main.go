@@ -383,6 +383,10 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	}
 	a.clips = display.NewClipSource(clips)
 	a.screen = display.NewCompositor(a.camera, a.clips, face)
+	// SDF 模式：实时表情脸接管所有情绪，跳过离线素材片（否则默认/上传素材会盖住 SDF 脸）。
+	if cfg.FaceOr() == "sdf" {
+		a.screen.SetClipsEnabled(false)
+	}
 	// 机器人连接放到【最后一刻】：真机有“连接后就绪窗口”，连上后必须尽快开始 Sync，否则
 	// 窗口过期、设备不再发就绪包(帧首读超时)。前面的表情播种等慢初始化都已做完，这里连上后
 	// 紧接着 NewDriver→newApp 返回→main 里 driver.Run(已排最前) 即首帧，间隔最短、稳命中窗口。
