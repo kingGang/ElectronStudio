@@ -223,10 +223,10 @@ func (s *SDFFaceSource) step() {
 		s.sacSeed = s.sacSeed*1103515245 + 12345
 		tg := gazeTargets[int(s.sacSeed%uint32(len(gazeTargets)))]
 		s.sacTX, s.sacTY = tg[0], tg[1]
-		s.nextSac = s.tick + 40 + int((s.sacSeed>>16)%70) // 停留 ~1.3~3.7s
+		s.nextSac = s.tick + 28 + int((s.sacSeed>>16)%46) // 停留 ~0.9~2.5s，看得更勤、更活
 	}
 	se := func(cur, tgt float64) float64 {
-		n := cur + (tgt-cur)*0.35 // 扫视要快（saccade）
+		n := cur + (tgt-cur)*0.45 // 扫视要快（saccade）
 		if math.Abs(tgt-n) < 0.004 {
 			return tgt
 		}
@@ -249,9 +249,15 @@ func (s *SDFFaceSource) blinkVal() float64 {
 	return math.Sin(math.Pi * float64(s.blinkT) / float64(s.blinkDur+1))
 }
 
-// breath 返回辉光的"呼吸"系数（~4.2s 一个周期，±30%）：让光晕一呼一吸地涨落，更有生命感。
+// breath 返回辉光"呼吸"系数（~4.6s 周期，±22%）：光晕柔和涨落。幅度不宜大，否则低色深屏会闪。
 func (s *SDFFaceSource) breath() float64 {
-	return 1 + 0.3*math.Sin(float64(s.tick)*0.05)
+	return 1 + 0.22*math.Sin(float64(s.tick)*0.046)
+}
+
+// floatY 是整张脸缓慢上下"浮动"的位移（~5s 周期，±2.4px）：移动的是实心形状、不像渐变那样在
+// 低色深屏上带状化，读起来像轻轻呼吸/漂浮，很自然的灵动感。
+func (s *SDFFaceSource) floatY() float64 {
+	return 2.4 * math.Sin(float64(s.tick)*0.041)
 }
 
 func (s *SDFFaceSource) mouthOpenEff() float64 {
@@ -289,7 +295,8 @@ func (s *SDFFaceSource) visualKey() uint64 {
 		add(s.cur.colA[i])
 		add(s.cur.colB[i])
 	}
-	add(s.breath()) // 呼吸脉动：光晕涨落时也要推帧（量化后约 ~10fps 级别，护 USB）
+	add(s.breath())      // 呼吸脉动：光晕涨落时也要推帧
+	add(s.floatY() * 4)  // 整脸浮动：位移变化也要推帧（放大量化精度，让浮动更连续）
 	return h
 }
 
@@ -410,11 +417,12 @@ func drawEyeball(acc *[3]float64, px, py, cx, cy, hw, hh, gx, gy, alpha, dEye fl
 func (s *SDFFaceSource) render() {
 	const (
 		cx0, cy0 = 120.0, 120.0
-		eyeY     = 104.0
 		eyeDX    = 44.0
-		mouthCy  = 172.0
 		scrR     = 119.0
 	)
+	fl := s.floatY()      // 整脸缓慢上下浮动
+	eyeY := 104.0 + fl    // 眼、嘴一起浮，像轻轻呼吸
+	mouthCy := 172.0 + fl
 	blink := s.blinkVal()
 	eyeOpen := clampf(s.cur.eyeOpen*(1-blink), 0, 1)
 	mo := s.mouthOpenEff()
@@ -479,10 +487,10 @@ func (s *SDFFaceSource) render() {
 
 			// 辉光（填充之下向外扩散成 bloom）。收紧半径，别让左右眼的光在中间糊成一坨、
 			// 也别铺满整屏——实机小屏上要"发光的眼"而不是"一片光雾"。
-			addGlow(&acc, glowCol, dL, 11, 0.85*br)
-			addGlow(&acc, glowCol, dR, 11, 0.85*br)
+			addGlow(&acc, glowCol, dL, 8.5, 0.9*br)
+			addGlow(&acc, glowCol, dR, 8.5, 0.9*br)
 			if dM < 1e8 {
-				addGlow(&acc, glowCol, dM, 8, 0.66*br)
+				addGlow(&acc, glowCol, dM, 7, 0.72*br)
 			}
 			// 实体填充：眼睛上下双色渐变 + 顶部提亮(gloss)，颜色更丰富、有宝石质感；嘴用亮顶色。
 			if cL := cov(dL); cL > 0 {
