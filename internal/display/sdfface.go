@@ -58,15 +58,13 @@ type faceParams struct {
 	tilt       float64    // 头倾(弧度，confused)
 	asym       float64    // 左右不对称(confused)
 	cross      float64    // 斗鸡眼：两眼向内看（鬼脸）
-	tongue     float64    // 吐舌 0..1（鬼脸）
 	colA       [3]float64 // 眼睛【上部】渐变色（顶色，通常更亮更青）
 	colB       [3]float64 // 眼睛【下部】渐变色（底色，通常更深偏蓝）——上下双色让颜色更丰富、有质感
 }
 
 var (
 	sdfHi     = [3]float64{236, 255, 252} // 高光白
-	sdfPupil  = [3]float64{20, 96, 150}   // 眼珠/虹膜（较深的蓝，配大高光才像参考图；实机上眼够大就不会掏成洞）
-	sdfTongue = [3]float64{255, 120, 150} // 吐舌（暖粉，鬼脸用）
+	sdfPupil = [3]float64{20, 96, 150} // 眼珠/虹膜（较深的蓝，配大高光才像参考图；实机上眼够大就不会掏成洞）
 )
 
 // 情绪→眼睛上下渐变色对（top,bottom）。刻意用高纯度色：实机自发光屏 + 辉光会把浅色冲白，
@@ -215,7 +213,6 @@ func (s *SDFFaceSource) step() {
 	c.tilt = e(c.tilt, t.tilt)
 	c.asym = e(c.asym, t.asym)
 	c.cross = e(c.cross, t.cross)
-	c.tongue = e(c.tongue, t.tongue)
 	for i := 0; i < 3; i++ {
 		c.colA[i] = e(c.colA[i], t.colA[i])
 		c.colB[i] = e(c.colB[i], t.colB[i])
@@ -309,7 +306,6 @@ func (s *SDFFaceSource) visualKey() uint64 {
 	add(s.cur.tilt)
 	add(s.cur.asym)
 	add(s.cur.cross)
-	add(s.cur.tongue)
 	for i := 0; i < 3; i++ {
 		add(s.cur.colA[i])
 		add(s.cur.colB[i])
@@ -462,18 +458,12 @@ func (s *SDFFaceSource) render() {
 	gx := clampf(s.cur.gazeX+s.sacX, -1, 1)             // 有效视线 = 情绪偏置 + idle 扫视
 	gy := clampf(s.cur.gazeY+s.sacY, -1, 1)
 
-	// 嘴：小而干净的微笑弧 + 张嘴椭圆（对齐弧心，避免错位导致"嘴巴很奇怪"）。
-	const mn = 15
-	mCurveY := mouthCy + s.cur.mouthCurve*12 // 微笑弧的中心 y
-	var mpx, mpy [mn]float64
-	for i := 0; i < mn; i++ {
-		u := float64(i)/(mn-1)*2 - 1
-		mpx[i] = cx0 + u*18 // 嘴更窄、更小巧
-		mpy[i] = mouthCy + s.cur.mouthCurve*12*(1-u*u)
-	}
-	openRy := mo * 15
-	openCy := mCurveY + openRy*0.4 // 张嘴向下开，跟弧心对齐
-	cross := s.cur.cross           // 斗鸡眼：两眼向内看（鬼脸）
+	// 嘴：一条平滑的"曲线带"——中间厚、两端收尖，形状干净利落。
+	// 笑/皱靠曲率(mArc)，说话/惊讶靠中间加厚(mOpen)。整条嘴是一个连续形状，不再是折线+椭圆拼接。
+	mHW := 22.0                   // 嘴半宽
+	mArc := s.cur.mouthCurve * 12 // 弧度：+ 上扬(笑) / - 下弯(皱)
+	mOpen := mo * 13              // 张嘴：中段加厚成口腔
+	cross := s.cur.cross          // 斗鸡眼：两眼向内看（鬼脸）
 
 	for y := 0; y < scrH; y++ {
 		fy := float64(y) - cy0
@@ -493,17 +483,13 @@ func (s *SDFFaceSource) render() {
 
 			// 嘴 SDF（仅嘴带内算；带要够宽以覆盖辉光衰减，否则边界会有一道缝）。
 			dM := 1e9
-			if py > 130 && py < 214 {
-				for i := 0; i < mn-1; i++ {
-					if dd := sdfSeg(px, py, mpx[i], mpy[i], mpx[i+1], mpy[i+1]); dd < dM {
-						dM = dd
-					}
-				}
-				dM -= 3.4 // 嘴线细一点、干净小巧
-				if openRy > 0.5 {
-					if do := sdfEllipse(px, py, cx0, openCy, 12, openRy); do < dM {
-						dM = do
-					}
+			if py > 138 && py < 210 {
+				u := (px - cx0) / mHW
+				if uu := u * u; uu < 1 {
+					edge := math.Sqrt(1 - uu)      // 中心 1 → 两端 0，让嘴角自然收尖
+					yc := mouthCy + mArc*(1-uu)    // 曲线中心（笑往下弯、皱往上弯）
+					band := (1.8+mOpen)*edge + 1.1 // 厚度：中间厚(张嘴更厚)、两端细
+					dM = math.Abs(py-yc) - band    // 竖直近似距离，对抗锯齿足够
 				}
 			}
 
@@ -527,11 +513,6 @@ func (s *SDFFaceSource) render() {
 			// 眼珠（随视线移动）+ 高光。
 			drawEyeball(&acc, px, py, lcx, eyeY, hw, hh, clampf(gx+cross, -1.2, 1.2), gy, hiA, dL)
 			drawEyeball(&acc, px, py, rcx, eyeY, hw*rScale, hh*rScale, clampf(gx-cross, -1.2, 1.2), gy, hiA, dR)
-				// 吐舌（鬼脸）：嘴下方一枚暖色小圆舌。
-				if s.cur.tongue > 0.05 && py > mCurveY {
-					dt := sdfEllipse(px, py, cx0, mCurveY+6+s.cur.tongue*5, 8, 11*s.cur.tongue)
-					composite(&acc, sdfTongue, cov(dt)*clampf(s.cur.tongue*1.5, 0, 1))
-				}
 
 			// 圆屏遮罩：边缘淡出到黑（设备是圆屏）。
 			m := clampf(scrR-rr, 0, 1)
