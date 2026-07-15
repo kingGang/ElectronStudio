@@ -225,6 +225,10 @@ func (q *QQMusicSearcher) ResolveURL(ctx context.Context, t Track) (string, erro
 		uin = "0"
 	}
 	// 载荷形态实测要点：req_0 + 顶层 loginUin + guid=10000，配合登录 cookie 才不会 104009。
+	// filename 前缀决定音频格式：【必须要 M500(128k mp3)】——播放器用 mpg123，它只解 MP3，
+	// 不认 AAC/M4A。默认(songtype=0/不带 filename)返回的是 C400 .m4a，mpg123 无法解码→有画面无声。
+	// media_mid 由 QQ 按 songmid 自行确定，这里 filename 仅用于声明想要的格式前缀。
+	filename := []string{"M500" + t.ID + t.ID + ".mp3"}
 	reqData := map[string]any{
 		"req_0": map[string]any{
 			"module": "vkey.GetVkeyServer",
@@ -232,6 +236,7 @@ func (q *QQMusicSearcher) ResolveURL(ctx context.Context, t Track) (string, erro
 			"param": map[string]any{
 				"guid":      qqGUID,
 				"songmid":   []string{t.ID},
+				"filename":  filename,
 				"songtype":  []int{0},
 				"uin":       uin,
 				"loginflag": 1,
