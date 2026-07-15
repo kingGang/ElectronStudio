@@ -1030,6 +1030,11 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 			a.handleSetVolume(cmd)
 		}
 
+	case protocol.TypeSetRealtime:
+		if cmd, err := protocol.As[protocol.SetRealtimeCommand](in.Env); err == nil {
+			go a.handleSetRealtime(cmd) // 可能停会话+关云端连接，放后台避免阻塞分发循环
+		}
+
 	default:
 		a.log.Debug("未处理的命令类型", "type", in.Env.Type)
 	}
@@ -1713,6 +1718,14 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 			DeviceVolume: a.cfg.IO.DeviceVolumeOr(),
 			ServoEnable:  a.cfg.IO.ServoEnable,
 		},
+		Realtime: protocol.RealtimeStatus{
+			Enabled:  a.cfg.Realtime.Enabled,
+			Provider: a.cfg.Realtime.Provider,
+			WSBase:   a.cfg.Realtime.WSBase,
+			Model:    a.cfg.Realtime.Model,
+			Voice:    a.cfg.Realtime.Voice,
+			HasKey:   a.cfg.Realtime.APIKey != "", // 只报有没有，不回传 key 明文
+		},
 		Music:         protocol.MusicStatus{Source: a.cfg.Music.SourceOr(), LoggedIn: a.cfg.Music.SourceOr() == "qq" && a.cfg.Music.QQ.Cookie != ""},
 		Persona:       a.cfg.Persona,
 		PersonaSource: a.cfg.PersonaSourceOr(),
@@ -1761,6 +1774,42 @@ func (a *app) handleSetIO(cmd protocol.SetIOCommand) {
 		a.driver.SetServoEnable(*cmd.ServoEnable)
 		a.log.Info("舵机总开关已切换", "on", *cmd.ServoEnable)
 	}
+	a.srv.Broadcast(a.statusSnapshot())
+}
+
+// handleSetRealtime 更新实时语音对话配置（设置页）：落盘 → 结束当前会话 → 热重建后端 → 广播状态。
+// 空/nil 字段表示不改动（api_key 尤其：状态里从不回传明文，空即保留原值，避免脱敏回显把它清空）。
+func (a *app) handleSetRealtime(cmd protocol.SetRealtimeCommand) {
+	a.cfgMu.Lock()
+	if cmd.Enabled != nil {
+		a.cfg.Realtime.Enabled = *cmd.Enabled
+	}
+	if cmd.Provider != "" {
+		a.cfg.Realtime.Provider = cmd.Provider
+	}
+	if cmd.WSBase != "" {
+		a.cfg.Realtime.WSBase = cmd.WSBase
+	}
+	if cmd.Model != "" {
+		a.cfg.Realtime.Model = cmd.Model
+	}
+	if cmd.APIKey != "" {
+		a.cfg.Realtime.APIKey = cmd.APIKey
+	}
+	if cmd.Voice != "" {
+		a.cfg.Realtime.Voice = cmd.Voice
+	}
+	rtCfg := a.cfg.Realtime
+	a.saveConfig()
+	a.cfgMu.Unlock()
+
+	// 配置变了：结束进行中的会话（旧后端），再热重建。stopRealtimeSession 自己管 rtMu，故先调它、
+	// 不能在持有 rtMu 时调（会死锁）。
+	a.stopRealtimeSession()
+	a.rtMu.Lock()
+	a.rtBackend = buildRealtimeBackend(rtCfg)
+	a.rtMu.Unlock()
+	a.log.Info("实时语音配置已更新", "enabled", rtCfg.Enabled, "provider", rtCfg.Provider, "model", rtCfg.Model)
 	a.srv.Broadcast(a.statusSnapshot())
 }
 

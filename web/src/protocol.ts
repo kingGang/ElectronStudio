@@ -58,6 +58,7 @@ export const ClientType = {
   SetIO: 'set_io',
   SetDevice: 'set_device',
   SetVolume: 'set_volume',
+  SetRealtime: 'set_realtime',
   Party: 'party',
   Reenable: 'reenable',
 } as const
@@ -68,6 +69,17 @@ export interface SetIOCommand {
   tts_engine?: string
   image_out?: string
   servo_enable?: boolean // 舵机总开关；省略=不改动（false 是有意义的取值：卸力）
+}
+
+// 更新实时语音对话配置（设置页）。空/省略字段表示不改动。
+// 改动 ws_base/model/api_key 会触发后端热重建并结束当前会话。
+export interface SetRealtimeCommand {
+  enabled?: boolean // 省略=不改动（false 是有意义的取值：关实时）
+  provider?: string
+  ws_base?: string
+  model?: string
+  api_key?: string  // 空=不改动（避免脱敏回显把已存 key 清空）
+  voice?: string
 }
 
 export interface ScheduleAddCommand {
@@ -148,6 +160,7 @@ export interface StatusEvent {
   camera?: boolean    // 是否配置了摄像头
   camera_on?: boolean // 摄像头当前是否开启（前端据此同步开关）
   io?: IOStatus      // I/O 路由当前配置
+  realtime?: RealtimeStatus // 实时语音对话当前配置（供设置页展示/编辑）
   music?: MusicStatus // 音乐子系统状态（音源）
   persona?: string   // 设备角色/人设
   voice?: string     // 声音音色
@@ -167,6 +180,17 @@ export interface IOStatus {
   image_out: string     // device | page | both | off
   device_volume: number // 设备扬声器音量 0~100
   servo_enable: boolean // 舵机总开关：false 时不上扭矩（可手动摆姿）
+}
+
+// 实时语音对话当前配置（供设置页显示与编辑）。
+// 出于安全【不回传 API key 明文】——只用 has_key 报告是否已配置。
+export interface RealtimeStatus {
+  enabled: boolean
+  provider?: string
+  ws_base?: string
+  model?: string
+  voice?: string
+  has_key: boolean // 是否已配置 API key（不回传明文）
 }
 
 export interface VoiceStateEvent {

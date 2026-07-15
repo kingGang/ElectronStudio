@@ -71,6 +71,7 @@ const (
 	TypeSetIO          Type = "set_io"          // 更新 I/O 路由配置（设置页）
 	TypeSetDevice      Type = "set_device"      // 设置设备角色(人设)与音色（设置页）
 	TypeSetVolume      Type = "set_volume"      // 设置设备扬声器音量(0~100)
+	TypeSetRealtime    Type = "set_realtime"    // 更新实时语音对话配置（设置页）
 	TypeParty          Type = "party"           // 一键蹦迪：同时放歌 + 循环跳舞（踩拍变脸）
 	TypeReenable       Type = "reenable"        // 舵机重新上扭矩（过载保护锁存后靠它解锁）
 )

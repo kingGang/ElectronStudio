@@ -62,6 +62,8 @@
 }}
 // status.payload 另含 io: { audio_in, audio_out, tts_engine, image_out, device_volume(0~100),
 //   servo_enable(bool，舵机总开关：false 时不上扭矩、可手动摆姿) }。
+// 另含 realtime: { enabled(bool), provider, ws_base, model, voice, has_key(bool，是否已配置 key，
+//   【不回传明文】) }——实时语音对话当前配置。
 // 另含 camera(bool，是否配置摄像头) / camera_on(bool，当前是否开启，前端据此同步切换按钮)。
 // 设置类命令（前端→后端，设置页用，均即时落盘并广播新 status）：
 //   set_io { audio_in/audio_out/tts_engine/image_out/servo_enable }
@@ -69,6 +71,10 @@
 //     切换 servo_enable 即时生效：驱动下一帧按新值下发使能位，无需重启。
 //   set_device { persona, persona_source, voice }
 //   set_volume { volume: 0~100 }    // 设备扬声器音量（macOS 经 playto 设 USB 声卡）
+//   set_realtime { enabled, provider, ws_base, model, api_key, voice }
+//     enabled 是 bool 且省略即不改动（false 有意义：关实时）；其余为字符串、空串即不改动。
+//     api_key 空串=不改动（状态从不回传明文，避免脱敏回显把已存 key 清空）。
+//     改 ws_base/model/api_key 会热重建后端并结束当前进行中的实时会话（下次唤醒用新配置）。
 
 // 流式对话（同一 id 多次更新）
 { "type": "chat", "ts": 1781170001000, "payload": {

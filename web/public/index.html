@@ -292,6 +292,36 @@
       </details>
     </section>
     <section class="panel">
+      <h2>🎙️ 实时语音对话</h2>
+      <p class="muted">开启后，唤醒机器人即接入云端实时语音大模型（边说边听、可打断）；关闭则走本地 ASR + 大模型 + TTS 链路。唤醒词与设备音频输入/输出照常沿用上面的设置。</p>
+      <label class="io-row" title="总开关。开启后唤醒即走云端实时语音；需先在下方填好服务地址、模型与 API Key。">
+        <span>启用实时对话</span>
+        <input type="checkbox" id="rt-enabled" />
+        <b id="rt-note" class="muted" style="flex:1">实时对话已关闭：唤醒后走本地 ASR + LLM + TTS 链路。</b>
+      </label>
+      <div class="io-grid">
+        <label class="io-row"><span>服务商</span>
+          <select id="rt-provider">
+            <option value="qwen">通义千问 Omni（DashScope 实时）</option>
+          </select>
+        </label>
+        <label class="io-row"><span>服务地址（WSS）</span>
+          <input id="rt-ws_base" placeholder="wss://…maas.aliyuncs.com" style="flex:1" />
+        </label>
+        <label class="io-row"><span>模型</span>
+          <input id="rt-model" placeholder="qwen3.5-omni-flash-realtime" style="flex:1" />
+        </label>
+        <label class="io-row"><span>音色（可选）</span>
+          <input id="rt-voice" placeholder="留空用部署默认音色" style="flex:1" />
+        </label>
+        <label class="io-row"><span>API Key</span>
+          <input id="rt-api_key" type="password" placeholder="未配置，请填入 API Key" style="flex:1" />
+        </label>
+      </div>
+      <p class="muted">改动服务地址 / 模型 / Key 后点保存生效——保存会热重建后端并结束当前进行中的实时会话（下次唤醒用新配置）。API Key 出于安全不回显，留空表示不修改。</p>
+      <button class="qa" id="rt-save">保存实时对话配置</button>
+    </section>
+    <section class="panel">
       <h2>音乐</h2>
       <div class="kv"><span>当前音源</span><b id="music-source-label">—</b></div>
       <div class="kv"><span>QQ 登录</span><b id="qq-login-state">—</b></div>

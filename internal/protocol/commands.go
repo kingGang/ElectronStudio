@@ -226,6 +226,20 @@ type SetIOCommand struct {
 // Type 实现 Payload。
 func (SetIOCommand) Type() Type { return TypeSetIO }
 
+// SetRealtimeCommand 更新实时语音对话配置（设置页）。nil/空字段表示不改动。
+// 改动后端点/model/key 会触发后端热重建；正在进行的实时会话会被结束。
+type SetRealtimeCommand struct {
+	Enabled  *bool  `json:"enabled,omitempty"` // 指针：false 是有意义的取值（关实时）
+	Provider string `json:"provider,omitempty"`
+	WSBase   string `json:"ws_base,omitempty"`
+	Model    string `json:"model,omitempty"`
+	APIKey   string `json:"api_key,omitempty"` // 空=不改动（避免脱敏回显把 key 清空）
+	Voice    string `json:"voice,omitempty"`
+}
+
+// Type 实现 Payload。
+func (SetRealtimeCommand) Type() Type { return TypeSetRealtime }
+
 // MaterialDeleteCommand 删除一段屏幕表情素材（按情绪名）。上传走 HTTP（POST /api/materials）。
 type MaterialDeleteCommand struct {
 	Name string `json:"name"`

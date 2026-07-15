@@ -53,7 +53,12 @@ func buildRealtimeBackend(cfg config.RealtimeConfig) realtime.Backend {
 }
 
 // realtimeEnabled 报告实时语音是否可用（配置开启且后端已就绪）。
-func (a *app) realtimeEnabled() bool { return a.rtBackend != nil }
+// 用 rtMu 保护：设置页 handleSetRealtime 会热替换 rtBackend，与此并发读冲突。
+func (a *app) realtimeEnabled() bool {
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	return a.rtBackend != nil
+}
 
 // toolDefs 把当前工具注册表转换为 realtime 的中立工具定义（字段一一对应）。
 func (a *app) toolDefs() []realtime.ToolDef {
@@ -74,9 +79,13 @@ func (a *app) startRealtimeSession(parent context.Context) {
 		a.rtMu.Unlock()
 		return
 	}
+	backend := a.rtBackend // 同锁内取，避免与 handleSetRealtime 的热替换竞争
 	a.rtMu.Unlock()
+	if backend == nil {
+		return // 会话建立前配置刚被关掉/热重建成 nil
+	}
 
-	client := realtime.New(a.rtBackend, a.log)
+	client := realtime.New(backend, a.log)
 	ctx, cancel := context.WithCancel(parent)
 	persona := buildSystemPrompt(a.cfg.Persona)
 	if err := client.Connect(ctx, persona, a.toolDefs()); err != nil {

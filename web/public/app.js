@@ -24,6 +24,7 @@
     Camera: 'camera', Greet: 'greet', Music: 'music', Party: 'party',
     ScheduleAdd: 'schedule_add', ScheduleRemove: 'schedule_remove',
     MaterialDelete: 'material_delete', SetIO: 'set_io', SetDevice: 'set_device', SetVolume: 'set_volume',
+    SetRealtime: 'set_realtime',
   };
 
   // 6 轴关节名称（顺序与后端 robot.JointNames 一致，即官方下发给固件的线上顺序：头在 0 号）。
@@ -403,6 +404,7 @@
       updateVoiceVisibility(s.io.tts_engine);
       updateSceneRadio(s.io);
     }
+    if (s.realtime) renderRealtime(s.realtime);
     if (s.music) {
       musicSource = s.music.source || '';
       const lbl = $('music-source-label');
@@ -830,6 +832,53 @@
     if (save) save.addEventListener('click', () => { saveDevice(); toast('已保存人设'); });
     loadVoices(); // 初次加载当前引擎的音色列表
     updateVoiceVisibility();
+  }
+
+  // ---- 实时语音对话配置（设置页；开关即时生效，文本字段点保存下发）----
+  // 后端把空字符串当作"不改动"，api_key 更是从不回传明文，故：文本框留空=保留原值；
+  // 状态里只有 has_key 布尔，用它决定 key 输入框的占位提示。
+  function renderRealtime(rt) {
+    const en = $('rt-enabled');
+    if (en) en.checked = !!rt.enabled;
+    const prov = $('rt-provider');
+    if (prov && rt.provider) prov.value = rt.provider;
+    const setIfIdle = (id, v) => {
+      const el = $(id);
+      if (el && document.activeElement !== el && typeof v === 'string') el.value = v;
+    };
+    setIfIdle('rt-ws_base', rt.ws_base);
+    setIfIdle('rt-model', rt.model);
+    setIfIdle('rt-voice', rt.voice);
+    const key = $('rt-api_key');
+    if (key && document.activeElement !== key) {
+      key.value = ''; // 从不回填明文
+      key.placeholder = rt.has_key ? '已配置（留空则不修改）' : '未配置，请填入 API Key';
+    }
+    const note = $('rt-note');
+    if (note) note.textContent = rt.enabled
+      ? '实时对话已开启：唤醒后走云端实时语音链路（' + (rt.model || rt.provider || '') + '）。'
+      : '实时对话已关闭：唤醒后走本地 ASR + LLM + TTS 链路。';
+  }
+  function setupRealtime() {
+    const en = $('rt-enabled');
+    if (en) en.addEventListener('change', () => {
+      send(CliType.SetRealtime, { enabled: en.checked });
+      toast(en.checked ? '实时对话已开启' : '实时对话已关闭');
+    });
+    const save = $('rt-save');
+    if (save) save.addEventListener('click', () => {
+      const payload = {
+        provider: (($('rt-provider') && $('rt-provider').value) || '').trim(),
+        ws_base: (($('rt-ws_base') && $('rt-ws_base').value) || '').trim(),
+        model: (($('rt-model') && $('rt-model').value) || '').trim(),
+        voice: (($('rt-voice') && $('rt-voice').value) || '').trim(),
+      };
+      const key = (($('rt-api_key') && $('rt-api_key').value) || '').trim();
+      if (key) payload.api_key = key; // 仅在填了新值时下发，避免清空已存 key
+      send(CliType.SetRealtime, payload);
+      if ($('rt-api_key')) $('rt-api_key').value = '';
+      toast('实时对话配置已保存');
+    });
   }
 
   // 音色下拉：从 /api/voices 拉当前引擎可用音色，含"默认/自定义"项。
@@ -1626,5 +1675,6 @@
   setupRecord();
   setupMaterials();
   setupIO();
+  setupRealtime();
   connect();
 })();

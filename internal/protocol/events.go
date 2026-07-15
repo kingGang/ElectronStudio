@@ -92,8 +92,9 @@ type StatusEvent struct {
 	Actions []string      `json:"actions,omitempty"` // 可用的编排动作名（供动作编排页使用）
 	Camera   bool         `json:"camera"`              // 是否配置了摄像头（前端据此显示切换按钮）
 	CameraOn bool         `json:"camera_on"`           // 摄像头当前是否开启（前端据此同步开关；不省略，false 也要明确上报）
-	IO      IOStatus      `json:"io"`                // I/O 路由当前配置（供设置页展示/编辑）
-	Music   MusicStatus   `json:"music"`             // 音乐子系统状态（音源等，供前端展示）
+	IO       IOStatus       `json:"io"`       // I/O 路由当前配置（供设置页展示/编辑）
+	Realtime RealtimeStatus `json:"realtime"` // 实时语音对话当前配置（供设置页展示/编辑）
+	Music    MusicStatus    `json:"music"`    // 音乐子系统状态（音源等，供前端展示）
 	Persona       string  `json:"persona,omitempty"`        // 设备角色/人设（供设置页展示/编辑）
 	PersonaSource string  `json:"persona_source,omitempty"` // local | model（角色来源：本机/模型自带）
 	Voice         string  `json:"voice,omitempty"`          // 声音音色（供设置页展示/编辑）
@@ -113,6 +114,17 @@ type IOStatus struct {
 	ImageOut     string `json:"image_out"`     // device | page | both | off
 	DeviceVolume int    `json:"device_volume"` // 设备扬声器音量 0~100
 	ServoEnable  bool   `json:"servo_enable"`  // 舵机总开关：false 时不上扭矩（可手动摆姿）
+}
+
+// RealtimeStatus 是实时语音对话的当前配置（供设置页显示与编辑）。
+// 【不回传 API key 明文】——只用 HasKey 报告是否已配置，避免密钥经 WebSocket 外泄。
+type RealtimeStatus struct {
+	Enabled  bool   `json:"enabled"`
+	Provider string `json:"provider,omitempty"`
+	WSBase   string `json:"ws_base,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Voice    string `json:"voice,omitempty"`
+	HasKey   bool   `json:"has_key"` // 是否已配置 API key（不回传明文）
 }
 
 // Type 实现 Payload。
