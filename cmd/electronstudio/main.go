@@ -697,6 +697,10 @@ func buildTools(a *app) *tools.Registry {
 		t, err := a.music.SearchAndPlay(ctx, query)
 		if err != nil {
 			a.log.Warn("播放音乐失败", "query", query, "err", err)
+			if errors.Is(err, music.ErrRateLimited) {
+				// 限流是暂时的，且与登录/版权无关——别再误导成"需登录"。
+				return "", fmt.Errorf("《%s》暂时没放成：音源正忙(限流)，过一会儿再试。这不是登录或版权问题。", query)
+			}
 			return "", fmt.Errorf("没能播放《%s》：%w（在线音源可能无版权或需登录，可改用「生成音乐」）", query, err)
 		}
 		return fmt.Sprintf("正在播放：%s - %s", t.Name, t.Artist), nil
@@ -1535,7 +1539,12 @@ func (a *app) handleMusic(ctx context.Context, cmd protocol.MusicCommand) {
 	case "play":
 		if _, err := a.music.SearchAndPlay(ctx, cmd.Query); err != nil {
 			a.log.Warn("播放音乐失败", "query", cmd.Query, "err", err)
-			a.srv.Broadcast(protocol.ErrorEvent{Code: "music_error", Message: "没能播放《" + cmd.Query + "》：在线音源无版权或需登录"})
+			msg := "没能播放《" + cmd.Query + "》：在线音源无版权或需登录"
+			if errors.Is(err, music.ErrRateLimited) {
+				// 限流 ≠ 没登录：给出准确、不误导的提示。
+				msg = "《" + cmd.Query + "》暂时没放成：音源正忙(限流)，过一会儿再试(不是登录问题)"
+			}
+			a.srv.Broadcast(protocol.ErrorEvent{Code: "music_error", Message: msg})
 		}
 	case "pause":
 		a.music.Pause()

@@ -3,6 +3,7 @@ package music
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,6 +11,10 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrRateLimited 表示音源(QQ)对本机 IP 限流(典型是搜索返回 code=2001)。这是【暂时性】的，
+// 与账号登录态、歌曲版权都无关；上层据此给"稍后重试"的提示，别再误报成"需登录/无版权"。
+var ErrRateLimited = errors.New("music: 音源限流，请稍后重试")
 
 // 防风控参数：请求限速 + 取流地址缓存 + 失败退避。目标是让调用频率/形态贴近正常听歌，
 // 避免短时间高频取流触发腾讯风控（详见 README 风险说明）。
@@ -189,10 +194,10 @@ func (q *QQMusicSearcher) Search(ctx context.Context, query string) ([]Track, er
 		return nil, err
 	}
 	list := r.Req.Data.Body.Song.List
-	// code!=0 且空列表：多为 QQ 限流(2001)，把 code 带进错误便于区分“真没搜到”与“被限流”。
+	// code!=0 且空列表：多为 QQ 限流(2001)。包成 ErrRateLimited，让上层能与“真没搜到/需登录”区分。
 	if len(list) == 0 && r.Req.Code != 0 {
 		q.backoff()
-		return nil, fmt.Errorf("music: qq 搜索被拒 code=%d（多为限流，稍后重试）", r.Req.Code)
+		return nil, fmt.Errorf("%w（qq code=%d）", ErrRateLimited, r.Req.Code)
 	}
 	tracks := make([]Track, 0, len(list))
 	for _, it := range list {
