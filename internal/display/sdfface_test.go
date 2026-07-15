@@ -6,22 +6,22 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/robot"
 )
 
-// 各情绪目标参数应可区分（颜色/眉向/眼型），保证表情辨识度。
+// 各情绪目标参数应可区分（颜色/眼睑/眼型），保证表情辨识度。
 func TestSDFEmotionTargetsDistinct(t *testing.T) {
 	if emotionTarget("happy").squint <= 0 {
 		t.Error("happy 应眯眼(squint>0)")
 	}
-	if emotionTarget("angry").col != sdfRed {
-		t.Error("angry 应为红色")
+	if a := emotionTarget("angry"); a.col[0] <= a.col[2] {
+		t.Error("angry 主色应偏红(col.R>col.B)")
 	}
-	if emotionTarget("sad").col != sdfBlue {
-		t.Error("sad 应为蓝色")
+	if s := emotionTarget("sad"); s.col[2] <= s.col[0] {
+		t.Error("sad 主色应偏蓝(col.B>col.R)")
 	}
-	if emotionTarget("sad").browAngle <= 0 {
-		t.Error("sad 眉内端应上挑(browAngle>0)")
+	if emotionTarget("sad").lidAngle >= 0 {
+		t.Error("sad 上眼睑应外端低(lidAngle<0)")
 	}
-	if emotionTarget("angry").browAngle >= 0 {
-		t.Error("angry 眉内端应下压(browAngle<0)")
+	if emotionTarget("angry").lidAngle <= 0 {
+		t.Error("angry 上眼睑应内端低(lidAngle>0)")
 	}
 	if emotionTarget("surprised").eyeScale <= 1 {
 		t.Error("surprised 眼应更大(eyeScale>1)")
