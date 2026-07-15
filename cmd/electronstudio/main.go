@@ -676,7 +676,7 @@ func (a *app) applyDeviceVolume(device string, vol int) {
 func buildTools(a *app) *tools.Registry {
 	reg := tools.NewRegistry()
 
-	emotions := []string{"neutral", "happy", "sad", "angry", "surprised", "confused"}
+	emotions := []string{"neutral", "happy", "sad", "angry", "surprised", "confused", "silly"}
 	reg.Register(tools.EmotionTool(emotions, func(e string) error {
 		a.setEmotion(e)
 		return nil
