@@ -119,12 +119,10 @@ func emotionTarget(e string) faceParams {
 		p.asym = 1
 		p.lidTop = 0.12
 		p.mouthCurve = -0.08
-	case "silly": // 鬼脸：斗鸡眼 + 吐舌 + 咧嘴
-		p.cross = 0.7
-		p.tongue = 1
-		p.mouthOpen = 0.5
-		p.mouthCurve = 0.5
-		p.squint = 0.25
+	case "silly": // 鬼脸：斗鸡眼 + 咧嘴傻笑（同色系，不用突兀的粉舌头）
+		p.cross = 0.9
+		p.mouthOpen = 0.42
+		p.mouthCurve = 0.9
 	}
 	p.colA, p.colB = emotionColors(e)
 	return p
@@ -398,7 +396,7 @@ func mix3(a, b [3]float64, t float64) [3]float64 {
 func eyeGrad(top, bot [3]float64, py, cy, hh float64) [3]float64 {
 	t := clampf((py-(cy-hh))/(2*hh), 0, 1)
 	c := mix3(top, bot, t)
-	gloss := 1.12 - 0.30*t // 顶亮底暗
+	gloss := 1.18 - 0.12*t // 顶更亮、底也不压太暗（整体更亮丽）
 	return [3]float64{clampf(c[0]*gloss, 0, 255), clampf(c[1]*gloss, 0, 255), clampf(c[2]*gloss, 0, 255)}
 }
 
