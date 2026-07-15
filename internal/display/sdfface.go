@@ -26,10 +26,22 @@ type SDFFaceSource struct {
 	nextBlink int
 	blinkT    int
 	blinkDur  int
-	cur       faceParams
-	buf       []byte
-	lastKey   uint64
-	haveLast  bool
+	// idle 扫视（眼珠自主看看别处，显得灵动）：当前/目标偏移 + 下次扫视时刻 + 伪随机种子。
+	sacX, sacY, sacTX, sacTY float64
+	nextSac                  int
+	sacSeed                  uint32
+	cur                      faceParams
+	buf                      []byte
+	lastKey                  uint64
+	haveLast                 bool
+}
+
+// gazeTargets 是 idle 扫视的候选落点（含多次回中，避免一直乱瞟）。
+var gazeTargets = [][2]float64{
+	{0, 0}, {0, 0}, {0, 0},
+	{-0.65, -0.08}, {0.65, -0.08},
+	{-0.45, 0.28}, {0.5, 0.24},
+	{0, -0.3}, {0.25, 0.05}, {-0.28, 0.05},
 }
 
 // faceParams 是一组连续表情参数；每种情绪一组目标值，当前值每帧向目标缓动。
@@ -52,7 +64,8 @@ var (
 	sdfMint  = [3]float64{190, 245, 232} // 柔和薄荷（眼/嘴主色）
 	sdfSadC  = [3]float64{158, 206, 246} // 悲伤淡蓝
 	sdfAngC  = [3]float64{246, 188, 194} // 愤怒淡红（可爱不刺眼）
-	sdfHi = [3]float64{244, 255, 253} // 高光白
+	sdfHi    = [3]float64{244, 255, 253} // 高光白
+	sdfPupil = [3]float64{28, 96, 92}    // 眼珠（比眼身深的青，随视线移动；不用死黑，免得生硬）
 )
 
 // emotionTarget 给出某情绪的目标表情参数。
@@ -96,6 +109,8 @@ func NewSDFFaceSource() *SDFFaceSource {
 		buf:       make([]byte, robot.ImageBytesRGB888),
 		nextBlink: 55,
 		blinkDur:  7,
+		nextSac:   40,
+		sacSeed:   0x2545F491,
 	}
 }
 
@@ -185,6 +200,23 @@ func (s *SDFFaceSource) step() {
 	} else if s.tick >= s.nextBlink {
 		s.blinkT = 1
 	}
+
+	// idle 扫视：到点挑个新落点，眼珠快速移过去、停留一会儿。让脸显得在"看东西"、更灵动。
+	if s.tick >= s.nextSac {
+		s.sacSeed = s.sacSeed*1103515245 + 12345
+		tg := gazeTargets[int(s.sacSeed%uint32(len(gazeTargets)))]
+		s.sacTX, s.sacTY = tg[0], tg[1]
+		s.nextSac = s.tick + 40 + int((s.sacSeed>>16)%70) // 停留 ~1.3~3.7s
+	}
+	se := func(cur, tgt float64) float64 {
+		n := cur + (tgt-cur)*0.35 // 扫视要快（saccade）
+		if math.Abs(tgt-n) < 0.004 {
+			return tgt
+		}
+		return n
+	}
+	s.sacX = se(s.sacX, s.sacTX)
+	s.sacY = se(s.sacY, s.sacTY)
 	if s.tick-s.levelTick > 5 && s.level > 0 {
 		s.level *= 0.7
 		if s.level < 0.02 {
@@ -225,8 +257,8 @@ func (s *SDFFaceSource) visualKey() uint64 {
 	add(s.cur.lidTop)
 	add(s.cur.lidAngle)
 	add(s.cur.eyeScale)
-	add(s.cur.gazeX)
-	add(s.cur.gazeY)
+	add(s.cur.gazeX + s.sacX) // 含 idle 扫视，眼珠移动时才推帧
+	add(s.cur.gazeY + s.sacY)
 	add(s.cur.mouthCurve)
 	add(s.mouthOpenEff())
 	add(s.cur.tilt)
@@ -321,15 +353,20 @@ func eyeSDF(px, py, cx, cy, hw, hh, rC float64, squint, lidTop, lidAngle, sign f
 	return d
 }
 
-// drawHi 画一只眼的双高光（大 + 小），alpha 随睁眼度淡入淡出。
-func drawHi(acc *[3]float64, px, py, cx, cy, hw, hh, alpha float64) {
-	if alpha <= 0.02 {
+// drawEyeball 画一只眼的【眼珠】：深青圆珠随视线(gx,gy)在眼内移动 + 双高光，整体裁进眼形内
+// （dEye 为该像素到眼形的距离，只在眼内绘制，免得极端视线时眼珠跑到眼外的黑底上）。
+func drawEyeball(acc *[3]float64, px, py, cx, cy, hw, hh, gx, gy, alpha, dEye float64) {
+	a := alpha * cov(dEye) // 只在眼内
+	if a <= 0.02 {
 		return
 	}
-	// 大高光（偏上偏内）
-	composite(acc, sdfHi, cov(math.Hypot(px-(cx-hw*0.30), py-(cy-hh*0.40))-hw*0.26)*alpha)
-	// 小高光（偏下偏外）
-	composite(acc, sdfHi, cov(math.Hypot(px-(cx+hw*0.22), py-(cy-hh*0.06))-hw*0.12)*alpha)
+	pcx := cx + gx*hw*0.42 // 眼珠随视线移动
+	pcy := cy + gy*hh*0.38
+	pr := hw * 0.5
+	composite(acc, sdfPupil, cov(sdfEllipse(px, py, pcx, pcy, pr, pr*1.05))*a) // 眼珠
+	// 双高光（眼珠上偏上，跟着眼珠一起动）
+	composite(acc, sdfHi, cov(math.Hypot(px-(pcx-pr*0.32), py-(pcy-pr*0.42))-pr*0.28)*a)
+	composite(acc, sdfHi, cov(math.Hypot(px-(pcx+pr*0.28), py-(pcy-pr*0.04))-pr*0.14)*a)
 }
 
 // render 逐像素渲染当前表情到 buf。
@@ -355,7 +392,9 @@ func (s *SDFFaceSource) render() {
 	rC := math.Min(hw, hh) * 0.88
 	rScale := 1 - 0.14*s.cur.asym // confused 右眼略小
 	lcx, rcx := cx0-eyeDX, cx0+eyeDX
-	hiA := clampf(eyeOpen*(1-sq*1.3), 0, 1) // 眯眼/闭眼时收起高光
+	hiA := clampf(eyeOpen*(1-sq*1.3), 0, 1)              // 眯眼/闭眼时收起眼珠
+	gx := clampf(s.cur.gazeX+s.sacX, -1, 1)             // 有效视线 = 情绪偏置 + idle 扫视
+	gy := clampf(s.cur.gazeY+s.sacY, -1, 1)
 
 	// 嘴：抛物线折线 + 张嘴椭圆。
 	const mn = 15
@@ -412,9 +451,9 @@ func (s *SDFFaceSource) render() {
 			if dM < 1e8 {
 				composite(&acc, col, cov(dM))
 			}
-			// 双高光。
-			drawHi(&acc, px, py, lcx, eyeY, hw, hh, hiA)
-			drawHi(&acc, px, py, rcx, eyeY, hw*rScale, hh*rScale, hiA)
+			// 眼珠（随视线移动）+ 高光。
+			drawEyeball(&acc, px, py, lcx, eyeY, hw, hh, gx, gy, hiA, dL)
+			drawEyeball(&acc, px, py, rcx, eyeY, hw*rScale, hh*rScale, gx, gy, hiA, dR)
 
 			// 圆屏遮罩：边缘淡出到黑（设备是圆屏）。
 			m := clampf(scrR-rr, 0, 1)
