@@ -54,10 +54,15 @@ type faceParams struct {
 	browAngle float64 // 眉内端：+ 上挑(难过/无辜) / - 下压(生气)
 	browRaise float64 // 眉整体抬高（scared 更高、angry 更低）
 	cross     float64 // 斗鸡眼（鬼脸）
-	asym      float64 // 左右不对称（疑惑）
+	asym      float64 // 左右不对称（疑惑：右眉更高）
+	wink      float64 // 眨单眼（左眼闭）——winking
+	tears     float64 // 眼下泪滴——crying
+	shades    float64 // 墨镜横条盖眼——cool
+	sweat     float64 // 尴尬汗滴——embarrassed
+	smirk     float64 // 坏笑：嘴一角上扬——confident
 	mouthCurve float64 // 嘴角 -1皱..+1笑（0=平直短横）
 	mouthOpen  float64 // 0..1 张嘴基线
-	tilt       float64 // 头倾（疑惑）
+	tilt       float64 // 头倾（疑惑/俏皮）
 	col        [3]float64 // 眼/嘴主色（实心）
 }
 
@@ -69,43 +74,110 @@ var (
 // emotionColor 给出情绪的实心主色（照参考图）。
 func emotionColor(e string) [3]float64 {
 	switch e {
-	case "sad":
+	case "sad", "crying":
 		return [3]float64{150, 200, 247} // 淡蓝
 	case "angry":
-		return [3]float64{247, 165, 130} // 橙桃
-	case "surprised":
+		return [3]float64{248, 118, 90} // 红橙（更红更凶）
+	case "surprised", "shocked":
 		return [3]float64{245, 236, 156} // 亮黄
-	case "confused":
+	case "confused", "thinking":
 		return [3]float64{212, 180, 247} // 淡紫
+	case "loving":
+		return [3]float64{248, 150, 190} // 粉
+	case "embarrassed":
+		return [3]float64{248, 176, 168} // 暖粉（脸红）
+	case "sleepy":
+		return [3]float64{182, 194, 236} // 柔蓝紫
 	case "silly":
 		return [3]float64{150, 246, 150} // 亮绿
-	default: // neutral / happy
+	default: // neutral / happy / laughing / funny / cool / confident / winking
 		return [3]float64{124, 240, 240} // 青
 	}
 }
 
-// emotionTarget 给出某情绪的目标表情参数（照参考图）。
+// emotionTarget 给出某情绪的目标表情参数（照参考图；刻意夸张）。
 func emotionTarget(e string) faceParams {
 	p := faceParams{eyeOpen: 1, eyeScale: 1}
 	switch e {
 	case "happy":
-		p.mouthCurve = 0.75
-		p.squint = 0.12
+		p.mouthCurve = 0.9
+		p.squint = 0.35
+	case "laughing":
+		p.squint = 0.8 // ∩∩ 眯眼大笑
+		p.mouthCurve = 0.9
+		p.mouthOpen = 0.6
+	case "funny":
+		p.squint = 0.6
+		p.mouthCurve = 1.0
+		p.mouthOpen = 0.45
+		p.tilt = 0.08
 	case "sad":
-		p.mouthCurve = -0.5
+		p.mouthCurve = -0.55
 		p.brow = 1
-		p.browAngle = 0.6 // 内端上挑
-		p.browRaise = 0.15
-		p.gazeY = 0.16
+		p.browAngle = 0.7
+		p.browRaise = 0.2
+		p.gazeY = 0.18
 		p.eyeOpen = 0.9
 	case "angry":
-		p.mouthCurve = -0.42
+		p.mouthCurve = -0.5
 		p.brow = 1
-		p.browAngle = -0.7 // 内端下压
-		p.browRaise = -0.25
+		p.browAngle = -0.9 // 更凶
+		p.browRaise = -0.35
+		p.eyeScale = 0.96
+	case "crying":
+		p.mouthCurve = -0.62
+		p.mouthOpen = 0.32
+		p.brow = 1
+		p.browAngle = 0.6
+		p.browRaise = 0.15
+		p.tears = 1
+		p.eyeOpen = 0.82
+		p.gazeY = 0.2
+	case "loving":
+		p.mouthCurve = 0.85
+		p.squint = 0.28
+		p.eyeScale = 1.06
+	case "embarrassed":
+		p.mouthCurve = -0.12
+		p.squint = 0.22
+		p.gazeX = 0.42 // 别开眼
+		p.sweat = 1
 	case "surprised":
-		p.tall = 0.18
-		p.mouthOpen = 0.5
+		p.tall = 0.2
+		p.mouthOpen = 0.55
+	case "shocked":
+		p.tall = 0.38
+		p.eyeScale = 1.12
+		p.mouthOpen = 0.88 // 大张
+	case "thinking":
+		p.gazeX = 0.5 // 往右上想
+		p.gazeY = -0.4
+		p.brow = 1
+		p.browAngle = -0.12
+		p.browRaise = 0.3
+		p.asym = 1
+		p.mouthCurve = -0.05
+		p.tilt = 0.06
+	case "cool":
+		p.shades = 1 // 墨镜
+		p.mouthCurve = 0.28
+		p.smirk = 0.6
+	case "confident":
+		p.lidTop = 0.28 // 半眯
+		p.smirk = 1     // 坏笑
+		p.mouthCurve = 0.4
+		p.brow = 1
+		p.browAngle = -0.1
+		p.browRaise = 0.12
+		p.asym = 1
+	case "sleepy":
+		p.lidTop = 0.6 // 眼皮沉
+		p.mouthOpen = 0.15
+		p.gazeY = 0.22
+	case "winking":
+		p.wink = 1 // 眨左眼
+		p.mouthCurve = 0.65
+		p.squint = 0.15
 	case "confused":
 		p.brow = 1
 		p.browAngle = 0.35
@@ -205,6 +277,11 @@ func (s *SDFFaceSource) step() {
 	c.browRaise = e(c.browRaise, t.browRaise)
 	c.cross = e(c.cross, t.cross)
 	c.asym = e(c.asym, t.asym)
+	c.wink = e(c.wink, t.wink)
+	c.tears = e(c.tears, t.tears)
+	c.shades = e(c.shades, t.shades)
+	c.sweat = e(c.sweat, t.sweat)
+	c.smirk = e(c.smirk, t.smirk)
 	c.mouthCurve = e(c.mouthCurve, t.mouthCurve)
 	c.mouthOpen = e(c.mouthOpen, t.mouthOpen)
 	c.tilt = e(c.tilt, t.tilt)
@@ -293,6 +370,11 @@ func (s *SDFFaceSource) visualKey() uint64 {
 	add(s.cur.browRaise)
 	add(s.cur.cross)
 	add(s.cur.asym)
+	add(s.cur.wink)
+	add(s.cur.tears)
+	add(s.cur.shades)
+	add(s.cur.sweat)
+	add(s.cur.smirk)
 	add(s.cur.mouthCurve)
 	add(s.mouthOpenEff())
 	add(s.cur.tilt)
@@ -398,24 +480,27 @@ func (s *SDFFaceSource) render() {
 
 	hw := 28.0 * s.cur.eyeScale
 	hhFull := (40.0 + s.cur.tall*14) * s.cur.eyeScale
-	// 上眼睑下压 + 开心眯 → 有效高度。
-	hh := math.Max(4, hhFull*eyeOpen*(1-0.35*s.cur.lidTop)*(1-0.25*s.cur.squint))
-	rC := math.Min(hw, hh) * 0.94 // 很圆的胶囊眼
+	hf := hhFull * (1 - 0.35*s.cur.lidTop) // 睑压系数（眯眼靠下方挖弧成 ∩，不在这里压高）
 	rScale := 1 - 0.12*s.cur.asym
+	eyeOpenL := clampf(eyeOpen*(1-s.cur.wink), 0, 1) // winking：左眼闭
+	hwL, hhL := hw, math.Max(4, hf*eyeOpenL)
+	hwR, hhR := hw*rScale, math.Max(4, hf*eyeOpen*rScale)
+	rCL := math.Min(hwL, hhL) * 0.94
+	rCR := math.Min(hwR, hhR) * 0.94
 	// 视线让整只眼轻微移动（看向别处），高光随之。
 	gx := clampf(s.cur.gazeX+s.sacX, -1, 1)
 	gy := clampf(s.cur.gazeY+s.sacY, -1, 1)
 	lcx := cx0 - eyeDX + gx*6
 	rcx := cx0 + eyeDX + gx*6
 	ecy := eyeY + gy*6
-	// 眉：位置在眼上沿附近，越 raise 越高；angry 压低盖住眼。
-	browY := eyeY - hh*0.75 - s.cur.browRaise*12
+	browY := eyeY - hhR*0.75 - s.cur.browRaise*12
 	brow := s.cur.brow
-
-	// 嘴：平滑曲线带，中间厚两端收尖。
 	mHW := 21.0
 	mArc := s.cur.mouthCurve * 12
 	mOpen := s.mouthOpenEff() * 13
+	smirk, tears, shades, sweat := s.cur.smirk, s.cur.tears, s.cur.shades, s.cur.sweat
+	drop := float64(s.tick%42) * 0.5 // 泪/汗下落
+	tearCol := [3]float64{150, 214, 255}
 
 	for y := 0; y < scrH; y++ {
 		fy := float64(y) - cy0
@@ -426,43 +511,62 @@ func (s *SDFFaceSource) render() {
 			rr := math.Hypot(fx, fy)
 			acc := [3]float64{0, 0, 0}
 
-			// 眼形（左右，含 asym 右眼略小）。
-			dL := sdfRoundBox(px, py, lcx, ecy, hw, hh, rC)
-			dR := sdfRoundBox(px, py, rcx, ecy, hw*rScale, hh*rScale, rC*rScale)
+			dL := sdfRoundBox(px, py, lcx, ecy, hwL, hhL, rCL)
+			dR := sdfRoundBox(px, py, rcx, ecy, hwR, hhR, rCR)
+			// 开心/大笑：下方挖上升的弧，把眼变成 ∩ 眯眼笑。
+			if sq := s.cur.squint; sq > 0.08 {
+				dL = math.Max(dL, -(math.Hypot(px-lcx, py-(ecy+hhL*(1.15-0.85*sq))) - hhL*1.3))
+				dR = math.Max(dR, -(math.Hypot(px-rcx, py-(ecy+hhR*(1.15-0.85*sq))) - hhR*1.3))
+			}
 
-			// 嘴 SDF。
+			// 嘴 SDF（smirk 抬右嘴角成坏笑）。
 			dM := 1e9
-			if py > eyeY+50 && py < eyeY+108 {
+			if py > eyeY+48 && py < eyeY+112 {
 				u := (px - cx0) / mHW
 				if uu := u * u; uu < 1 {
 					edge := math.Sqrt(1 - uu)
-					yc := mouthCy + mArc*(1-uu)
+					yc := mouthCy + mArc*(1-uu) - smirk*math.Max(u, 0)*9
 					band := (1.8+mOpen)*edge + 1.2
 					dM = math.Abs(py-yc) - band
 				}
 			}
 
-			// 辉光（眼 + 嘴）。
 			addGlow(&acc, col, dL, 9, 0.9*br)
 			addGlow(&acc, col, dR, 9, 0.9*br)
 			if dM < 1e8 {
 				addGlow(&acc, col, dM, 7, 0.72*br)
 			}
-			// 实体填充（实心色）。
 			composite(&acc, col, cov(dL))
 			composite(&acc, col, cov(dR))
 			if dM < 1e8 {
 				composite(&acc, col, cov(dM))
 			}
-			// 双高光。
-			hiA := clampf(eyeOpen*(1-s.cur.squint), 0, 1)
-			drawHighlights(&acc, px, py, lcx, ecy, hw, hh, hiA)
-			drawHighlights(&acc, px, py, rcx, ecy, hw*rScale, hh*rScale, hiA)
+			drawHighlights(&acc, px, py, lcx, ecy, hwL, hhL, clampf(eyeOpenL*(1-s.cur.squint), 0, 1))
+			drawHighlights(&acc, px, py, rcx, ecy, hwR, hhR, clampf(eyeOpen*(1-s.cur.squint), 0, 1))
 
-			// 斜眉（深色，盖住眼上部）。左右内端方向镜像；angry 内端下压、sad/scared 内端上挑。
+			// 泪滴（crying）：两眼下方蓝色小滴，缓缓下落。
+			if tears > 0.05 {
+				composite(&acc, tearCol, cov(sdfEllipse(px, py, lcx, ecy+hhL+4+drop, 4, 6))*tears)
+				composite(&acc, tearCol, cov(sdfEllipse(px, py, rcx, ecy+hhR+4+drop, 4, 6))*tears)
+			}
+
+			// 斜眉（深色，盖住眼上部）。
 			if brow > 0.02 {
-				drawBrow(&acc, px, py, lcx, browY, s.cur.browAngle, hw, brow)
-				drawBrow(&acc, px, py, rcx, browY-s.cur.asym*6, -s.cur.browAngle, hw*rScale, brow)
+				drawBrow(&acc, px, py, lcx, browY, s.cur.browAngle, hwL, brow)
+				drawBrow(&acc, px, py, rcx, browY-s.cur.asym*6, -s.cur.browAngle, hwR, brow)
+			}
+
+			// 墨镜（cool）：深色镜片盖眼 + 鼻梁横条。
+			if shades > 0.05 {
+				dl := sdfRoundBox(px, py, lcx, ecy-hhR*0.08, hwL*0.98, hhR*0.62, 9)
+				dr := sdfRoundBox(px, py, rcx, ecy-hhR*0.08, hwR*0.98, hhR*0.62, 9)
+				bridge := sdfRoundBox(px, py, cx0+gx*6, ecy-hhR*0.28, eyeDX-hw*0.75, 3.5, 3)
+				composite(&acc, sdfBrow, cov(math.Min(math.Min(dl, dr), bridge))*shades)
+			}
+
+			// 汗滴（embarrassed）：右上角一滴。
+			if sweat > 0.05 {
+				composite(&acc, tearCol, cov(sdfEllipse(px, py, cx0+58, eyeY-24+drop*0.6, 4, 6))*sweat)
 			}
 
 			// 圆屏遮罩。
