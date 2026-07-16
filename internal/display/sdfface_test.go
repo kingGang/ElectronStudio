@@ -6,28 +6,31 @@ import (
 	"github.com/kingGang/ElectronStudio/internal/robot"
 )
 
-// 各情绪目标参数应可区分（颜色/眼睑/眼型），保证表情辨识度。
+// 各情绪目标参数应可区分（颜色/眉向/眼型），保证表情辨识度。
 func TestSDFEmotionTargetsDistinct(t *testing.T) {
-	if emotionTarget("happy").squint <= 0 {
-		t.Error("happy 应眯眼(squint>0)")
+	if emotionTarget("happy").mouthCurve <= 0 {
+		t.Error("happy 应上扬微笑(mouthCurve>0)")
 	}
-	if a := emotionTarget("angry"); a.colA[0] <= a.colA[2] {
-		t.Error("angry 顶色应偏红(colA.R>colA.B)")
+	if a := emotionTarget("angry"); a.col[0] <= a.col[2] {
+		t.Error("angry 主色应偏暖(col.R>col.B)")
 	}
-	if s := emotionTarget("sad"); s.colB[2] <= s.colB[0] {
-		t.Error("sad 底色应偏蓝(colB.B>colB.R)")
+	if s := emotionTarget("sad"); s.col[2] <= s.col[0] {
+		t.Error("sad 主色应偏蓝(col.B>col.R)")
 	}
-	if n := emotionTarget("neutral"); n.colA == n.colB {
-		t.Error("眼睛应为上下双色渐变(colA!=colB)")
+	if emotionTarget("sad").browAngle <= 0 {
+		t.Error("sad 眉内端应上挑(browAngle>0)")
 	}
-	if emotionTarget("sad").lidAngle >= 0 {
-		t.Error("sad 上眼睑应外端低(lidAngle<0)")
+	if emotionTarget("angry").browAngle >= 0 {
+		t.Error("angry 眉内端应下压(browAngle<0)")
 	}
-	if emotionTarget("angry").lidAngle <= 0 {
-		t.Error("angry 上眼睑应内端低(lidAngle>0)")
+	if emotionTarget("sad").brow == 0 || emotionTarget("angry").brow == 0 {
+		t.Error("sad/angry 应显示眉条(brow>0)")
 	}
-	if emotionTarget("surprised").eyeScale <= 1 {
-		t.Error("surprised 眼应更大(eyeScale>1)")
+	if emotionTarget("neutral").brow != 0 {
+		t.Error("neutral 不应有眉条")
+	}
+	if emotionTarget("surprised").tall <= 0 {
+		t.Error("surprised 眼应更竖长(tall>0)")
 	}
 	if emotionTarget("confused").tilt == 0 {
 		t.Error("confused 应头倾(tilt!=0)")
@@ -42,21 +45,13 @@ func TestSDFFrameSize(t *testing.T) {
 	}
 }
 
-// 静止后应返回 nil（省带宽、护 USB）；换情绪后应重新推帧。
-func TestSDFChangeDetection(t *testing.T) {
+// 换情绪后应重新推帧（返回非 nil）。
+func TestSDFEmotionChangePushesFrame(t *testing.T) {
 	s := NewSDFFaceSource()
-	s.nextBlink = 1 << 30 // 关眨眼，避免周期性推帧干扰
-	nilSeen := false
-	for i := 0; i < 80; i++ {
-		if s.Frame() == nil {
-			nilSeen = true
-			break
-		}
+	for i := 0; i < 20; i++ {
+		s.Frame()
 	}
-	if !nilSeen {
-		t.Error("表情 settle 后应出现 nil 帧（静止不推帧）")
-	}
-	s.SetEmotion("happy")
+	s.SetEmotion("angry")
 	got := false
 	for i := 0; i < 8; i++ {
 		if s.Frame() != nil {
@@ -65,18 +60,17 @@ func TestSDFChangeDetection(t *testing.T) {
 		}
 	}
 	if !got {
-		t.Error("换情绪后应重新推帧")
+		t.Error("换情绪后应推新帧")
 	}
 }
 
-// 说话且喂入音量时嘴应张开。
+// 说话时嘴应张开。
 func TestSDFSpeakingMouth(t *testing.T) {
 	s := NewSDFFaceSource()
 	closed := s.mouthOpenEff()
 	s.SetSpeaking(true)
-	s.SetMouthLevel(0.9)
 	if open := s.mouthOpenEff(); open <= closed {
-		t.Errorf("说话+音量应张嘴：closed=%.2f open=%.2f", closed, open)
+		t.Errorf("说话应张嘴：closed=%.2f open=%.2f", closed, open)
 	}
 }
 
@@ -85,11 +79,11 @@ func TestSDFPrimitives(t *testing.T) {
 	if sdfEllipse(120, 120, 120, 120, 10, 10) >= 0 {
 		t.Error("椭圆中心应在内(距离<0)")
 	}
-	if sdfEllipse(200, 200, 120, 120, 10, 10) <= 0 {
-		t.Error("远点应在外(距离>0)")
+	if sdfRoundBox(120, 120, 120, 120, 20, 30, 8) >= 0 {
+		t.Error("圆角矩形中心应在内(距离<0)")
 	}
-	if d := sdfSeg(0, 5, 0, 0, 10, 0); d < 4.9 || d > 5.1 {
-		t.Errorf("点到线段距离应≈5，实为 %.2f", d)
+	if sdfRoundBox(200, 200, 120, 120, 20, 30, 8) <= 0 {
+		t.Error("远点应在外(距离>0)")
 	}
 }
 
