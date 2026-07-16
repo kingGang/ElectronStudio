@@ -223,6 +223,22 @@ func (r *Router) ActiveSupportsTools() bool {
 	return p.SupportsTools()
 }
 
+// emotioner 是可选能力：Provider 回复里自带的情绪（如小智服务端下发的表情）。
+type emotioner interface{ LastEmotion() string }
+
+// ActiveEmotion 返回当前生效模型最近一次回复自带的情绪键（如小智的 happy/thinking…）；不支持则空。
+// 供上层联动表情脸——比按文本关键词猜更准。
+func (r *Router) ActiveEmotion() string {
+	p, err := r.activeProvider()
+	if err != nil {
+		return ""
+	}
+	if e, ok := p.(emotioner); ok {
+		return e.LastEmotion()
+	}
+	return ""
+}
+
 // ActiveAudioOgg 取走当前生效模型最近一次回复自带的音频（Ogg/Opus）；不支持或无则 nil。
 func (r *Router) ActiveAudioOgg() []byte {
 	p, err := r.activeProvider()

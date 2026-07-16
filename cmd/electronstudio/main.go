@@ -1263,6 +1263,16 @@ func (a *app) finishAssistant(ctx context.Context, content string) {
 func (a *app) finishReply(ctx context.Context, content string, speakIt bool) {
 	if content != "" {
 		a.appendHistory(llm.Message{Role: llm.RoleAssistant, Content: content})
+		// 自动定表情，让脸跟对话走（模型常不主动调 set_emotion）。优先用模型自带情绪(小智服务端
+		// 下发，最准)，没有再按文本关键词兜底。只在有明确情绪时改（中性不动），免得覆盖模型刚设的。
+		// 放在 speak 之前 → 说话时脸已是对应表情，同步。
+		emo := a.llm.ActiveEmotion()
+		if emo == "" {
+			emo = sentimentEmotion(content)
+		}
+		if emo != "" && emo != "neutral" {
+			a.setFaceEmotion(emo)
+		}
 		if speakIt {
 			a.speak(ctx, content) // 按 io.tts_engine/audio_out 路由（MiniMax 云端 / sidecar；设备/页面）
 		}
