@@ -311,3 +311,20 @@ type RebootDeviceCommand struct{}
 
 // Type 实现 Payload。
 func (RebootDeviceCommand) Type() Type { return TypeRebootDevice }
+
+// SetVoiceCommand 换 sidecar TTS 的音色/语速，即时生效并落盘。
+//
+// 可选音色数取决于【sidecar 装的是哪个模型】，不是常量：多说话人模型(VITS-zh fanchen-C)有
+// 187 个音色，单说话人模型(Piper huayan)只有 1 个、SpeakerID 只能是 0。范围由 sidecar 连上时
+// 上报（StatusEvent.Voice.Speakers），界面据此限定选择器。
+//
+// Preview=true 时只换音色并试听一句，不落盘——供界面挑音色时快速试听。
+type SetVoiceCommand struct {
+	SpeakerID int     `json:"speaker_id"`          // 音色号，0..speakers-1
+	Speed     float64 `json:"speed,omitempty"`     // 语速，0 表示不改；1.0 为原速
+	Preview   bool    `json:"preview,omitempty"`   // true=只试听不落盘
+	PreviewText string `json:"preview_text,omitempty"` // 试听文本，留空用默认句
+}
+
+// Type 实现 Payload。
+func (SetVoiceCommand) Type() Type { return TypeSetVoice }

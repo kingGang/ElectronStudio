@@ -63,11 +63,28 @@ export const ClientType = {
   Reenable: 'reenable',
   RebootDevice: 'reboot_device',
   SetFaceStyle: 'set_face_style',
+  SetVoice: 'set_voice',
 } as const
 
 /** 切换表情类型（"系列"）：b=类型B(全 SDF 程序脸) | bw=黑白眼睛类(GIF 素材优先、缺的自动用类型B补)。 */
 export interface SetFaceStyleCommand {
   style: string // b | bw
+}
+
+/**
+ * 换 sidecar 本地 TTS 的音色/语速，即时生效并落盘。
+ *
+ * speaker_id 的有效范围【取决于 sidecar 装了哪个模型】，不是常量：多说话人模型
+ * (VITS-zh fanchen-C) 有 187 个音色，单说话人模型 (Piper huayan) 只有 1 个、只能填 0。
+ * 范围由 StatusEvent.sidecar_voice.speakers 给出，界面据此限定选择器。
+ *
+ * preview=true 时只换音色并试听一句、不落盘——挑音色时连听十几个不该每个都写盘。
+ */
+export interface SetVoiceCommand {
+  speaker_id: number
+  speed?: number         // 0/缺省 = 不改；1.0 为原速
+  preview?: boolean      // true = 只试听不落盘
+  preview_text?: string  // 试听文本，留空用默认句
 }
 
 export interface SetIOCommand {
@@ -150,6 +167,18 @@ export interface ServiceStatus {
   running: boolean
   detail?: string
 }
+
+/**
+ * sidecar 本地 TTS 的音色能力与当前取值，由 sidecar 连上时上报。
+ *
+ * speakers 决定界面能不能选音色：装 VITS-zh(fanchen-C) 是 187，装 Piper(huayan) 是 1
+ * （此时没得选，界面应提示换模型）。0 = sidecar 未连接或未上报（如 Mock），选择器应藏起来。
+ */
+export interface SidecarVoiceStatus {
+  speakers: number
+  speaker_id: number
+  speed: number
+}
 export interface ModelInfo {
   id: string
   name: string
@@ -163,6 +192,9 @@ export interface StatusEvent {
   robot: RobotStatus
   asr: ServiceStatus
   tts: ServiceStatus
+  /** sidecar 本地 TTS 音色（VITS speaker_id）。与下面的 voice 是两回事：
+   *  voice 是设备/云端 TTS 的音色【名】(如 MiniMax 的 male-qn-qingse)，这个是本地模型的音色【序号】。 */
+  sidecar_voice: SidecarVoiceStatus
   llm: LLMStatus
   actions?: string[] // 可用的编排动作名（供动作编排页使用）
   camera?: boolean    // 是否配置了摄像头

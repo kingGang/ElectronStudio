@@ -37,6 +37,26 @@ type SpeechConfig struct {
 	SidecarURL string        `json:"sidecar_url,omitempty"`
 	TTS        NetSpeechTTS  `json:"tts,omitempty"` // 网络 TTS（io.tts_engine=openai 时用）
 	ASR        NetSpeechASR  `json:"asr,omitempty"` // 网络 ASR（io.audio_in=network 时用）
+	Voice      VoiceConfig   `json:"voice,omitempty"` // sidecar TTS 音色（设置页可选，见 VoiceConfig）
+}
+
+// VoiceConfig 是 sidecar TTS 的音色/语速。这里是【主程序侧的事实来源】：sidecar 自己的
+// config.json 里那份只是它的开机默认，主程序连上后会用这里的值覆盖下去，从而让设置页的选择
+// 在重启后仍然生效——否则用户在界面上选的音色一重启就被 sidecar 的默认值顶掉。
+//
+// SpeakerID 的有效范围取决于 sidecar 装的模型（VITS-zh fanchen-C 有 187 个音色、Piper 只有 1 个），
+// 故此处不做校验，由 sidecar 侧夹紧并回报实际值。
+type VoiceConfig struct {
+	SpeakerID *int    `json:"speaker_id,omitempty"` // 指针：0 是合法音色号，用值类型会被 omitempty 吞掉
+	Speed     float64 `json:"speed,omitempty"`      // 语速，0 表示用 sidecar 默认
+}
+
+// SpeakerIDOr 返回配置的音色号；未配置时返回 -1（= 不下发、沿用 sidecar 自己的默认）。
+func (v VoiceConfig) SpeakerIDOr() int {
+	if v.SpeakerID == nil {
+		return -1
+	}
+	return *v.SpeakerID
 }
 
 // NetSpeechTTS 是 OpenAI 兼容的文字转语音服务配置（POST {base_url}/audio/speech）。

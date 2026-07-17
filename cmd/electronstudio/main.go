@@ -374,6 +374,19 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	// 语音 sidecar 连接状态变化（自动重连连上/断开）时，广播一次状态快照刷新界面。
 	if sc, ok := a.speech.(*speech.Sidecar); ok {
 		sc.OnStateChange(func() {
+			// 每次连上都把【配置里保存的音色】下发一次：sidecar 自己 config.json 里那份只是它的
+			// 开机默认，不覆盖的话，用户在设置页选的音色一重启 sidecar 就被顶回默认——选了等于白选。
+			// 放在状态回调里而不是启动时一次性下发，是因为 sidecar 可能后启动、也可能中途重连。
+			if st := sc.Status(); st.TTSRunning {
+				a.cfgMu.Lock()
+				v := a.cfg.Speech.Voice
+				a.cfgMu.Unlock()
+				if sid := v.SpeakerIDOr(); sid >= 0 || v.Speed > 0 {
+					if err := sc.SetVoice(context.Background(), sid, v.Speed); err != nil {
+						log.Warn("下发已保存音色失败", "err", err)
+					}
+				}
+			}
 			if a.srv != nil {
 				a.srv.Broadcast(a.statusSnapshot())
 			}
@@ -753,6 +766,46 @@ func (a *app) handleSetFaceStyle(style string) {
 	a.srv.Broadcast(a.statusSnapshot())
 }
 
+// voicePreviewText 是试听音色时说的默认句子：覆盖常见声母韵母与一个问句语调，
+// 短到能快速连听十几个音色、又长到听得出音色差别。
+const voicePreviewText = "你好呀，我是电子脑壳。今天心情不错，要不要陪我聊会儿天？"
+
+// handleSetVoice 换 sidecar TTS 音色/语速。
+//
+// 不校验 SpeakerID 范围——有效范围取决于 sidecar 装了哪个模型（fanchen-C 有 187 个音色、
+// Piper 只有 1 个），主程序无从判断，交由 sidecar 夹紧并回发 voice 上报，界面以那个为准。
+//
+// Preview=true 只换音色试听一句、不落盘：挑音色时要连听十几个，每个都写盘既慢又会把
+// config.json 刷成一堆中间态。选定后前端再发一条 Preview=false 的落盘。
+func (a *app) handleSetVoice(ctx context.Context, cmd protocol.SetVoiceCommand) {
+	if err := a.speech.SetVoice(ctx, cmd.SpeakerID, cmd.Speed); err != nil {
+		a.log.Warn("换音色失败", "err", err, "speaker_id", cmd.SpeakerID)
+		a.srv.Broadcast(protocol.ErrorEvent{Message: "换音色失败：" + err.Error()})
+		return
+	}
+	if cmd.Preview {
+		text := cmd.PreviewText
+		if text == "" {
+			text = voicePreviewText
+		}
+		// 试听走和正常说话同一条路（sidecar 合成 → 设备喇叭），听到的就是实际效果。
+		if err := a.speech.Speak(ctx, text); err != nil {
+			a.log.Warn("试听失败", "err", err)
+		}
+		return
+	}
+	a.cfgMu.Lock()
+	sid := cmd.SpeakerID
+	a.cfg.Speech.Voice.SpeakerID = &sid
+	if cmd.Speed > 0 {
+		a.cfg.Speech.Voice.Speed = cmd.Speed
+	}
+	a.saveConfig()
+	a.cfgMu.Unlock()
+	a.log.Info("音色已保存", "speaker_id", sid, "speed", cmd.Speed)
+	a.srv.Broadcast(a.statusSnapshot())
+}
+
 // isSupportedEmotion 报告 name 是否为支持的情绪（供素材页判断该不该渲染程序脸缩略图）。
 func isSupportedEmotion(name string) bool {
 	for _, e := range supportedEmotions {
@@ -1102,6 +1155,11 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 	case protocol.TypeSetFaceStyle:
 		if cmd, err := protocol.As[protocol.SetFaceStyleCommand](in.Env); err == nil {
 			a.handleSetFaceStyle(cmd.Style)
+		}
+
+	case protocol.TypeSetVoice:
+		if cmd, err := protocol.As[protocol.SetVoiceCommand](in.Env); err == nil {
+			a.handleSetVoice(ctx, cmd)
 		}
 
 	case protocol.TypeRebootDevice:
@@ -1839,6 +1897,12 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 		},
 		ASR:      protocol.ServiceStatus{Running: ss.ASRRunning, Detail: ss.Detail},
 		TTS:      protocol.ServiceStatus{Running: ss.TTSRunning, Detail: ss.Detail},
+		// 音色能力来自 sidecar 上报（装 fanchen-C=187 个、装 Piper=1 个），不可写死。
+		SidecarVoice: protocol.SidecarVoiceStatus{
+			Speakers:  ss.Voice.Speakers,
+			SpeakerID: ss.Voice.SpeakerID,
+			Speed:     ss.Voice.Speed,
+		},
 		LLM:      protocol.LLMStatus{Active: a.llm.ActiveID(), Available: models},
 		Actions:  actions,
 		Camera:   a.camera != nil,

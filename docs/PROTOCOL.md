@@ -34,7 +34,7 @@
 
 | `type` | 负载 | 说明 |
 |--------|------|------|
-| `status` | `StatusEvent` | 各子系统（USB / ASR / TTS / LLM）状态快照，连接建立或状态变化时下发 |
+| `status` | `StatusEvent` | 各子系统（USB / ASR / TTS / LLM）状态快照，连接建立或状态变化时下发。其中 `sidecar_voice` 是 sidecar 本地 TTS 的音色能力：`speakers`=本模型音色总数（**由 sidecar 上报，不可写死**——fanchen-C 是 187、Piper 是 1、0=未连接）、`speaker_id`=当前音色、`speed`=当前语速。注意与 `voice` 字段区分：`voice` 是设备/云端 TTS 的音色**名**（如 MiniMax 的 `male-qn-qingse`），`sidecar_voice` 是本地模型的音色**序号** |
 | `voice_state` | `VoiceStateEvent` | 语音状态机：`idle` / `connecting` / `listening` / `thinking` / `speaking` |
 | `vad` | `VADEvent` | 语音活动：`speaking` + 归一化电平 `level`（驱动波形） |
 | `wake` | `WakeEvent` | 命中唤醒词 |
@@ -108,6 +108,7 @@
 | `party` | `PartyCommand` | 一键蹦迪：同时放歌 + 无限循环跳 `dance`（踩拍变脸），可选 `query` 指定曲目；停止用 `interrupt` + `music`(`stop`) |
 | `reenable` | `ReenableCommand` | 给舵机重新上扭矩（下发一次 enable 0→1 跳变）。舵机的过流/堵转保护锁存后会「能应答 I²C、能报位置，但电机不转」，只有重新使能能解锁；驱动也会自动检测并重试 |
 | `set_face_style` | `SetFaceStyleCommand` | 切换**表情类型**（"系列"，多套风格并存、热切并落盘）：`b`=类型B（全部走 SDF 程序脸）；`bw`=黑白眼睛类（优先用 `emotions/` 的 GIF 素材，该类型没有的表情自动用类型B补）。当前类型见 `status.face_style` |
+| `set_voice` | `SetVoiceCommand` | 换 **sidecar 本地 TTS 音色/语速**，即时生效并落盘。`speaker_id` 的有效范围**取决于 sidecar 装了哪个模型**（VITS-zh fanchen-C 有 187 个音色；Piper huayan 只有 1 个、只能填 0），范围由 `status.sidecar_voice.speakers` 给出，**不要写死**。`preview=true` 只试听不落盘（挑音色时连听十几个，不该每个都写盘）；`preview_text` 留空用默认句 |
 | `reboot_device` | `RebootDeviceCommand` | 串口软复位设备（**免拔电源**）：往 ElectronBot 的 CP210x/CH340 串口发复位指令，使 MCU 系统复位并重新枚举 USB，设备掉线 ~6s 后驱动自动重连。对应官方「复位电子」按钮；固件卡死(bulk 持续无就绪包)时驱动也会自动软复位（`io.auto_reboot` 缺省开）。无参数 |
 
 > 注：屏幕表情素材的**上传**是二进制文件，不走 WebSocket，而走下方的 HTTP REST 接口。

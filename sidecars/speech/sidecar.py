@@ -155,8 +155,13 @@ class Engines:
             ),
         )
         self.tts = sherpa_onnx.OfflineTts(tts_cfg)
-        self.tts_sid = int(t.get("speaker_id", 0))
-        self.tts_speed = float(t.get("speed", 1.0))
+        # 音色/语速可在运行时被主程序改（set_voice）——generate() 每次都带 sid/speed，
+        # 故改这两个字段即时生效，无需重载模型或重启。config 里的值只是开机默认。
+        # tts_speakers 是本模型的音色总数：多说话人模型(如 vits-zh fanchen-C)有 187 个，
+        # 单说话人模型(如 vits-piper huayan)只有 1 个、sid 只能是 0。上报给主程序供界面限定范围。
+        self.tts_speakers = max(1, int(self.tts.num_speakers))
+        self.tts_sid = self._clamp_sid(int(t.get("speaker_id", 0)))
+        self.tts_speed = self._clamp_speed(float(t.get("speed", 1.0)))
 
         # --- 可选：唤醒词 KWS ---
         self.spotter = None
@@ -185,6 +190,26 @@ class Engines:
             self.wake_enabled = True
             self.wake_window = float(w.get("window_seconds", 8))
             print(f"唤醒词已启用: {self.wake_keywords} 收听窗口 {self.wake_window}s", file=sys.stderr)
+
+    def _clamp_sid(self, sid: int) -> int:
+        return max(0, min(self.tts_speakers - 1, sid))
+
+    @staticmethod
+    def _clamp_speed(speed: float) -> float:
+        return max(0.5, min(2.0, speed))
+
+    def set_voice(self, sid=None, speed=None):
+        """运行时换音色/语速；None 表示该项不变。
+
+        越界值【夹紧】而不是报错——界面滑块、配置文件、以及换模型后残留的旧 speaker_id
+        都可能送来超范围的值（如从 fanchen-C 的 186 换回只有 1 个音色的 Piper）。
+        返回夹紧后的实际值，调用方据此回报给主程序，界面显示的才是真实生效的值。
+        """
+        if sid is not None:
+            self.tts_sid = self._clamp_sid(int(sid))
+        if speed is not None:
+            self.tts_speed = self._clamp_speed(float(speed))
+        return self.tts_sid, self.tts_speed
 
     def transcribe(self, samples: np.ndarray, sr: int) -> str:
         """对一段 PCM（float32, [-1,1]）做离线识别。"""
@@ -270,6 +295,17 @@ class Session:
             self._pcm_stream.stop()
             self._pcm_stream.close()
             self._pcm_stream = None
+
+    # ---- 上报 TTS 音色能力与当前值 ----
+    async def _emit_voice(self):
+        """告诉主程序本模型有几个音色、当前用第几个。界面据此限定可选范围——
+        单说话人模型(Piper)只有 1 个，多说话人模型(VITS-zh fanchen-C)有 187 个。"""
+        await self._emit({
+            "type": "voice",
+            "speakers": self.eng.tts_speakers,
+            "speaker_id": self.eng.tts_sid,
+            "speed": self.eng.tts_speed,
+        })
 
     # ---- 向主程序发事件（在事件循环线程中调用）----
     async def _emit(self, msg: dict):
@@ -386,6 +422,11 @@ class Session:
             elif msg.get("type") == "stream_stop":
                 self._streaming = False
                 print("[stream] 停止上行", file=sys.stderr)
+            elif msg.get("type") == "set_voice":
+                # 运行时换音色/语速：generate() 每次都带 sid/speed，故立刻生效、无需重载模型。
+                sid, speed = self.eng.set_voice(msg.get("speaker_id"), msg.get("speed"))
+                print(f"[tts] 换音色 sid={sid} speed={speed}", file=sys.stderr)
+                await self._emit_voice()
             elif msg.get("type") == "abort":
                 self._drain_play()  # 清空待播队列（speak/ogg 逐句播放）
                 self._stop_pcm()    # 清空 realtime 连续流缓冲（打断机器人当前发言）
@@ -470,6 +511,12 @@ async def serve(cfg: Config, engines: Engines):
         except Exception as e:
             # 没有可用麦克风时不应中断会话：仍可提供 TTS（合成播放），只是收不到语音输入。
             print("麦克风打开失败，仅启用 TTS（无 ASR 输入）：", e, file=sys.stderr)
+        # 连上即上报音色能力：界面要靠它知道本模型有几个音色可选（Piper 只有 1 个、
+        # VITS-zh fanchen-C 有 187 个），否则只能瞎猜范围。
+        try:
+            await session._emit_voice()
+        except Exception as e:
+            print("上报音色能力失败：", e, file=sys.stderr)
         try:
             # 并行跑"上行处理"与"下行命令"，任一结束即收尾。
             await asyncio.gather(session.process_loop(), session.handle_incoming())

@@ -25,6 +25,7 @@
     ScheduleAdd: 'schedule_add', ScheduleRemove: 'schedule_remove',
     MaterialDelete: 'material_delete', SetIO: 'set_io', SetDevice: 'set_device', SetVolume: 'set_volume',
     SetRealtime: 'set_realtime', RebootDevice: 'reboot_device', SetFaceStyle: 'set_face_style',
+    SetVoice: 'set_voice',
   };
 
   // 6 轴关节名称（顺序与后端 robot.JointNames 一致，即官方下发给固件的线上顺序：头在 0 号）。
@@ -401,6 +402,7 @@
     if (s.actions) renderActions(s.actions);
     el.camera.style.display = s.camera ? '' : 'none'; // 配置了摄像头才显示按钮
     if (typeof s.camera_on === 'boolean') setCameraBtn(s.camera_on); // 开关状态以后端为准
+    if (s.sidecar_voice) { scVoice = s.sidecar_voice; renderSidecarVoice(); }
     if (s.io) {
       audioInMode = s.io.audio_in || 'device';
       audioOutMode = s.io.audio_out || 'page';
@@ -734,8 +736,69 @@
       note.style.display = usesVoice ? 'none' : '';
       note.textContent = usesVoice ? '' : (engine === 'xiaozhi'
         ? '小智用服务端嗓音（在 xiaozhi.me 后台设置），这里无需选音色。'
-        : '本地 Piper 由 sidecar 配置决定，这里无需选音色。');
+        : ''); // sidecar 的音色在下面的 sc-voice-box 里选
     }
+    renderSidecarVoice(engine);
+  }
+
+  // ---- 本地 sidecar 音色 ----
+  // 可选个数【来自 sidecar 上报】(status.sidecar_voice.speakers)，绝不能写死：装多说话人模型
+  // (VITS-zh fanchen-C)有 187 个，装单说话人模型(Piper huayan)只有 1 个、此时根本没得选。
+  let scVoice = { speakers: 0, speaker_id: 0, speed: 1 };
+  function scSel() { return $('sc-voice-select'); }
+  function scArgs(extra) {
+    return Object.assign({
+      speaker_id: Number(scSel().value) || 0,
+      speed: Number($('sc-speed').value) || 1,
+    }, extra || {});
+  }
+  function renderSidecarVoice(engine) {
+    engine = engine || curEngine();
+    const box = $('sc-voice-box');
+    if (!box) return;
+    if (engine !== 'sidecar') { box.style.display = 'none'; return; }
+    box.style.display = '';
+    const sel = scSel(), note = $('sc-voice-note');
+    const n = scVoice.speakers | 0;
+    if (n <= 0) {
+      sel.innerHTML = '<option>（sidecar 未连接）</option>';
+      sel.disabled = true;
+      note.textContent = 'sidecar 没连上，读不到音色列表。确认它已启动（scripts/run.ps1 会连它一起拉起来）。';
+      return;
+    }
+    if (n === 1) {
+      sel.innerHTML = '<option value="0">唯一音色</option>';
+      sel.disabled = true;
+      note.textContent = '当前 sidecar 装的是单说话人模型（如 Piper huayan），只有这一个音色。'
+        + '换成多音色模型（VITS-zh fanchen-C，187 个）才能挑：pwsh sidecars/speech/download_models.ps1 -Tts vits-zh';
+      return;
+    }
+    sel.disabled = false;
+    if (sel.options.length !== n) {
+      sel.innerHTML = Array.from({ length: n }, (_, i) => `<option value="${i}">${i} 号音色</option>`).join('');
+    }
+    sel.value = String(scVoice.speaker_id || 0);
+    const sp = $('sc-speed');
+    if (sp && scVoice.speed > 0) sp.value = String(scVoice.speed);
+    $('sc-speed-val').textContent = Number(sp ? sp.value : 1).toFixed(2);
+    note.textContent = `本模型共 ${n} 个音色（0..${n - 1}）。选中即换、立刻生效并保存；「试听」用当前音色念一句（从设备喇叭出）。`;
+  }
+  function bindSidecarVoice() {
+    const sel = scSel(), sp = $('sc-speed'), pv = $('sc-voice-preview');
+    if (sel) sel.addEventListener('change', () => {
+      send(CliType.SetVoice, scArgs());               // 落盘：重启后仍是这个音色
+      send(CliType.SetVoice, scArgs({ preview: true })); // 顺便念一句，选了立刻听得到
+      toast(`已切到 ${sel.value} 号音色`);
+    });
+    if (sp) {
+      sp.addEventListener('input', () => { $('sc-speed-val').textContent = Number(sp.value).toFixed(2); });
+      sp.addEventListener('change', () => { send(CliType.SetVoice, scArgs()); toast(`语速 ${Number(sp.value).toFixed(2)}`); });
+    }
+    if (pv) pv.addEventListener('click', (e) => {
+      e.preventDefault();
+      send(CliType.SetVoice, scArgs({ preview: true }));
+      toast('试听中…（从设备喇叭播放）');
+    });
   }
   function currentVoiceValue() {
     const vsel = $('dev-voice-select');
@@ -1740,5 +1803,6 @@
   setupMaterials();
   setupIO();
   setupRealtime();
+  bindSidecarVoice();
   connect();
 })();

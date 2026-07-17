@@ -44,6 +44,18 @@ type Status struct {
 	ASRRunning bool
 	TTSRunning bool
 	Detail     string
+	Voice      Voice
+}
+
+// Voice 是 sidecar 侧 TTS 的音色能力与当前取值，由 sidecar 连上时上报（"voice" 消息）。
+//
+// Speakers 是【本模型】的音色总数，界面据此限定可选范围——这不是可以写死的常量：
+// 多说话人模型(VITS-zh fanchen-C)有 187 个音色，单说话人模型(Piper huayan)只有 1 个、
+// 此时 SpeakerID 只能是 0，界面应据此把选择器藏起来或置灰。Speakers=0 表示尚未上报。
+type Voice struct {
+	Speakers  int     // 音色总数（0=未知/未连接）
+	SpeakerID int     // 当前音色，取值 0..Speakers-1
+	Speed     float64 // 语速，1.0 为原速
 }
 
 // Service 抽象一套完整的本地语音能力。
@@ -56,6 +68,9 @@ type Service interface {
 	Speak(ctx context.Context, text string) error
 	// Stop 打断当前正在播放的语音。
 	Stop()
+	// SetVoice 换 TTS 音色/语速。sid<0 或 speed<=0 表示"该项不变"。
+	// sidecar 每次合成都带 sid/speed，故即时生效、无需重载模型或重启。
+	SetVoice(ctx context.Context, sid int, speed float64) error
 	// Status 返回当前语音子服务状态。
 	Status() Status
 	// Close 释放资源。

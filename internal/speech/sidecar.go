@@ -31,6 +31,7 @@ type Sidecar struct {
 	mu        sync.Mutex
 	conn      *websocket.Conn // 当前连接；nil 表示未连接
 	connected bool
+	voice     Voice // sidecar 上报的 TTS 音色能力与当前取值（"voice" 消息）
 	writeTO   time.Duration
 	onState   func() // 连接状态变化回调（连上/断开），用于刷新界面状态
 
@@ -59,6 +60,12 @@ type sidecarMsg struct {
 	Format   string  `json:"format,omitempty"` // type=play：音频容器格式（如 ogg）
 	Data     string  `json:"data,omitempty"`   // type=play/play_pcm/audio：base64 音频字节
 	SampleRate int   `json:"sample_rate,omitempty"` // type=play_pcm：PCM 采样率（默认 24000）
+	Speakers   int   `json:"speakers,omitempty"`    // type=voice：本模型音色总数（Piper=1、fanchen-C=187）
+	// SpeakerID/Speed 用指针：0 和 0.0 在 set_voice 里分别是【合法音色号】与"不改"的区分点，
+	// 用值类型会被 omitempty 吞掉——sid=0 是最常用的第一个音色，吞掉就永远选不中它。
+	// sidecar 侧对 None 的语义即"该项不变"。
+	SpeakerID *int     `json:"speaker_id,omitempty"` // type=voice/set_voice：音色号
+	Speed     *float64 `json:"speed,omitempty"`      // type=voice/set_voice：语速
 }
 
 // NewSidecar 创建一个连接到 wsURL 的语音 sidecar 客户端（尚未连接，需调用 Start）。
@@ -168,6 +175,23 @@ func (s *Sidecar) readLoop(ctx context.Context) {
 			s.log.Warn("语音 sidecar 消息解析失败", "err", err)
 			continue
 		}
+		// voice 不是"事件"而是状态上报（sidecar 连上时主动发一次、set_voice 后回发一次）：
+		// 记下来供 Status() 用，界面据此知道本模型有几个音色可选、当前选的是哪个。
+		if m.Type == "voice" {
+			s.mu.Lock()
+			s.voice = Voice{Speakers: m.Speakers}
+			if m.SpeakerID != nil {
+				s.voice.SpeakerID = *m.SpeakerID
+			}
+			if m.Speed != nil {
+				s.voice.Speed = *m.Speed
+			}
+			v := s.voice
+			s.mu.Unlock()
+			s.log.Info("语音 sidecar 音色能力", "音色总数", v.Speakers, "当前", v.SpeakerID, "语速", v.Speed)
+			s.notify() // 刷新界面状态
+			continue
+		}
 		if ev, ok := toEvent(m); ok {
 			select {
 			case s.events <- ev:
@@ -204,6 +228,21 @@ func toEvent(m sidecarMsg) (Event, bool) {
 // Speak 实现 Service：请求 sidecar 合成并播放文本。
 func (s *Sidecar) Speak(ctx context.Context, text string) error {
 	return s.send(ctx, sidecarMsg{Type: "speak", Text: text})
+}
+
+// SetVoice 实现 Service：换 TTS 音色/语速。sid<0 或 speed<=0 表示该项不变。
+// sidecar 每次合成都带 sid/speed，故即时生效，不重载模型、不重启。
+// 成功后 sidecar 会回发一条 voice 上报，Status() 里的值由那条回执更新（以 sidecar 夹紧后的
+// 实际值为准，而不是我们请求的值）。
+func (s *Sidecar) SetVoice(ctx context.Context, sid int, speed float64) error {
+	m := sidecarMsg{Type: "set_voice"}
+	if sid >= 0 {
+		m.SpeakerID = &sid
+	}
+	if speed > 0 {
+		m.Speed = &speed
+	}
+	return s.send(ctx, m)
 }
 
 // PlayAudio 请求 sidecar 解码并播放一段音频（如小智自带 TTS 的 Ogg/Opus）。
@@ -277,7 +316,7 @@ func (s *Sidecar) Status() Status {
 	if !s.connected {
 		detail = "sidecar 未连接"
 	}
-	return Status{ASRRunning: s.connected, TTSRunning: s.connected, Detail: detail}
+	return Status{ASRRunning: s.connected, TTSRunning: s.connected, Detail: detail, Voice: s.voice}
 }
 
 // Close 实现 Service。

@@ -179,7 +179,7 @@
         <select id="io-tts_engine">
           <option value="minimax">MiniMax 云端（可选 / 可克隆音色）</option>
           <option value="openai">OpenAI 兼容（speech.tts）</option>
-          <option value="sidecar">本地 Piper（sidecar）</option>
+          <option value="sidecar">本地 sidecar（离线免费，音色见下）</option>
           <option value="xiaozhi">小智自带嗓音（需当前模型为小智）</option>
         </select>
       </label>
@@ -193,6 +193,21 @@
         <input id="dev-voice" placeholder="手填音色 ID" />
       </label>
       <p class="muted" id="dev-voice-note" style="display:none"></p>
+
+      <!-- 本地 sidecar 的音色：仅在 引擎=sidecar 时出现。可选个数【由 sidecar 上报】而非写死——
+           装多说话人模型(VITS-zh fanchen-C)有 187 个，装单说话人模型(Piper huayan)只有 1 个。 -->
+      <div id="sc-voice-box" style="display:none">
+        <label class="dev-row"><span>本地音色
+            <button type="button" class="link-btn" id="sc-voice-preview">▶ 试听</button>
+          </span>
+          <select id="sc-voice-select"></select>
+        </label>
+        <label class="dev-row"><span>语速 <b id="sc-speed-val">1.0</b></span>
+          <input type="range" id="sc-speed" min="0.5" max="2" step="0.05" value="1" />
+        </label>
+        <p class="muted" id="sc-voice-note"></p>
+      </div>
+
       <div class="dev-clone">
         <div class="panel-head"><h3>从语音克隆音色（MiniMax）</h3></div>
         <p class="muted">录一段或上传一段清晰人声（约 10 秒~5 分钟），克隆成一个新音色，克隆后出现在上面的列表里可选。上传文件仅支持 mp3 / m4a / wav。</p>

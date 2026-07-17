@@ -55,6 +55,13 @@ func (m *Mock) Speak(_ context.Context, text string) error {
 // Stop 实现 Service：无操作。
 func (m *Mock) Stop() {}
 
+// SetVoice 实现 Service：仅记录日志。Mock 无真实 TTS，故不上报音色能力
+// （Status().Voice.Speakers 保持 0 = 未知，界面据此把音色选择器藏起来）。
+func (m *Mock) SetVoice(_ context.Context, sid int, speed float64) error {
+	m.log.Info("换音色(mock)", "speaker_id", sid, "speed", speed)
+	return nil
+}
+
 // Status 实现 Service。
 func (m *Mock) Status() Status {
 	return Status{ASRRunning: true, TTSRunning: true, Detail: "mock"}

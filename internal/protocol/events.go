@@ -73,6 +73,17 @@ type ServiceStatus struct {
 	Detail  string `json:"detail,omitempty"` // 附加信息, 如模型名或错误原因
 }
 
+// SidecarVoiceStatus 是 sidecar TTS 的音色能力与当前取值，由 sidecar 连上时上报。
+//
+// Speakers 决定界面能不能选音色，且【必须来自 sidecar、不能写死】：装 VITS-zh(fanchen-C) 时
+// 是 187，装 Piper(huayan) 时是 1（此时无从可选，界面应提示"当前模型只有一个音色"）。
+// Speakers=0 表示 sidecar 未连接或未上报（如 Mock），界面应把选择器藏起来。
+type SidecarVoiceStatus struct {
+	Speakers  int     `json:"speakers"`   // 本模型音色总数（0=未知/未连接）
+	SpeakerID int     `json:"speaker_id"` // 当前音色
+	Speed     float64 `json:"speed"`      // 当前语速
+}
+
 // ModelInfo 描述一个可用的大模型。
 type ModelInfo struct {
 	ID       string `json:"id"`       // 唯一标识, 用于 SelectModelCommand
@@ -91,6 +102,9 @@ type StatusEvent struct {
 	Robot   RobotStatus   `json:"robot"`
 	ASR     ServiceStatus `json:"asr"`
 	TTS     ServiceStatus `json:"tts"`
+	// SidecarVoice 是 sidecar 本地 TTS 的音色（VITS speaker_id）——与上面的 Voice 是两回事：
+	// Voice 是设备/云端 TTS 的音色名（如 MiniMax 的 male-qn-qingse），这个是本地模型的音色【序号】。
+	SidecarVoice SidecarVoiceStatus `json:"sidecar_voice"`
 	LLM     LLMStatus     `json:"llm"`
 	Actions []string      `json:"actions,omitempty"` // 可用的编排动作名（供动作编排页使用）
 	Camera   bool         `json:"camera"`              // 是否配置了摄像头（前端据此显示切换按钮）
