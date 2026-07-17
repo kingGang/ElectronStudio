@@ -65,7 +65,7 @@
     });
   });
 
-  let wasRobotStuck = false; // 跟踪设备卡死状态，仅在转为卡死时弹一次提示
+  let wasRecovering = false, wasWedged = false; // 跟踪自愈中/需断电两态，各只在转入时弹一次提示
 
   // ---- 3D 模型（three.js + GLTFLoader，懒加载）----
   let model3dReady = false;
@@ -375,16 +375,21 @@
 
   function onStatus(s) {
     const stuck = !!(s.robot && s.robot.stuck);
-    // USB 灯反映“在同步”而非仅“已连接”：卡死时(已连接但无就绪包)灯灭，避免误以为正常。
+    const recovering = !!(s.robot && s.robot.recovering); // 卡死后正在自动软复位(免拔电源)自救中
+    const wedged = stuck && !recovering;                  // 自动复位无效/不可用 → 才真的需要手动断电
+    // USB 灯反映“在同步”而非仅“已连接”：卡死/自愈时(已连接但无就绪包)灯灭，避免误以为正常。
     toggleDot(el.dotUSB, s.robot && s.robot.connected && !stuck);
     if (el.dotUSB) {
       // 顶栏灯旁标签直接显示连接速度(USB 2.0/3.0)，未连接显示 "USB"。
       if (el.dotUSB.lastChild) el.dotUSB.lastChild.textContent = (s.robot && s.robot.connected && s.robot.speed) ? s.robot.speed : 'USB';
-      el.dotUSB.title = stuck ? '设备卡死：请彻底断电(拔线≥15秒放净电容)再插复位'
+      el.dotUSB.title = recovering ? '检测到卡死，正在自动软复位(免拔电源)…稍候会自动重连'
+        : wedged ? '卡死：自动软复位无效，请彻底断电(拔线≥15秒放净电容)再插，或点「复位电子」'
         : (s.robot && s.robot.connected ? ('已连接同步中' + (s.robot.speed ? ' · ' + s.robot.speed : '')) : '未连接');
     }
-    if (stuck && !wasRobotStuck) toast('⚠ 设备卡死，请彻底断电(拔线≥15秒)再插复位；频繁重连不会自愈');
-    wasRobotStuck = stuck;
+    // 进入自愈弹一次；升级到"真需断电"再弹一次（两态各只提示一次，避免刷屏）。
+    if (recovering && !wasRecovering) toast('检测到卡死，正在自动软复位(免拔电源)，稍候自动重连…');
+    if (wedged && !wasWedged) toast('⚠ 自动软复位无效，请彻底断电(拔线≥15秒)再插复位，或点「复位电子」');
+    wasRecovering = recovering; wasWedged = wedged;
     toggleDot(el.dotASR, s.asr && s.asr.running);
     toggleDot(el.dotTTS, s.tts && s.tts.running);
     if (s.llm) {
@@ -1013,7 +1018,9 @@
     if (s.asr) el.setASR.textContent = (s.asr.running ? '在线' : '离线') + (s.asr.detail ? ` · ${s.asr.detail}` : '');
     if (s.tts) el.setTTS.textContent = (s.tts.running ? '在线' : '离线') + (s.tts.detail ? ` · ${s.tts.detail}` : '');
     if (s.robot) {
-      el.setUSB.textContent = s.robot.stuck ? '卡死(需断电复位)' : (s.robot.connected ? ('已连接' + (s.robot.speed ? '（' + s.robot.speed + '）' : '')) : '未连接');
+      el.setUSB.textContent = s.robot.recovering ? '卡死·自动软复位中(免拔电源)…'
+        : s.robot.stuck ? '卡死(自动复位无效，需断电复位)'
+        : (s.robot.connected ? ('已连接' + (s.robot.speed ? '（' + s.robot.speed + '）' : '')) : '未连接');
       el.setVidPid.textContent = `0x${(s.robot.vid || 0).toString(16)} / 0x${(s.robot.pid || 0).toString(16)}`;
       el.setFPS.textContent = (s.robot.fps || 0) + ' fps';
     }

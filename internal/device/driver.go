@@ -41,7 +41,7 @@ type Driver struct {
 	// 回调（由上层注入，用于广播给 UI）：
 	onFrame  func(rgb []byte)     // 有新画面帧时（240×240 RGB888）
 	onJoints func(j robot.Joints) // 周期上报舵机真实角度
-	onStuck  func(stuck bool)     // 设备疑似卡死/恢复时回调（true=持续无就绪包，需断电复位）
+	onStuck  func(stuck, recovering bool) // 设备卡死/恢复回调：stuck=持续无就绪包；recovering=正在自动软复位自救
 
 	mu          sync.Mutex
 	pose        robot.Joints
@@ -216,6 +216,22 @@ func (w *rebootWatch) try(d *Driver) {
 	}
 }
 
+// recovering 报告自动软复位是否"正在自救中"（供 UI 区分"自动复位中"与"真需断电"）。
+// 开关关/传输不支持 → 否；还有复位次数没用完 → 是；用完了但上一次复位还在观察窗(冷却)内 → 仍是；
+// 超了还卡着才算彻底失败(否)。
+func (w *rebootWatch) recovering(d *Driver) bool {
+	if !d.autoReboot.Load() {
+		return false
+	}
+	if _, ok := d.bot.(robot.Rebooter); !ok {
+		return false
+	}
+	if w.attempts < rebootMaxAttempts {
+		return true
+	}
+	return !w.lastTry.IsZero() && time.Since(w.lastTry) < rebootCooldown
+}
+
 // SetJointTrim 设置 6 轴机械零位补偿(度)。装配公差让"角度 0"不一定是端正姿态（例如头部归零时略微
 // 低头），这里把补偿吸收在驱动层：下发给设备前加上 trim，读回真实角度时减掉 trim。于是上层（滑杆、
 // 动作编排、内置动作）看到的永远是"0 = 端正"的理想坐标系，不必每个动作各自去凑偏移。
@@ -241,8 +257,9 @@ func stripTrim(fb, trim robot.Joints) robot.Joints {
 	return fb
 }
 
-// SetStuckHandler 注入“设备卡死/恢复”回调（上层据此广播 UI 提示断电复位）。
-func (d *Driver) SetStuckHandler(f func(stuck bool)) { d.onStuck = f }
+// SetStuckHandler 注入“设备卡死/恢复”回调（上层据此广播 UI）。stuck=持续无就绪包；
+// recovering=正在自动串口软复位自救(免拔电源)——前端据此显示"自动复位中"而非"请断电"。
+func (d *Driver) SetStuckHandler(f func(stuck, recovering bool)) { d.onStuck = f }
 
 // SetFramePuller 设置/清除摄像头到屏的"拉帧"函数。非 nil 时 syncLoop 进入摄像头模式：由它
 // 阻塞拉取下一帧、拉到即 Sync(来一帧发一帧、同一帧也广播给 UI)，单 owner 串行；nil 时回落到
@@ -256,9 +273,9 @@ func (d *Driver) SetFramePuller(pull func() []byte) {
 	d.framePull.Store(&pull)
 }
 
-func (d *Driver) notifyStuck(stuck bool) {
+func (d *Driver) notifyStuck(stuck, recovering bool) {
 	if d.onStuck != nil {
-		d.onStuck(stuck)
+		d.onStuck(stuck, recovering)
 	}
 }
 
@@ -367,6 +384,8 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 	const stuckTimeout = 20 * time.Second
 	var failingSince time.Time // 本轮连续失败的起点（零值=当前不在失败中）；跑通一帧即清零
 	stuck := false
+	// lastStuck/lastRecovering：上次广播给 UI 的健康态，仅在变化时再广播（避免每帧刷 status）。
+	lastStuck, lastRecovering := false, false
 	// syncedSinceConnect：本次连接是否已跑通过至少一帧。仿 ElectronBot.DotNet——一旦跑通，之后的
 	// 传输卡顿【绝不 Close+Connect 重连】，只在同一 handle 上继续硬顶（见下方失败分支）。
 	syncedSinceConnect := false
@@ -442,7 +461,7 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 			}
 		}
 		if synced {
-			// 命中：清零失败计时与卡死状态（之后掉线还能快速重试），并通知 UI 恢复。
+			// 命中：清零失败计时与卡死状态（之后掉线还能快速重试）。UI 广播在下方按变化统一触发。
 			syncedSinceConnect = true
 			failingSince = time.Time{}
 			backoff = 2 * time.Second
@@ -450,7 +469,6 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 			if stuck {
 				stuck = false
 				d.log.Info("设备同步已恢复")
-				d.notifyStuck(false)
 			}
 		} else {
 			// 本帧未同步。核心原则（对照 ElectronBot.DotNet 的低层与上层：连一次、错就跳帧、绝不 churn）：
@@ -465,15 +483,13 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 			}
 			disconnected := !d.bot.Connected()
 			if disconnected && stuck {
-				// 卡死后设备被拔走（用户正在断电复位）：转入重连去接回，不再是“卡死等断电”。
+				// 卡死后设备被拔走（用户断电复位 / 串口软复位重枚举中）：转入重连去接回，不再是"卡死等断电"。
 				stuck = false
-				d.notifyStuck(false)
 			}
-			// 连续失败够久且设备仍在枚举 → 判卡死、提示断电（真掉线不算卡死，靠重连恢复）。
+			// 连续失败够久且设备仍在枚举 → 判卡死（真掉线不算卡死，靠重连恢复）。先尝试自动软复位，别急着喊断电。
 			if !disconnected && !stuck && time.Since(failingSince) >= stuckTimeout {
 				stuck = true
-				d.log.Warn("设备持续无就绪包，疑似固件卡死——请彻底断电(拔线≥15秒放净电容)再插；频繁重连不会自愈、只会加重")
-				d.notifyStuck(true)
+				d.log.Warn("设备持续无就绪包，疑似固件卡死——先尝试自动串口软复位(免拔电源)，多次无效再断电")
 			}
 			// 判定卡死后：自动串口软复位（免拔电源）去救——冷却+上限内发一次，复位后设备会掉线重枚举、
 			// 由上面的掉线分支自动接回。救不回(超上限)就停手、等用户断电。仅设备仍在枚举时才发。
@@ -490,6 +506,13 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 					backoff = backoffMax
 				}
 			}
+		}
+		// 统一广播设备健康态（仅在变化时，避免每帧刷 status）：recovering=正在自动软复位自救(免拔电源)；
+		// stuck && !recovering = 自动复位无效、需手动断电。前端据此显示"自动复位中"或"请断电"。
+		nowRecovering := stuck && reboot.recovering(d)
+		if stuck != lastStuck || nowRecovering != lastRecovering {
+			lastStuck, lastRecovering = stuck, nowRecovering
+			d.notifyStuck(stuck, nowRecovering)
 		}
 		if blockingPaced {
 			// 摄像头模式且已阻塞拉帧：拉取本身即节流，不再等 ticker，只检查退出。

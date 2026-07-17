@@ -56,9 +56,12 @@ const JointCount = 6
 
 // RobotStatus 描述机器人 USB 连接状态。
 type RobotStatus struct {
-	Connected bool   `json:"connected"`
-	Stuck     bool   `json:"stuck,omitempty"` // 已连接但持续无就绪包(疑似固件卡死)，需断电复位
-	Speed     string `json:"speed,omitempty"` // USB 连接速度，如 "USB 2.0"/"USB 3.0"（Mock 为空）
+	Connected bool `json:"connected"`
+	Stuck     bool `json:"stuck,omitempty"` // 已连接但持续无就绪包(疑似固件卡死)
+	// Recovering：卡死后正在【自动串口软复位(免拔电源)】自救中。为 true 时前端应显示"自动复位中…"
+	// 而非"请断电"；stuck && !recovering 才是"自动复位无效、需手动断电复位"。
+	Recovering bool   `json:"recovering,omitempty"`
+	Speed      string `json:"speed,omitempty"` // USB 连接速度，如 "USB 2.0"/"USB 3.0"（Mock 为空）
 	VID       uint16 `json:"vid"`             // USB 厂商 ID（ElectronBot = 0x1001）
 	PID       uint16 `json:"pid"`             // USB 产品 ID（ElectronBot = 0x8023）
 	FPS       int    `json:"fps"`             // 当前画面推送帧率

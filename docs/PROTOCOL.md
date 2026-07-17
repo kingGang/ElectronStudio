@@ -53,7 +53,9 @@
 ```jsonc
 // 状态快照
 { "type": "status", "ts": 1781170000000, "payload": {
-  "robot": { "connected": true, "stuck": false, "speed": "USB 2.0", "vid": 4097, "pid": 32803, "fps": 30 },
+  // robot.stuck=持续无就绪包(疑似固件卡死)；robot.recovering=卡死后正在自动串口软复位(免拔电源)自救中，
+  // 为 true 时 UI 显示"自动复位中"而非"请断电"，stuck && !recovering 才是"自动复位无效、需手动断电"。
+  "robot": { "connected": true, "stuck": false, "recovering": false, "speed": "USB 2.0", "vid": 4097, "pid": 32803, "fps": 30 },
   "asr":   { "running": true,  "detail": "SenseVoice-zh" },
   "tts":   { "running": true,  "detail": "piper zh_CN-huayan" },
   "llm":   { "active": "ollama:qwen2.5", "available": [

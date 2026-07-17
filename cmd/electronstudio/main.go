@@ -185,7 +185,8 @@ type app struct {
 	netASR      *netspeech.ASRClient // 网络 ASR(OpenAI 兼容)；nil=未配置
 	player      *audioout.Player     // 设备侧 mp3 播放(mpg123 或 macOS playto)
 	ttsToDevice bool                 // 配了 audio_device：TTS 始终定向设备喇叭(与 audio_out 解耦)
-	robotStuck  atomic.Bool          // 设备疑似固件卡死(持续无就绪包，需断电复位)，广播给 UI 提示
+	robotStuck  atomic.Bool          // 设备疑似固件卡死(持续无就绪包)，广播给 UI
+	robotRecovering atomic.Bool      // 卡死后正在自动串口软复位(免拔电源)自救中，供 UI 显示"自动复位中"而非"请断电"
 	// shutdown 触发优雅退出（= signal.NotifyContext 的 stop，与 Ctrl+C 同一条路径）。
 	// 由 main 注入；供 /api/shutdown 调用，见 handleShutdown 的注释——强杀会把固件掐死在半帧里。
 	shutdown func()
@@ -399,8 +400,9 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	a.driver.SetServoEnable(cfg.IO.ServoEnable)      // 舵机总开关：关时不上扭矩（可手动摆姿）
 	a.driver.SetJointTrim(cfg.JointTrim)             // 机械零位补偿：让上层的 0 就是端正姿态
 	a.driver.SetAutoReboot(cfg.IO.AutoRebootOr())    // 卡死时自动串口软复位（免拔电源，io.auto_reboot 缺省开）
-	a.driver.SetStuckHandler(func(stuck bool) { // 设备卡死/恢复 → 广播状态，UI 据此提示断电复位
+	a.driver.SetStuckHandler(func(stuck, recovering bool) { // 卡死/自愈/恢复 → 广播状态供 UI 显示
 		a.robotStuck.Store(stuck)
+		a.robotRecovering.Store(recovering)
 		a.srv.Broadcast(a.statusSnapshot())
 	})
 	if !cfg.IO.ServoEnable {
@@ -1745,8 +1747,9 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 	return protocol.StatusEvent{
 		Robot: protocol.RobotStatus{
 			Connected: a.bot.Connected(),
-			Stuck:     a.robotStuck.Load(),
-			Speed:     a.bot.Speed(),
+			Stuck:      a.robotStuck.Load(),
+			Recovering: a.robotRecovering.Load(),
+			Speed:      a.bot.Speed(),
 			VID:       0x1001, // ElectronBot 设备标识（Mock 下仅作展示）
 			PID:       0x8023,
 			FPS:       30,

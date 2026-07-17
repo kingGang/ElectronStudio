@@ -133,7 +133,8 @@ export interface Envelope<T = unknown> {
 
 export interface RobotStatus {
   connected: boolean
-  stuck?: boolean // 已连接但持续无就绪包(疑似固件卡死)，需断电复位
+  stuck?: boolean // 已连接但持续无就绪包(疑似固件卡死)
+  recovering?: boolean // 卡死后正在自动串口软复位(免拔电源)自救中；true 时 UI 显示"自动复位中"而非"请断电"
   speed?: string // USB 连接速度，如 "USB 2.0"/"USB 3.0"
   vid: number
   pid: number
