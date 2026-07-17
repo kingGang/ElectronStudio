@@ -385,6 +385,7 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 	tick := 0
 	var buf []byte // syncLoop 私有缓冲，避免与 frameLoop 共享底层数组
 	var lastReopen time.Time
+	prevSentEnable := false // 追踪下发给设备的使能位，仅在变化时打一行日志（看舵机何时上扭矩/松力）
 	// 重连策略（对照 ElectronBot.DotNet：连一次、错就跳帧、绝不 churn）：只有【真掉线(NO_DEVICE)】或
 	// 【连上却一帧都没跑通(疑似错过就绪窗口)】才 Close+Connect，且退避间隔逐次翻倍封顶。一旦跑通过一帧、
 	// 之后只是传输卡顿，就【绝不重连】、在同一 handle 上继续硬顶——频繁 Close+Connect（churn，会重发
@@ -465,7 +466,16 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 				enable = false
 			}
 			d.mu.Unlock()
-			_ = d.bot.SetJointAngles(applyTrim(pose, trim), enable && servoOK) // 总开关关时永不使能
+			sentEnable := enable && servoOK // 总开关关时永不使能
+			if sentEnable != prevSentEnable {
+				prevSentEnable = sentEnable
+				if sentEnable {
+					d.log.Debug("舵机上扭矩")
+				} else {
+					d.log.Debug("舵机松力（idle 自动松力 / 总开关关 / 重新使能脉冲）")
+				}
+			}
+			_ = d.bot.SetJointAngles(applyTrim(pose, trim), sentEnable)
 			if err := d.bot.Sync(); err != nil {
 				d.log.Debug("同步失败", "err", err)
 			} else {
