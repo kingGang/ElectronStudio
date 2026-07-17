@@ -117,7 +117,7 @@
       }
     }
     const a = m3dSmooth;
-    if (j.head) j.head.rotation.x = a[0] * D2R;
+    if (j.head) j.head.rotation.x = -a[0] * D2R;  // 头部俯仰：模型抬/低头方向与实机相反，取负对齐（真机核对）
     if (j.armRollLeft) j.armRollLeft.rotation.z = a[1] * D2R;
     if (j.armPitchLeft) j.armPitchLeft.rotation.x = -a[2] * D2R;  // 俯仰：手性相反，取负让正角度朝前
     if (j.armRollRight) j.armRollRight.rotation.z = -a[3] * D2R;
