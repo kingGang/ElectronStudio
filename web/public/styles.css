@@ -102,6 +102,11 @@ body {
   align-content: start;
   overflow-y: auto;
 }
+/* 素材页只有一个面板，但内容随表情类型/情绪增多而变长：body 是 overflow:hidden，
+   这里不自己给滚动条，超出视口的部分会被直接裁掉且滚不到（表情分成多个类型后
+   就撑爆了，排在最后的分区整块够不着）。align-content:start 让面板按内容高度排。 */
+.materials-view { align-content: start; overflow-y: auto; }
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);

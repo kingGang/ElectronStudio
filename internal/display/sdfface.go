@@ -77,6 +77,11 @@ var (
 	sdfMonoEye = [3]float64{248, 250, 252}
 )
 
+// squintCarveMax 是眯眼挖弧的深度上限。挖弧从眼下方切进去，squint 越大留下的白月牙越薄，
+// 到 0.8 以上就把眼睛整个挖穿了（彩色只剩辉光的空心圆环、黑白只剩一条细弧）。
+// 情绪表里 laughing=0.8、lol=1 都会穿，故在渲染时统一封顶——保留 emotionTarget 里的语义值不动。
+const squintCarveMax = 0.6
+
 // emotionColor 给出情绪的实心主色（照参考图）。
 func emotionColor(e string) [3]float64 {
 	switch e {
@@ -635,12 +640,10 @@ func (s *SDFFaceSource) render() {
 			dL := sdfRoundBox(px, py, lcx, ecy, hwL, hhL, rCL)
 			dR := sdfRoundBox(px, py, rcx, ecy, hwR, hhR, rCR)
 			// 开心/大笑：下方挖上升的弧，把眼变成 ∩ 眯眼笑。
-			// 黑白眼睛类没有辉光撑体积，挖太狠(如 lol 的 squint=1)就只剩一条细弧、几乎看不见；
-			// 故 mono 下给挖弧封顶，保证眯眼笑仍是官方那种厚实的白半月。
-			sq := s.cur.squint
-			if mono && sq > 0.65 {
-				sq = 0.65
-			}
+			// 挖弧越深、剩下的月牙越薄：squint≥0.8 会把眼睛整个挖穿——彩色下只剩辉光的空心
+			// 圆环，黑白下只剩一条细弧。两种类型都得封顶到"还留得住厚实 ∩"的程度
+			// （squint=0.6 的 funny 是好的，0.8 的 laughing、1 的 lol 就穿了）。
+			sq := math.Min(s.cur.squint, squintCarveMax)
 			if sq > 0.08 {
 				dL = math.Max(dL, -(math.Hypot(px-lcx, py-(ecy+hhL*(1.15-0.85*sq))) - hhL*1.3))
 				dR = math.Max(dR, -(math.Hypot(px-rcx, py-(ecy+hhR*(1.15-0.85*sq))) - hhR*1.3))
