@@ -31,7 +31,8 @@ type Sidecar struct {
 	mu        sync.Mutex
 	conn      *websocket.Conn // 当前连接；nil 表示未连接
 	connected bool
-	voice     Voice // sidecar 上报的 TTS 音色能力与当前取值（"voice" 消息）
+	voice     Voice        // sidecar 上报的 TTS 音色能力与当前取值（"voice" 消息）
+	desired   desiredVoice // 每条连接建立时下发一次的音色（主程序侧配置，见 pushDesiredVoice）
 	writeTO   time.Duration
 	onState   func() // 连接状态变化回调（连上/断开），用于刷新界面状态
 
@@ -46,6 +47,41 @@ func (s *Sidecar) OnStateChange(fn func()) { s.onState = fn }
 func (s *Sidecar) notify() {
 	if s.onState != nil {
 		s.onState()
+	}
+}
+
+// desiredVoice 是主程序侧配置的音色：每条连接建立时下发一次，覆盖 sidecar 自己的开机默认。
+type desiredVoice struct {
+	set   bool
+	sid   int
+	speed float64
+}
+
+// SetDesiredVoice 记下"每次连上都要下发的音色"。只记不发——真正的下发时机在 manage()
+// 里连接刚建立的那一刻（见 pushDesiredVoice）。启动时与用户改音色落盘后各调一次即可。
+func (s *Sidecar) SetDesiredVoice(sid int, speed float64) {
+	s.mu.Lock()
+	s.desired = desiredVoice{set: true, sid: sid, speed: speed}
+	s.mu.Unlock()
+}
+
+// pushDesiredVoice 把配置里的音色下发给刚连上的 sidecar，【每条连接只此一次】。
+//
+// 为什么必须在这里、而不能挂在 notify/OnStateChange 上：sidecar 收到 set_voice 会【回一条
+// voice 上报】，readLoop 收到它会调 notify() —— 若 notify 的回调里再发 set_voice，就是
+// set_voice → voice → notify → set_voice 的无限乒乓。实测炸出 61 万次往返、86MB 日志，
+// 且每次 notify 还向所有网页广播一次 status，广播风暴直接把浏览器打成"已断开·重连中"。
+// 反馈环的出口只有一个：下发的时机必须是【连接事件】，而不是【状态变化事件】——
+// 后者会被自己的结果再次触发。
+func (s *Sidecar) pushDesiredVoice(ctx context.Context) {
+	s.mu.Lock()
+	d := s.desired
+	s.mu.Unlock()
+	if !d.set {
+		return
+	}
+	if err := s.SetVoice(ctx, d.sid, d.speed); err != nil {
+		s.log.Warn("下发已保存音色失败", "err", err, "speaker_id", d.sid)
 	}
 }
 
@@ -116,6 +152,9 @@ func (s *Sidecar) manage(ctx context.Context) {
 		s.connected = true
 		s.mu.Unlock()
 		s.log.Info("已连接语音 sidecar", "url", s.url)
+		// 把配置里的音色下发一次。位置很关键：必须在【连接建立】这一刻发，绝不能挂在
+		// notify 的回调里——那会被自己引发的 voice 上报再次触发，形成无限乒乓。
+		s.pushDesiredVoice(ctx)
 		s.notify()
 
 		s.readLoop(ctx) // 阻塞直到连接断开

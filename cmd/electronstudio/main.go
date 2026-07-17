@@ -372,21 +372,18 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	})
 
 	// 语音 sidecar 连接状态变化（自动重连连上/断开）时，广播一次状态快照刷新界面。
+	//
+	// 【这个回调里绝不能给 sidecar 发消息】：它由 notify() 触发，而 sidecar 对多数命令都会回一条
+	// 状态上报、上报又会触发 notify —— 在这里发命令就是自己喂自己的无限乒乓。曾把"下发已保存音色"
+	// 写在这儿，实测 61 万次往返 / 86MB 日志，广播风暴还把浏览器打成"已断开·重连中"。
+	// 需要"每次连上做一次"的事，交给 speech 包在【连接建立】那一刻做（见 SetDesiredVoice）。
 	if sc, ok := a.speech.(*speech.Sidecar); ok {
+		// 音色：主程序侧配置才是事实来源，sidecar 自己 config.json 里那份只是它的开机默认。
+		// 记一次即可，之后每条新连接（含 sidecar 后启动、中途重连）都会自动下发。
+		if v := cfg.Speech.Voice; v.SpeakerIDOr() >= 0 || v.Speed > 0 {
+			sc.SetDesiredVoice(v.SpeakerIDOr(), v.Speed)
+		}
 		sc.OnStateChange(func() {
-			// 每次连上都把【配置里保存的音色】下发一次：sidecar 自己 config.json 里那份只是它的
-			// 开机默认，不覆盖的话，用户在设置页选的音色一重启 sidecar 就被顶回默认——选了等于白选。
-			// 放在状态回调里而不是启动时一次性下发，是因为 sidecar 可能后启动、也可能中途重连。
-			if st := sc.Status(); st.TTSRunning {
-				a.cfgMu.Lock()
-				v := a.cfg.Speech.Voice
-				a.cfgMu.Unlock()
-				if sid := v.SpeakerIDOr(); sid >= 0 || v.Speed > 0 {
-					if err := sc.SetVoice(context.Background(), sid, v.Speed); err != nil {
-						log.Warn("下发已保存音色失败", "err", err)
-					}
-				}
-			}
 			if a.srv != nil {
 				a.srv.Broadcast(a.statusSnapshot())
 			}
@@ -800,9 +797,14 @@ func (a *app) handleSetVoice(ctx context.Context, cmd protocol.SetVoiceCommand) 
 	if cmd.Speed > 0 {
 		a.cfg.Speech.Voice.Speed = cmd.Speed
 	}
+	speed := a.cfg.Speech.Voice.Speed
 	a.saveConfig()
 	a.cfgMu.Unlock()
-	a.log.Info("音色已保存", "speaker_id", sid, "speed", cmd.Speed)
+	// 同步"每次连上要下发的音色"，否则 sidecar 一重连又会退回旧值。
+	if sc, ok := a.speech.(*speech.Sidecar); ok {
+		sc.SetDesiredVoice(sid, speed)
+	}
+	a.log.Info("音色已保存", "speaker_id", sid, "speed", speed)
 	a.srv.Broadcast(a.statusSnapshot())
 }
 
