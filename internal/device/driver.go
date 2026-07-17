@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,11 +49,12 @@ type Driver struct {
 	enable      bool
 	servoEnable bool         // 总开关：false 时永不下发使能（舵机不上扭矩，可手动摆姿）
 	trim        robot.Joints // 机械零位补偿(度)：下发前加、读回时减，见 SetJointTrim
-	// holdUntil：舵机保持扭矩到此刻，过了就自动松力(enable=false)。对齐官方 ElectronBot.DotNet——它待机显示
-	// 人脸/时钟一律 enable=false 松力，只在真动时才 enable=true。【根因】持续上扭矩会让舵机一直耗流、微堵转
-	// 发热，几分钟后触发舵机自身热/过流保护闩锁松掉；而固件使能是边沿触发(isEnabled 变化才 SetJointEnable)，
-	// 舵机自锁后固件永不重挂 → 全体舵机“用一段时间就不受控”、只能断电。SetPose(enable=true) 会续这个窗口。
-	holdUntil time.Time
+	// disabledAxes[i]=true 的轴【不驱动】：下发时给它发 NaN，固件的角度守卫(setPoint 越界或 NaN 就跳过)
+	// 会对该关节零 I²C 事务，从此永不点它。【为什么需要——固件实证】舵机(直流马达+电位器+自制驱动板)对
+	// 堵转/过流【零保护】，且主控给舵机的 I²C 是 do{}while(!=HAL_OK) 无超时无限重试：一个坏舵机(如身体轴
+	// 有空挡→堵转→驱动板 brownout→拉死 I²C 总线)会把主控主循环卡死在它的地址上、连累其它 5 轴一起停摆锁死，
+	// 只能断电。把坏轴排除(恒发 NaN、永不驱动)即从源头掐断这条拖垮全体的路径。见 SetDisabledAxes。
+	disabledAxes [robot.JointCount]bool
 
 	// framePull：非 nil=摄像头到屏模式。syncLoop 改由它【阻塞拉一帧→同步一帧】驱动（单 owner
 	// 串行 读→Sync，仿官方 EmoticonActionFrameService 单一串行发送），期间不跑自由 ticker、
@@ -93,6 +95,19 @@ func (d *Driver) SetServoEnable(on bool) {
 
 // SetAutoReboot 设置"卡死时自动串口软复位(免拔电源)"开关。默认由配置注入(io.auto_reboot，缺省开)。
 func (d *Driver) SetAutoReboot(on bool) { d.autoReboot.Store(on) }
+
+// SetDisabledAxes 标记【不驱动】的关节轴(下标 0..JointCount-1)。这些轴每帧下发 NaN，固件角度守卫会
+// 跳过、对它零 I²C——用于隔离一个坏舵机(如身体轴有空挡→堵转→拉死 I²C 拖垮全体)。见 disabledAxes 注释。
+func (d *Driver) SetDisabledAxes(axes []int) {
+	d.mu.Lock()
+	d.disabledAxes = [robot.JointCount]bool{}
+	for _, ax := range axes {
+		if ax >= 0 && ax < robot.JointCount {
+			d.disabledAxes[ax] = true
+		}
+	}
+	d.mu.Unlock()
+}
 
 // Reboot 手动触发设备软复位（串口，免拔电源）。供 UI「复位电子」按钮调用（固件卡死时驱动也会自动软复位）。
 // 传输不支持软复位(如 Mock)时返回错误。复位会让设备掉线 ~6s 再重连，由 syncLoop 的掉线分支自动接回。
@@ -296,21 +311,16 @@ func NewDriver(bot robot.Transport, source display.Source, log *slog.Logger, fps
 	return &Driver{bot: bot, source: source, log: log, fps: fps, onFrame: onFrame, onJoints: onJoints}
 }
 
-// servoHoldTime：SetPose(enable=true) 后保持扭矩的时长。这段时间内没有新的运动指令就自动松力。
-// 动作/jog 期间是 30fps 持续下发，会不断续期、稳稳保持上扭矩；一停下 servoHoldTime 后自动松力，
-// idle(纯显示表情)时舵机不再持续通电发热——这正是官方"待机松力、只在动时上扭矩"的等效实现。
-const servoHoldTime = 2 * time.Second
-
 // SetPose 设置目标舵机角度与使能。实现 choreography.PoseSink，供动作编排/手动/跟随写入。
+//
+// 【不再做 idle 自动松力】：曾经试过"停手 2s 自动松力"，但那会翻转 enable 位——固件的 SetJointEnable
+// 对 6 轴无条件发 0xff(不带任何守卫)，enable 每翻转一次就点名坏舵机一次；且"松了又猛地上扭矩、目标离
+// 垂下的位置很远"会造成电流尖峰。固件对堵转零保护，这反而更容易把坏轴顶到堵转、拖垮全体。故撤销，
+// 运行期保持 enable 恒定，坏轴走 disabledAxes 排除。
 func (d *Driver) SetPose(angles robot.Joints, enable bool) {
 	d.mu.Lock()
 	d.pose = angles
 	d.enable = enable
-	if enable {
-		d.holdUntil = time.Now().Add(servoHoldTime) // 有运动指令：续保持窗口
-	} else {
-		d.holdUntil = time.Time{} // 显式松力：立即
-	}
 	d.mu.Unlock()
 }
 
@@ -457,10 +467,7 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 				}
 			}
 			d.mu.Lock()
-			pose, enable, servoOK, trim := d.pose, d.enable, d.servoEnable, d.trim
-			if enable && time.Now().After(d.holdUntil) {
-				enable = false // 自动松力：超过 servoHoldTime 没有新运动指令，别再持续上扭矩（防发热闩锁，仿官方 idle 松力）
-			}
+			pose, enable, servoOK, trim, disabled := d.pose, d.enable, d.servoEnable, d.trim, d.disabledAxes
 			if d.reenableFrames > 0 { // 重新使能脉冲：这几帧强行发 enable=0，之后的 0→1 跳变解锁舵机
 				d.reenableFrames--
 				enable = false
@@ -472,10 +479,16 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 				if sentEnable {
 					d.log.Debug("舵机上扭矩")
 				} else {
-					d.log.Debug("舵机松力（idle 自动松力 / 总开关关 / 重新使能脉冲）")
+					d.log.Debug("舵机松力（总开关关 / 重新使能脉冲）")
 				}
 			}
-			_ = d.bot.SetJointAngles(applyTrim(pose, trim), sentEnable)
+			sendPose := applyTrim(pose, trim)
+			for i := range disabled {
+				if disabled[i] { // 被排除的轴发 NaN → 固件角度守卫跳过、零 I²C、永不驱动这个坏舵机（见 disabledAxes 注释）
+					sendPose[i] = float32(math.NaN())
+				}
+			}
+			_ = d.bot.SetJointAngles(sendPose, sentEnable)
 			if err := d.bot.Sync(); err != nil {
 				d.log.Debug("同步失败", "err", err)
 			} else {

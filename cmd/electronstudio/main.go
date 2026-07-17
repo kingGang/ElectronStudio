@@ -400,6 +400,10 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	a.driver.SetServoEnable(cfg.IO.ServoEnable)      // 舵机总开关：关时不上扭矩（可手动摆姿）
 	a.driver.SetJointTrim(cfg.JointTrim)             // 机械零位补偿：让上层的 0 就是端正姿态
 	a.driver.SetAutoReboot(cfg.IO.AutoRebootOr())    // 卡死时自动串口软复位（免拔电源，io.auto_reboot 缺省开）
+	a.driver.SetDisabledAxes(cfg.IO.ServoDisable)    // 不驱动的坏舵机轴（发 NaN 让固件跳过；隔离堵转拖垮全体）
+	if len(cfg.IO.ServoDisable) > 0 {
+		log.Info("已排除不驱动的舵机轴（发 NaN 让固件跳过）", "axes", cfg.IO.ServoDisable)
+	}
 	a.driver.SetStuckHandler(func(stuck, recovering bool) { // 卡死/自愈/恢复 → 广播状态供 UI 显示
 		a.robotStuck.Store(stuck)
 		a.robotRecovering.Store(recovering)

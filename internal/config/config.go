@@ -152,8 +152,13 @@ type IOConfig struct {
 	// 或显式串口名(如 "COM3" / "/dev/ttyUSB0")。见 electronbot.SendReboot。
 	ResetPort string `json:"reset_port,omitempty"`
 	// AutoReboot：检测到固件卡死时是否自动串口软复位(免拔电源)。nil=默认开启；显式 false 关闭(只提示断电)。
-	AutoReboot *bool         `json:"auto_reboot,omitempty"`
-	MiniMax    MiniMaxConfig `json:"minimax"`
+	AutoReboot *bool `json:"auto_reboot,omitempty"`
+	// ServoDisable：【不驱动】的舵机轴下标列表(0..5，同 robot.JointNames：0头/1左臂横滚/2左臂俯仰/
+	// 3右臂横滚/4右臂俯仰/5身体旋转)。用于隔离坏舵机——列进来的轴每帧发 NaN，固件跳过、零 I²C，从此不
+	// 驱动它。固件对舵机堵转/过流零保护，一个坏轴堵转会拉死 I²C 拖垮全体锁死，排除它即从源头断掉。
+	// 例：身体旋转舵机坏(有空挡)→填 [5]。
+	ServoDisable []int         `json:"servo_disable,omitempty"`
+	MiniMax      MiniMaxConfig `json:"minimax"`
 }
 
 // 各路由的默认值（空配置时）。
