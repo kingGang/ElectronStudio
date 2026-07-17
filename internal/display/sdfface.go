@@ -77,6 +77,13 @@ var (
 	sdfMonoEye = [3]float64{248, 250, 252}
 )
 
+// 【黑白眼睛类】眼形对齐官方素材的系数（分母是 SDF 缺省值，分子是官方素材实测值）。
+const (
+	monoEyeHWScale = 37.5 / 28.0 // 半宽：28 → 37.5（官方眼更宽）
+	monoEyeHHScale = 32.0 / 40.0 // 半高：40 → 32（官方眼更扁）
+	monoEyeDX      = 49.5        // 眼心 x：74 → 70.5（官方眼距更开）
+)
+
 // squintCarveMax 是眯眼挖弧的深度上限。挖弧从眼下方切进去，squint 越大留下的白月牙越薄，
 // 到 0.8 以上就把眼睛整个挖穿了（彩色只剩辉光的空心圆环、黑白只剩一条细弧）。
 // 情绪表里 laughing=0.8、lol=1 都会穿，故在渲染时统一封顶——保留 emotionTarget 里的语义值不动。
@@ -584,7 +591,6 @@ func drawBrow(acc *[3]float64, px, py, cx, browCy, angle, hw, alpha float64) {
 func (s *SDFFaceSource) render() {
 	const (
 		cx0, cy0 = 120.0, 120.0
-		eyeDX    = 46.0
 		scrR     = 119.0
 	)
 	fl := s.floatY()
@@ -601,8 +607,19 @@ func (s *SDFFaceSource) render() {
 	tilt := s.cur.tilt
 	ct, stt := math.Cos(tilt), math.Sin(tilt)
 
+	// 【黑白眼睛类】的眼形要跟官方素材对齐，否则补齐的表情摆在官方素材旁边一眼看出是两拨人。
+	// 实测官方素材（240×240 上左眼）：半宽 37.5、半高 32、眼心 x=70.5 —— 是"宽扁大眼"；
+	// SDF 缺省是半宽 28、半高 40、眼心 x=74 的"窄高眼"，既小一圈又显瘦。
+	// 只对齐眼形与眼距，嘴和眉保留：官方那套没有哈哈大笑/色色/鬼畜这些情绪，去掉嘴眉就分不出来了。
+	// eyeY 不动——嘴的取值区间是 eyeY+48..+112，挪眼会把嘴顶部裁掉。
 	hw := 28.0 * s.cur.eyeScale
 	hhFull := (40.0 + s.cur.tall*14) * s.cur.eyeScale
+	eyeDX := 46.0
+	if mono {
+		hw *= monoEyeHWScale
+		hhFull *= monoEyeHHScale
+		eyeDX = monoEyeDX
+	}
 	hf := hhFull * (1 - 0.35*s.cur.lidTop) // 睑压系数（眯眼靠下方挖弧成 ∩，不在这里压高）
 	rScale := 1 - 0.12*s.cur.asym
 	eyeOpenL := clampf(eyeOpen*(1-s.cur.wink), 0, 1) // winking：左眼闭
