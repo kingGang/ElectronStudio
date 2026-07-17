@@ -387,10 +387,12 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	}
 	a.clips = display.NewClipSource(clips)
 	a.screen = display.NewCompositor(a.camera, a.clips, face)
-	// SDF 模式：实时表情脸接管所有情绪，跳过离线素材片（否则默认/上传素材会盖住 SDF 脸）。
-	if cfg.FaceOr() == "sdf" {
-		a.screen.SetClipsEnabled(false)
-	}
+	// 表情类型（"系列"，见 config.FaceStyle）：
+	//   类型B(b，默认)  = 关掉 GIF 素材层，全部情绪走 SDF 程序脸（否则素材会盖住 SDF 脸）。
+	//   黑白眼睛类(bw) = 开启素材层，有 GIF 的用 GIF（官方黑底白眼那套），没有的自动用 SDF 补。
+	// 两者只差这一个开关；可在运行时切换（handleSetFaceStyle）。
+	a.applyFaceStyle(cfg.FaceStyleOr())
+	log.Info("表情类型", "style", cfg.FaceStyleOr())
 	// 机器人连接放到【最后一刻】：真机有“连接后就绪窗口”，连上后必须尽快开始 Sync，否则
 	// 窗口过期、设备不再发就绪包(帧首读超时)。前面的表情播种等慢初始化都已做完，这里连上后
 	// 紧接着 NewDriver→newApp 返回→main 里 driver.Run(已排最前) 即首帧，间隔最短、稳命中窗口。
@@ -694,6 +696,32 @@ var supportedEmotions = []string{
 	"neutral", "happy", "laughing", "lol", "funny", "sad", "angry", "crying", "loving",
 	"naughty", "embarrassed", "surprised", "shocked", "scared", "thinking", "cool", "confident",
 	"sleepy", "asleep", "tired", "winking", "confused", "speechless", "silly", "manic",
+}
+
+// applyFaceStyle 应用表情类型（"系列"）：
+//   - bw 黑白眼睛类：开启 GIF 素材层——有素材的情绪用素材（官方黑底白眼那套），
+//     该类型没有的情绪（色色/鬼畜/睡着了…）由兜底的 SDF 脸自动补上，不会做不出表情。
+//   - b  类型B：关掉素材层，全部情绪由 SDF 程序脸实时绘制。
+//
+// compositor 本就是"有素材用素材、否则用兜底脸"，所以两个类型只差这一个开关；
+// SetClipsEnabled 内部会 Invalidate 兜底脸，切换后立刻重画、不留残帧。
+func (a *app) applyFaceStyle(style string) {
+	a.screen.SetClipsEnabled(style == "bw")
+}
+
+// handleSetFaceStyle 运行时切换表情类型：校验 → 热生效 → 落盘 → 广播（各端同步高亮）。
+func (a *app) handleSetFaceStyle(style string) {
+	if !config.ValidFaceStyle(style) {
+		a.log.Warn("非法表情类型", "style", style)
+		return
+	}
+	a.cfgMu.Lock()
+	a.cfg.FaceStyle = style
+	a.saveConfig()
+	a.cfgMu.Unlock()
+	a.applyFaceStyle(style)
+	a.log.Info("表情类型已切换", "style", style)
+	a.srv.Broadcast(a.statusSnapshot())
 }
 
 // isSupportedEmotion 报告 name 是否为支持的情绪（供素材页判断该不该渲染程序脸缩略图）。
@@ -1041,6 +1069,11 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 
 	case protocol.TypeReenable:
 		a.driver.Reenable() // 舵机过载保护锁存后手动解锁（驱动也会自动检测并重试）
+
+	case protocol.TypeSetFaceStyle:
+		if cmd, err := protocol.As[protocol.SetFaceStyleCommand](in.Env); err == nil {
+			a.handleSetFaceStyle(cmd.Style)
+		}
 
 	case protocol.TypeRebootDevice:
 		go func() { // 串口软复位阻塞 ~1s 且设备会掉线重连，放后台；成功/失败都由状态广播与日志反映
@@ -1801,6 +1834,7 @@ func (a *app) statusSnapshot() protocol.StatusEvent {
 		Persona:       a.cfg.Persona,
 		PersonaSource: a.cfg.PersonaSourceOr(),
 		Voice:         a.cfg.Voice,
+		FaceStyle:     a.cfg.FaceStyleOr(),
 	}
 }
 

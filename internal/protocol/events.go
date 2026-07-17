@@ -101,6 +101,9 @@ type StatusEvent struct {
 	Persona       string  `json:"persona,omitempty"`        // 设备角色/人设（供设置页展示/编辑）
 	PersonaSource string  `json:"persona_source,omitempty"` // local | model（角色来源：本机/模型自带）
 	Voice         string  `json:"voice,omitempty"`          // 声音音色（供设置页展示/编辑）
+	// FaceStyle 当前生效的表情类型（"系列"）：b=类型B(全 SDF 程序脸) | bw=黑白眼睛类(GIF 素材优先、
+	// 缺的自动用类型B补)。素材页据此高亮"使用中"的类型，切换走 set_face_style 命令。
+	FaceStyle string `json:"face_style,omitempty"`
 }
 
 // MusicStatus 是音乐子系统的当前配置（供前端展示来源）。

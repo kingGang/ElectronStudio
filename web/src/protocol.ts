@@ -62,7 +62,13 @@ export const ClientType = {
   Party: 'party',
   Reenable: 'reenable',
   RebootDevice: 'reboot_device',
+  SetFaceStyle: 'set_face_style',
 } as const
+
+/** 切换表情类型（"系列"）：b=类型B(全 SDF 程序脸) | bw=黑白眼睛类(GIF 素材优先、缺的自动用类型B补)。 */
+export interface SetFaceStyleCommand {
+  style: string // b | bw
+}
 
 export interface SetIOCommand {
   audio_in?: string

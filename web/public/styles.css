@@ -181,7 +181,20 @@ body {
   background: var(--card); color: var(--text); border: 1px solid var(--border);
   border-radius: var(--radius-sm); padding: 6px 10px; margin-right: 8px; cursor: pointer;
 }
-.mat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+/* 素材页按「表情类型(系列)」分区：每个类型一个 section，内部才是情绪卡片网格。 */
+.mat-grid { display: flex; flex-direction: column; gap: 18px; }
+.mat-grid-inner { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.mat-section { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+.mat-section-on { border-color: var(--accent); }
+.mat-section-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.mat-section-name { font-size: 14px; }
+.mat-section-desc { font-size: 11px; }
+.mat-badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  background: var(--accent); color: #04121a; font-weight: 600;
+}
+.mat-section-head .mat-use { padding: 3px 10px; font-size: 12px; }
+.mat-sdf .mat-sub { opacity: 0.85; }
 .mat-card {
   background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 10px; display: flex; flex-direction: column; gap: 8px;

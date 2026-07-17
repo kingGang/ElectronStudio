@@ -24,7 +24,7 @@
     Camera: 'camera', Greet: 'greet', Music: 'music', Party: 'party',
     ScheduleAdd: 'schedule_add', ScheduleRemove: 'schedule_remove',
     MaterialDelete: 'material_delete', SetIO: 'set_io', SetDevice: 'set_device', SetVolume: 'set_volume',
-    SetRealtime: 'set_realtime', RebootDevice: 'reboot_device',
+    SetRealtime: 'set_realtime', RebootDevice: 'reboot_device', SetFaceStyle: 'set_face_style',
   };
 
   // 6 轴关节名称（顺序与后端 robot.JointNames 一致，即官方下发给固件的线上顺序：头在 0 号）。
@@ -390,6 +390,8 @@
     if (recovering && !wasRecovering) toast('检测到卡死，正在自动软复位(免拔电源)，稍候自动重连…');
     if (wedged && !wasWedged) toast('⚠ 自动软复位无效，请彻底断电(拔线≥15秒)再插复位，或点「复位电子」');
     wasRecovering = recovering; wasWedged = wedged;
+    // 表情类型（"系列"）变化：重渲染素材页分区，让"使用中"高亮跟着走。
+    if (s.face_style && s.face_style !== faceStyle) { faceStyle = s.face_style; renderMaterials(); }
     toggleDot(el.dotASR, s.asr && s.asr.running);
     toggleDot(el.dotTTS, s.tts && s.tts.running);
     if (s.llm) {
@@ -1540,41 +1542,76 @@
   // ======================================================================
   // 屏幕表情素材（上传 GIF/图片 → 机器人脸；列表/删除走 WS，上传/缩略图走 HTTP）
   // ======================================================================
-  let matVersion = 0; // 每次列表更新自增，用于缩略图 URL 去缓存
+  let matVersion = 0;     // 每次列表更新自增，用于缩略图 URL 去缓存
+  let lastMaterials = []; // 缓存列表：切换类型/状态更新时无需等新事件即可重渲染
+  let faceStyle = 'b';    // 当前生效的表情类型（来自 status.face_style）
+
+  // 表情类型（"系列"）：多套表情风格并存，每个类型一个分区、各自列出全部情绪。
+  //   bw 黑白眼睛类：有 GIF 素材的用素材（官方黑底白眼那套），该类型没有的表情自动用类型B(SDF)补。
+  //   b  类型B：全部由 SDF 程序脸实时绘制。
+  // 与后端 compositor 行为一致（有素材用素材、否则用兜底脸），切换只是开关素材层。
+  const FACE_STYLES = [
+    { key: 'bw', name: '黑白眼睛类', desc: '官方黑底白眼素材；这个类型没有的表情自动用类型B补上' },
+    { key: 'b', name: '类型B', desc: '实心彩色眼 + 高光 + 眉毛，全部程序实时绘制' },
+  ];
+
+  // matCard 渲染某情绪在【指定类型】下的卡片：缩略图即该类型下的真实长相。
+  function matCard(m, styleKey) {
+    const useClip = styleKey === 'bw' && m.kind !== 'sdf'; // 只有黑白眼睛类且有素材才用素材
+    const kindLabel = { gif: 'GIF', frames: '帧序列', atlas: '图集' }[m.kind] || m.kind || '';
+    const sub = useClip ? `${m.frames} 帧 · ${m.fps}fps · ${kindLabel}` : '程序脸 · 实时绘制';
+    // style=b 让后端强制渲染 SDF 缩略图（否则有 GIF 的情绪会返回 GIF 首帧）。
+    const thumb = `/api/material-thumb?name=${encodeURIComponent(m.name)}` +
+      (styleKey === 'b' ? '&style=b' : '') + `&v=${matVersion}`;
+    const card = document.createElement('div');
+    card.className = 'mat-card' + (useClip ? '' : ' mat-sdf');
+    card.innerHTML =
+      `<img class="mat-thumb" alt="${m.name}" src="${thumb}" />` +
+      `<div class="mat-meta"><b class="mat-name">${m.name}</b><span class="mat-sub">${sub}</span></div>` +
+      `<div class="mat-ops"><button class="qa mat-preview">▶ 预览</button>` +
+      (useClip ? `<button class="mr-rm" title="删除素材">✕</button>` : '') + `</div>`;
+    card.querySelector('.mat-preview').addEventListener('click', () => {
+      send(CliType.SetEmotion, { emotion: m.name, preview: true }); // preview：只切屏，不联动动作
+      toast(`预览「${m.name}」（按当前生效类型显示）`);
+    });
+    const rm = card.querySelector('.mr-rm');
+    if (rm) rm.addEventListener('click', () => {
+      if (confirm(`删除素材「${m.name}」？删除后该情绪在「黑白眼睛类」下改用类型B(程序脸)。`)) {
+        send(CliType.MaterialDelete, { name: m.name });
+      }
+    });
+    return card;
+  }
+
   function renderMaterials(materials) {
+    if (materials) lastMaterials = materials;
     const grid = $('mat-grid'), count = $('mat-count');
-    if (count) count.textContent = materials.length ? `${materials.length} 个情绪` : '';
+    const curName = (FACE_STYLES.find((s) => s.key === faceStyle) || {}).name || faceStyle;
+    if (count) count.textContent = lastMaterials.length ? `${lastMaterials.length} 个情绪 · 当前「${curName}」` : '';
     if (!grid) return;
     matVersion++;
-    if (!materials.length) { grid.innerHTML = '<span class="muted">暂无素材，上传一段 GIF 试试</span>'; return; }
     grid.innerHTML = '';
-    materials.forEach((m) => {
-      const card = document.createElement('div');
-      card.className = 'mat-card';
-      // kind=sdf：这个情绪没有上传素材，由程序脸(SDF)实时绘制（缩略图也是后端实时渲染的）。
-      // 它没有文件可删，所以不给删除按钮；预览照常——这样新加的表情也能在这里看到并试。
-      const isSDF = m.kind === 'sdf';
-      const kind = { gif: 'GIF', frames: '帧序列', atlas: '图集' }[m.kind] || m.kind || '';
-      card.innerHTML =
-        `<img class="mat-thumb" alt="${m.name}" src="/api/material-thumb?name=${encodeURIComponent(m.name)}&v=${matVersion}" />` +
-        `<div class="mat-meta"><b class="mat-name">${m.name}</b>` +
-        `<span class="mat-sub">${isSDF ? '程序脸 · 实时绘制' : `${m.frames} 帧 · ${m.fps}fps · ${kind}`}</span></div>` +
-        `<div class="mat-ops">` +
-        `<button class="qa mat-preview">▶ 预览</button>` +
-        (isSDF ? '' : `<button class="mr-rm" title="删除素材">✕</button>`) +
-        `</div>`;
-      if (isSDF) card.classList.add('mat-sdf');
-      card.querySelector('.mat-preview').addEventListener('click', () => {
-        send(CliType.SetEmotion, { emotion: m.name, preview: true }); // preview：只切屏，不联动动作
-        toast(`预览「${m.name}」`);
+    if (!lastMaterials.length) { grid.innerHTML = '<span class="muted">暂无表情</span>'; return; }
+    FACE_STYLES.forEach((st) => {
+      const active = st.key === faceStyle;
+      const sec = document.createElement('section');
+      sec.className = 'mat-section' + (active ? ' mat-section-on' : '');
+      const head = document.createElement('div');
+      head.className = 'mat-section-head';
+      head.innerHTML = `<b class="mat-section-name">${st.name}</b>` +
+        (active ? `<span class="mat-badge">使用中</span>` : `<button class="qa mat-use">启用</button>`) +
+        `<span class="muted mat-section-desc">${st.desc}</span>`;
+      const use = head.querySelector('.mat-use');
+      if (use) use.addEventListener('click', () => {
+        send(CliType.SetFaceStyle, { style: st.key });
+        toast(`已切换到「${st.name}」`);
       });
-      const rm = card.querySelector('.mr-rm');
-      if (rm) rm.addEventListener('click', () => {
-        if (confirm(`删除素材「${m.name}」？删除后该情绪回退到程序动画脸。`)) {
-          send(CliType.MaterialDelete, { name: m.name });
-        }
-      });
-      grid.appendChild(card);
+      sec.appendChild(head);
+      const inner = document.createElement('div');
+      inner.className = 'mat-grid-inner';
+      lastMaterials.forEach((m) => inner.appendChild(matCard(m, st.key)));
+      sec.appendChild(inner);
+      grid.appendChild(sec);
     });
   }
 

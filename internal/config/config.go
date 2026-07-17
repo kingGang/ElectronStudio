@@ -193,6 +193,12 @@ type Config struct {
 	PersonaSource string  `json:"persona_source,omitempty"` // local(用本机角色) | model(用模型自带角色,如小智服务端设定)，默认 local
 	Voice         string  `json:"voice,omitempty"`          // 声音音色（覆盖当前 TTS 引擎的音色）
 	Face          string  `json:"face,omitempty"`           // 兜底表情脸：sdf(SDF 实时表情,默认) | classic(老程序脸)
+	// FaceStyle 表情类型（"系列"）——多套表情风格并存、可运行时切换：
+	//   b  = 类型B（默认）：全部情绪走 SDF 程序脸（实心彩色眼+高光+眉），不使用 GIF 素材。
+	//   bw = 黑白眼睛类：优先用 emotions/ 里的 GIF 素材（官方那套黑底白眼的脸）；该类型没有的
+	//        情绪（如新加的 色色/鬼畜/睡着了…）自动用类型B(SDF)补上，所以不会"做不出表情"。
+	// 实现上两者只差一个开关：是否启用 GIF 素材层（compositor 本就是"有素材用素材、没有则用兜底脸"）。
+	FaceStyle string `json:"face_style,omitempty"`
 	Speech   SpeechConfig   `json:"speech"`
 	Realtime RealtimeConfig `json:"realtime,omitempty"`
 	Gesture  GestureConfig  `json:"gesture"`
@@ -230,6 +236,17 @@ func (c *Config) PersonaSourceOr() string {
 	}
 	return "local"
 }
+
+// FaceStyleOr 返回表情类型（"系列"），默认 b（类型B：全 SDF）。填 bw 用黑白眼睛类（GIF 素材优先）。
+func (c *Config) FaceStyleOr() string {
+	if c.FaceStyle == "bw" {
+		return "bw"
+	}
+	return "b"
+}
+
+// ValidFaceStyle 报告 s 是否为合法的表情类型。
+func ValidFaceStyle(s string) bool { return s == "b" || s == "bw" }
 
 // FaceOr 返回兜底表情脸类型，默认 sdf（SDF 实时表情）。填 classic 用老程序脸。
 func (c *Config) FaceOr() string {

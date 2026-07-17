@@ -293,6 +293,17 @@ func (ReenableCommand) Type() Type { return TypeReenable }
 // reboot_device —— 串口软复位设备（免拔电源）
 // ---------------------------------------------------------------------------
 
+// SetFaceStyleCommand 切换表情类型（"系列"）。多套表情风格并存，运行时热切、立即生效并落盘：
+//   - "b"  类型B：全部情绪走 SDF 程序脸（实心彩色眼+高光+眉）。
+//   - "bw" 黑白眼睛类：优先用 emotions/ 里的 GIF 素材（官方黑底白眼那套）；该类型没有的情绪
+//     （如 色色/鬼畜/睡着了…）自动用类型B(SDF)补上。
+type SetFaceStyleCommand struct {
+	Style string `json:"style"` // b | bw
+}
+
+// Type 实现 Payload。
+func (SetFaceStyleCommand) Type() Type { return TypeSetFaceStyle }
+
 // RebootDeviceCommand 触发设备软复位：往 ElectronBot 的 CP210x/CH340 串口发一条复位指令，
 // 使 MCU 系统复位并重新枚举 USB——【免拔电源】。对应官方 ElectronBot.DotNet 的"复位电子"按钮。
 // 固件卡死(bulk 无就绪包)时驱动也会自动软复位；这个命令是手动触发入口。无参数。
