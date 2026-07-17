@@ -1551,20 +1551,25 @@
     materials.forEach((m) => {
       const card = document.createElement('div');
       card.className = 'mat-card';
+      // kind=sdf：这个情绪没有上传素材，由程序脸(SDF)实时绘制（缩略图也是后端实时渲染的）。
+      // 它没有文件可删，所以不给删除按钮；预览照常——这样新加的表情也能在这里看到并试。
+      const isSDF = m.kind === 'sdf';
       const kind = { gif: 'GIF', frames: '帧序列', atlas: '图集' }[m.kind] || m.kind || '';
       card.innerHTML =
         `<img class="mat-thumb" alt="${m.name}" src="/api/material-thumb?name=${encodeURIComponent(m.name)}&v=${matVersion}" />` +
         `<div class="mat-meta"><b class="mat-name">${m.name}</b>` +
-        `<span class="mat-sub">${m.frames} 帧 · ${m.fps}fps · ${kind}</span></div>` +
+        `<span class="mat-sub">${isSDF ? '程序脸 · 实时绘制' : `${m.frames} 帧 · ${m.fps}fps · ${kind}`}</span></div>` +
         `<div class="mat-ops">` +
         `<button class="qa mat-preview">▶ 预览</button>` +
-        `<button class="mr-rm" title="删除素材">✕</button>` +
+        (isSDF ? '' : `<button class="mr-rm" title="删除素材">✕</button>`) +
         `</div>`;
+      if (isSDF) card.classList.add('mat-sdf');
       card.querySelector('.mat-preview').addEventListener('click', () => {
         send(CliType.SetEmotion, { emotion: m.name, preview: true }); // preview：只切屏，不联动动作
         toast(`预览「${m.name}」`);
       });
-      card.querySelector('.mr-rm').addEventListener('click', () => {
+      const rm = card.querySelector('.mr-rm');
+      if (rm) rm.addEventListener('click', () => {
         if (confirm(`删除素材「${m.name}」？删除后该情绪回退到程序动画脸。`)) {
           send(CliType.MaterialDelete, { name: m.name });
         }

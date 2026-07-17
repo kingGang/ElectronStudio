@@ -45,7 +45,7 @@
 | `joints` | `JointsEvent` | 6 轴舵机真实角度反馈 |
 | `error` | `ErrorEvent` | 面向用户的错误（含机器码 `code`） |
 | `schedule_list` | `ScheduleListEvent` | 定时任务/提醒列表（增删后广播，连接时推送一次） |
-| `materials` | `MaterialsEvent` | 屏幕表情素材列表（上传/删除后广播，连接时推送一次） |
+| `materials` | `MaterialsEvent` | 屏幕表情素材列表（上传/删除后广播，连接时推送一次）。列出**机器人支持的全部情绪**，不只是磁盘上有素材的：没上传素材的情绪 `kind="sdf"`（`frames`/`fps` 为 0），由程序脸实时绘制、缩略图由 `/api/material-thumb` 实时渲染、无文件可删；用户自定义命名的素材也一并列出 |
 | `log` | `LogEvent` | 调试日志（可选） |
 
 ### 示例

@@ -263,9 +263,11 @@ export interface MusicStateEvent {
 }
 export interface MaterialInfo {
   name: string
-  frames: number
-  fps: number
-  kind: string // gif | frames | atlas
+  frames: number // kind=sdf 时为 0
+  fps: number // kind=sdf 时为 0
+  // gif | frames | atlas | sdf
+  // sdf = 该情绪没有上传素材、由程序脸实时绘制（列表仍会列出它，缩略图后端实时渲染，无文件可删）
+  kind: string
 }
 export interface MaterialsEvent {
   materials: MaterialInfo[]

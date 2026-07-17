@@ -684,16 +684,33 @@ func (a *app) applyDeviceVolume(device string, vol int) {
 	}
 }
 
+// supportedEmotions 是机器人支持的【全部情绪】，单一事实来源：
+//   - 提供给大模型的 set_emotion 工具枚举（buildTools）；
+//   - 素材页列出的全部情绪（materialsEvent）——没有 GIF 素材的走程序脸(SDF)，缩略图实时渲染。
+//
+// 新增情绪时改这里 + internal/display/sdfface.go 的 emotionTarget/emotionColor（画法与配色），
+// 想让它能被对话内容自动触发再加 realtime.go 的 emotionKeywords。
+var supportedEmotions = []string{
+	"neutral", "happy", "laughing", "lol", "funny", "sad", "angry", "crying", "loving",
+	"naughty", "embarrassed", "surprised", "shocked", "scared", "thinking", "cool", "confident",
+	"sleepy", "asleep", "tired", "winking", "confused", "speechless", "silly", "manic",
+}
+
+// isSupportedEmotion 报告 name 是否为支持的情绪（供素材页判断该不该渲染程序脸缩略图）。
+func isSupportedEmotion(name string) bool {
+	for _, e := range supportedEmotions {
+		if e == name {
+			return true
+		}
+	}
+	return false
+}
+
 // buildTools 构造工具注册表，副作用以闭包注入（情绪/动作走机器人，台灯为内置设备）。
 func buildTools(a *app) *tools.Registry {
 	reg := tools.NewRegistry()
 
-	emotions := []string{
-		"neutral", "happy", "laughing", "funny", "sad", "angry", "crying", "loving",
-		"embarrassed", "surprised", "shocked", "thinking", "cool", "confident",
-		"sleepy", "winking", "confused", "silly",
-	}
-	reg.Register(tools.EmotionTool(emotions, func(e string) error {
+	reg.Register(tools.EmotionTool(supportedEmotions, func(e string) error {
 		a.setEmotion(e)
 		return nil
 	}))

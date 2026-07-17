@@ -389,8 +389,17 @@ func (a *app) handleMaterialThumb(w http.ResponseWriter, r *http.Request) {
 	}
 	frame := a.clips.FirstFrame(name)
 	if frame == nil || len(frame) != robot.ImageBytesRGB888 {
-		http.NotFound(w, r)
-		return
+		// 没有素材：如果它是支持的情绪，就实时渲染程序脸(SDF)当缩略图——新加的表情(色色/鬼畜等)
+		// 本就没有 GIF，界面上得能看到它长什么样。用独立实例渲染，不影响正在驱动屏幕的那张脸。
+		if !isSupportedEmotion(name) {
+			http.NotFound(w, r)
+			return
+		}
+		frame = display.RenderEmotionThumb(name)
+		if len(frame) != robot.ImageBytesRGB888 {
+			http.NotFound(w, r)
+			return
+		}
 	}
 	img := image.NewRGBA(image.Rect(0, 0, robot.ScreenWidth, robot.ScreenHeight))
 	for i := 0; i < robot.ScreenWidth*robot.ScreenHeight; i++ {
@@ -425,11 +434,33 @@ func (a *app) removeMaterialFiles(name string) {
 	_ = os.RemoveAll(base) // 目录形式（一帧一文件）
 }
 
-// materialsEvent 构造当前素材列表事件。
+// materialsEvent 构造素材列表事件：列出【机器人支持的全部情绪】，而不只是磁盘上有素材的那些。
+//
+// 没有 GIF/帧序列素材的情绪（新加的表情、silly 等）走程序脸(SDF) 实时绘制——它们同样要在素材页
+// 出现（kind="sdf"、frames=0），这样才能预览、也才知道可以给它传素材；否则界面上只剩最初播种的
+// 那批内置 GIF，新增的表情"没展示出来"。用户自己传的、不在 supportedEmotions 里的素材也一并列出。
 func (a *app) materialsEvent() protocol.MaterialsEvent {
 	infos := a.clips.Info()
-	out := make([]protocol.MaterialInfo, 0, len(infos))
+	byName := make(map[string]display.ClipInfo, len(infos))
 	for _, ci := range infos {
+		byName[ci.Name] = ci
+	}
+	out := make([]protocol.MaterialInfo, 0, len(supportedEmotions)+len(infos))
+	seen := make(map[string]bool, len(supportedEmotions))
+	for _, name := range supportedEmotions { // 按支持的情绪顺序排，界面稳定
+		seen[name] = true
+		if ci, ok := byName[name]; ok {
+			out = append(out, protocol.MaterialInfo{
+				Name: ci.Name, Frames: ci.Frames, FPS: ci.FPS, Kind: a.materialKind(ci.Name),
+			})
+			continue
+		}
+		out = append(out, protocol.MaterialInfo{Name: name, Kind: "sdf"}) // 无素材：程序脸
+	}
+	for _, ci := range infos { // 用户自定义命名的素材（不在支持清单里）也要能看到/删除
+		if seen[ci.Name] {
+			continue
+		}
 		out = append(out, protocol.MaterialInfo{
 			Name: ci.Name, Frames: ci.Frames, FPS: ci.FPS, Kind: a.materialKind(ci.Name),
 		})

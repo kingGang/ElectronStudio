@@ -310,9 +310,12 @@ func (AudioEvent) Type() Type { return TypeAudio }
 // MaterialInfo 描述一段屏幕表情素材（供素材管理界面展示）。
 type MaterialInfo struct {
 	Name   string `json:"name"`   // 情绪名（= 素材文件名）
-	Frames int    `json:"frames"` // 帧数
-	FPS    int    `json:"fps"`    // 播放帧率
-	Kind   string `json:"kind"`   // 素材来源：gif | frames | atlas
+	Frames int    `json:"frames"` // 帧数（kind=sdf 时为 0）
+	FPS    int    `json:"fps"`    // 播放帧率（kind=sdf 时为 0）
+	// Kind 素材来源：gif | frames | atlas | sdf。
+	// sdf = 该情绪没有上传素材，由程序脸实时绘制（列表里同样会列出，缩略图由后端实时渲染，
+	// 无文件可删）——这样新增的表情也能在素材页看到并预览。
+	Kind string `json:"kind"`
 }
 
 // MaterialsEvent 是屏幕表情素材列表（上传/删除后广播，连接建立时也推送一次）。
