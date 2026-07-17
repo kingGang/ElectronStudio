@@ -48,6 +48,11 @@ type Driver struct {
 	enable      bool
 	servoEnable bool         // 总开关：false 时永不下发使能（舵机不上扭矩，可手动摆姿）
 	trim        robot.Joints // 机械零位补偿(度)：下发前加、读回时减，见 SetJointTrim
+	// holdUntil：舵机保持扭矩到此刻，过了就自动松力(enable=false)。对齐官方 ElectronBot.DotNet——它待机显示
+	// 人脸/时钟一律 enable=false 松力，只在真动时才 enable=true。【根因】持续上扭矩会让舵机一直耗流、微堵转
+	// 发热，几分钟后触发舵机自身热/过流保护闩锁松掉；而固件使能是边沿触发(isEnabled 变化才 SetJointEnable)，
+	// 舵机自锁后固件永不重挂 → 全体舵机“用一段时间就不受控”、只能断电。SetPose(enable=true) 会续这个窗口。
+	holdUntil time.Time
 
 	// framePull：非 nil=摄像头到屏模式。syncLoop 改由它【阻塞拉一帧→同步一帧】驱动（单 owner
 	// 串行 读→Sync，仿官方 EmoticonActionFrameService 单一串行发送），期间不跑自由 ticker、
@@ -291,11 +296,21 @@ func NewDriver(bot robot.Transport, source display.Source, log *slog.Logger, fps
 	return &Driver{bot: bot, source: source, log: log, fps: fps, onFrame: onFrame, onJoints: onJoints}
 }
 
+// servoHoldTime：SetPose(enable=true) 后保持扭矩的时长。这段时间内没有新的运动指令就自动松力。
+// 动作/jog 期间是 30fps 持续下发，会不断续期、稳稳保持上扭矩；一停下 servoHoldTime 后自动松力，
+// idle(纯显示表情)时舵机不再持续通电发热——这正是官方"待机松力、只在动时上扭矩"的等效实现。
+const servoHoldTime = 2 * time.Second
+
 // SetPose 设置目标舵机角度与使能。实现 choreography.PoseSink，供动作编排/手动/跟随写入。
 func (d *Driver) SetPose(angles robot.Joints, enable bool) {
 	d.mu.Lock()
 	d.pose = angles
 	d.enable = enable
+	if enable {
+		d.holdUntil = time.Now().Add(servoHoldTime) // 有运动指令：续保持窗口
+	} else {
+		d.holdUntil = time.Time{} // 显式松力：立即
+	}
 	d.mu.Unlock()
 }
 
@@ -442,6 +457,9 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 			}
 			d.mu.Lock()
 			pose, enable, servoOK, trim := d.pose, d.enable, d.servoEnable, d.trim
+			if enable && time.Now().After(d.holdUntil) {
+				enable = false // 自动松力：超过 servoHoldTime 没有新运动指令，别再持续上扭矩（防发热闩锁，仿官方 idle 松力）
+			}
 			if d.reenableFrames > 0 { // 重新使能脉冲：这几帧强行发 enable=0，之后的 0→1 跳变解锁舵机
 				d.reenableFrames--
 				enable = false
