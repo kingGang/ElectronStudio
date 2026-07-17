@@ -32,6 +32,11 @@ type FallbackFace interface {
 	Invalidate()
 }
 
+// MonoFace 是可选能力：兜底脸支持切换【黑白眼睛类 / 类型B】两种风格（SDF 脸实现之）。
+// 「黑白眼睛类」生效时，该类型没有 GIF 素材的情绪由兜底脸补齐——必须也画成黑白，
+// 否则设备屏上会混进类型B的彩色脸、与同类型的素材风格打架。
+type MonoFace interface{ SetMono(bool) }
+
 // MouthLeveler 是可选能力：按真实说话音量(0..1)驱动口型，让嘴与对话同步。
 // SDFFaceSource 实现它；上层(如实时语音下行 RMS)可据此高频喂入。EmotionSource 不实现（节奏兜底）。
 type MouthLeveler interface {

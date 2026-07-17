@@ -387,20 +387,20 @@ func (a *app) handleMaterialThumb(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "情绪名非法", http.StatusBadRequest)
 		return
 	}
-	// style=b 时【强制渲染 SDF 程序脸】：素材页的"类型B"分区要展示该情绪在类型B下的样子，
-	// 哪怕它同时有 GIF 素材（那是"黑白眼睛类"分区的事）。不带 style 则沿用原行为：素材优先。
+	// style=b：素材页"类型B"分区要看该情绪在类型B下的样子，【强制渲染彩色 SDF】，哪怕它同时有
+	// GIF 素材（素材是"黑白眼睛类"分区的事）。不带 style（即黑白眼睛类分区）则素材优先；素材没有
+	// 的情绪用【黑白风格】的 SDF 补图，这样同一分区里不会混进类型B的彩色脸、风格才统一。
+	style := r.URL.Query().Get("style")
 	var frame []byte
-	if r.URL.Query().Get("style") != "b" {
+	if style != "b" {
 		frame = a.clips.FirstFrame(name)
 	}
 	if len(frame) != robot.ImageBytesRGB888 {
-		// 没有素材（或指定要类型B）：实时渲染程序脸(SDF)当缩略图——新加的表情(色色/鬼畜等)本就
-		// 没有 GIF，界面上得能看到它长什么样。用独立实例渲染，不影响正在驱动屏幕的那张脸。
 		if !isSupportedEmotion(name) {
 			http.NotFound(w, r)
 			return
 		}
-		frame = display.RenderEmotionThumb(name)
+		frame = display.RenderEmotionThumb(name, style != "b") // 非类型B 一律按黑白眼睛类风格补
 		if len(frame) != robot.ImageBytesRGB888 {
 			http.NotFound(w, r)
 			return

@@ -31,6 +31,10 @@ type SDFFaceSource struct {
 	buf                      []byte
 	lastKey                  uint64
 	haveLast                 bool
+	// mono=true：按【黑白眼睛类】风格画——纯白眼、不发光、不打高光，只留"实心白形状 + 深色眉刻痕"，
+	// 与官方那套黑底白眼 GIF 同一观感。用于「黑白眼睛类」缺失的表情（色色/鬼畜/睡着了…）由程序补齐，
+	// 而不是直接套类型B的彩色脸、跟旁边的 GIF 风格打架。false=类型B（实心彩色眼+辉光+高光）。
+	mono bool
 }
 
 // gazeTargets 是 idle 扫视的候选落点（含多次回中）。
@@ -69,6 +73,8 @@ type faceParams struct {
 var (
 	sdfHi   = [3]float64{240, 255, 254} // 高光白
 	sdfBrow = [3]float64{40, 48, 66}    // 眉条深色（盖住眼上部的辉光，形成斜眉）
+	// sdfMonoEye 是【黑白眼睛类】的眼/嘴色：纯白。配合关掉辉光与高光，得到官方那套黑底白眼的干净观感。
+	sdfMonoEye = [3]float64{248, 250, 252}
 )
 
 // emotionColor 给出情绪的实心主色（照参考图）。
@@ -265,12 +271,15 @@ func emotionTarget(e string) faceParams {
 }
 
 // RenderEmotionThumb 渲染某情绪【缓动收敛后】的 SDF 表情单帧（RGB888，240×240）。
+// mono=true 按黑白眼睛类风格（纯白眼、无辉光高光）画，用于给「黑白眼睛类」缺的表情补图；
+// false 则是类型B（实心彩色眼+辉光+高光）。
 //
 // 供素材页当缩略图用：没有 GIF 素材的情绪（新加的表情、silly 等）在界面上也能看到它长什么样。
 // 用【独立实例】渲染，绝不碰正在驱动屏幕的那张脸；先空跑够帧数让参数缓动收敛到目标表情，
 // 再强制清掉眨眼状态渲染最后一帧，避免正好抓到闭眼的那一瞬（asleep 除外——它本来就闭眼）。
-func RenderEmotionThumb(emotion string) []byte {
+func RenderEmotionThumb(emotion string, mono bool) []byte {
 	s := NewSDFFaceSource()
+	s.SetMono(mono)
 	s.SetEmotion(emotion)
 	for i := 0; i < 80; i++ { // 跑够帧数让缓动收敛（指数缓动，80 帧足够到位）
 		_ = s.Frame()
@@ -316,6 +325,18 @@ func (s *SDFFaceSource) SetMouthLevel(l float64) {
 	s.mu.Lock()
 	s.level = clampf(l, 0, 1)
 	s.levelTick = s.tick
+	s.mu.Unlock()
+}
+
+// SetMono 切换渲染风格：true=黑白眼睛类（纯白眼、无辉光无高光，贴合官方黑底白眼素材的观感）；
+// false=类型B（实心彩色眼+辉光+高光）。「黑白眼睛类」缺的表情由它按黑白风格补齐，风格才不打架。
+func (s *SDFFaceSource) SetMono(on bool) {
+	s.mu.Lock()
+	changed := s.mono != on
+	s.mono = on
+	if changed {
+		s.haveLast = false // 风格变了：强制下一帧重画（visualKey 也含 mono，双保险）
+	}
 	s.mu.Unlock()
 }
 
@@ -448,6 +469,9 @@ func (s *SDFFaceSource) visualKey() uint64 {
 		q := uint64(int64(math.Round(f*48)) + (1 << 24))
 		h = (h ^ q) * 1099511628211
 	}
+	if s.mono { // 风格也算进指纹：黑白/彩色切换必须重画
+		add(1)
+	}
 	add(s.cur.eyeOpen * (1 - s.blinkVal()))
 	add(s.cur.eyeScale)
 	add(s.cur.tall)
@@ -563,7 +587,11 @@ func (s *SDFFaceSource) render() {
 	mouthCy := 176.0 + fl
 	blink := s.blinkVal()
 	eyeOpen := clampf(s.cur.eyeOpen*(1-blink), 0, 1)
+	mono := s.mono
 	col := s.cur.col
+	if mono {
+		col = sdfMonoEye // 黑白眼睛类：一律纯白眼，不用情绪彩色（辉光/高光在下面也会关掉）
+	}
 	br := s.breath()
 	tilt := s.cur.tilt
 	ct, stt := math.Cos(tilt), math.Sin(tilt)
@@ -591,6 +619,9 @@ func (s *SDFFaceSource) render() {
 	smirk, tears, shades, sweat := s.cur.smirk, s.cur.tears, s.cur.shades, s.cur.sweat
 	drop := float64(s.tick%42) * 0.5 // 泪/汗下落
 	tearCol := [3]float64{150, 214, 255}
+	if mono {
+		tearCol = sdfMonoEye // 黑白眼睛类：泪滴/汗滴也必须是白的，否则蓝色会漏进黑白风格里
+	}
 
 	for y := 0; y < scrH; y++ {
 		fy := float64(y) - cy0
@@ -604,7 +635,13 @@ func (s *SDFFaceSource) render() {
 			dL := sdfRoundBox(px, py, lcx, ecy, hwL, hhL, rCL)
 			dR := sdfRoundBox(px, py, rcx, ecy, hwR, hhR, rCR)
 			// 开心/大笑：下方挖上升的弧，把眼变成 ∩ 眯眼笑。
-			if sq := s.cur.squint; sq > 0.08 {
+			// 黑白眼睛类没有辉光撑体积，挖太狠(如 lol 的 squint=1)就只剩一条细弧、几乎看不见；
+			// 故 mono 下给挖弧封顶，保证眯眼笑仍是官方那种厚实的白半月。
+			sq := s.cur.squint
+			if mono && sq > 0.65 {
+				sq = 0.65
+			}
+			if sq > 0.08 {
 				dL = math.Max(dL, -(math.Hypot(px-lcx, py-(ecy+hhL*(1.15-0.85*sq))) - hhL*1.3))
 				dR = math.Max(dR, -(math.Hypot(px-rcx, py-(ecy+hhR*(1.15-0.85*sq))) - hhR*1.3))
 			}
@@ -621,18 +658,23 @@ func (s *SDFFaceSource) render() {
 				}
 			}
 
-			addGlow(&acc, col, dL, 9, 0.9*br)
-			addGlow(&acc, col, dR, 9, 0.9*br)
-			if dM < 1e8 {
-				addGlow(&acc, col, dM, 7, 0.72*br)
+			// 黑白眼睛类(mono)：不发光、不打高光——只要"实心白形状"，才和官方那套黑底白眼 GIF 同观感。
+			if !mono {
+				addGlow(&acc, col, dL, 9, 0.9*br)
+				addGlow(&acc, col, dR, 9, 0.9*br)
+				if dM < 1e8 {
+					addGlow(&acc, col, dM, 7, 0.72*br)
+				}
 			}
 			composite(&acc, col, cov(dL))
 			composite(&acc, col, cov(dR))
 			if dM < 1e8 {
 				composite(&acc, col, cov(dM))
 			}
-			drawHighlights(&acc, px, py, lcx, ecy, hwL, hhL, clampf(eyeOpenL*(1-s.cur.squint), 0, 1))
-			drawHighlights(&acc, px, py, rcx, ecy, hwR, hhR, clampf(eyeOpen*(1-s.cur.squint), 0, 1))
+			if !mono {
+				drawHighlights(&acc, px, py, lcx, ecy, hwL, hhL, clampf(eyeOpenL*(1-s.cur.squint), 0, 1))
+				drawHighlights(&acc, px, py, rcx, ecy, hwR, hhR, clampf(eyeOpen*(1-s.cur.squint), 0, 1))
+			}
 
 			// 泪滴（crying）：两眼下方蓝色小滴，缓缓下落。
 			if tears > 0.05 {

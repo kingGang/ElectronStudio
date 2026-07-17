@@ -173,6 +173,7 @@ type app struct {
 	driver *device.Driver        // 统一设备驱动（拥有 Sync）
 	screen *display.Compositor   // 屏幕画面合成（摄像头 / 素材片 / 程序动画脸）
 	clips  *display.ClipSource   // 离线表情素材片（支持界面上传/删除后热重载）
+	face   display.FallbackFace  // 兜底脸（SDF/老程序脸）：切表情类型时要同步它的黑白/彩色风格
 	camera *display.CameraSource // 摄像头采集（可为 nil）
 
 	emotionsDir string     // 表情素材目录（与 config.json 同目录的 emotions/）
@@ -386,6 +387,7 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 		a.camera = display.NewCameraSource(log)
 	}
 	a.clips = display.NewClipSource(clips)
+	a.face = face
 	a.screen = display.NewCompositor(a.camera, a.clips, face)
 	// 表情类型（"系列"，见 config.FaceStyle）：
 	//   类型B(b，默认)  = 关掉 GIF 素材层，全部情绪走 SDF 程序脸（否则素材会盖住 SDF 脸）。
@@ -706,7 +708,13 @@ var supportedEmotions = []string{
 // compositor 本就是"有素材用素材、否则用兜底脸"，所以两个类型只差这一个开关；
 // SetClipsEnabled 内部会 Invalidate 兜底脸，切换后立刻重画、不留残帧。
 func (a *app) applyFaceStyle(style string) {
-	a.screen.SetClipsEnabled(style == "bw")
+	bw := style == "bw"
+	// 兜底脸也要跟着换风格：黑白眼睛类下，它补的那些没素材的情绪必须也是黑白，
+	// 否则设备屏上会混进类型B的彩色脸、与同类型的 GIF 素材风格打架。
+	if mf, ok := a.face.(display.MonoFace); ok {
+		mf.SetMono(bw)
+	}
+	a.screen.SetClipsEnabled(bw)
 }
 
 // handleSetFaceStyle 运行时切换表情类型：校验 → 热生效 → 落盘 → 广播（各端同步高亮）。

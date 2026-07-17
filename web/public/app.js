@@ -1551,32 +1551,45 @@
   //   b  类型B：全部由 SDF 程序脸实时绘制。
   // 与后端 compositor 行为一致（有素材用素材、否则用兜底脸），切换只是开关素材层。
   const FACE_STYLES = [
-    { key: 'bw', name: '黑白眼睛类', desc: '官方黑底白眼素材；这个类型没有的表情自动用类型B补上' },
-    { key: 'b', name: '类型B', desc: '实心彩色眼 + 高光 + 眉毛，全部程序实时绘制' },
+    { key: 'bw', name: '黑白眼睛类', desc: '官方黑底白眼素材；这个类型没有的表情由程序按同样的黑白风格补齐' },
+    { key: 'b', name: '霓虹彩眼类', desc: '实心彩色眼 + 辉光 + 高光 + 眉毛，全部程序实时绘制' },
   ];
+
+  // 表情中文名（键 = 后端情绪键，鼠标悬停仍可看到英文键）。
+  const EMOTION_CN = {
+    neutral: '中性', happy: '开心', laughing: '大笑', lol: '哈哈大笑', funny: '搞笑',
+    sad: '难过', angry: '生气', crying: '哭泣', loving: '爱心', naughty: '色色',
+    embarrassed: '尴尬', surprised: '惊讶', shocked: '震惊', scared: '害怕',
+    thinking: '思考', cool: '酷', confident: '自信', sleepy: '困', asleep: '睡着了',
+    tired: '累了', winking: '眨眼', confused: '疑惑', speechless: '无语',
+    silly: '鬼脸', manic: '鬼畜',
+  };
+  const emoCN = (k) => EMOTION_CN[k] || k;
 
   // matCard 渲染某情绪在【指定类型】下的卡片：缩略图即该类型下的真实长相。
   function matCard(m, styleKey) {
     const useClip = styleKey === 'bw' && m.kind !== 'sdf'; // 只有黑白眼睛类且有素材才用素材
     const kindLabel = { gif: 'GIF', frames: '帧序列', atlas: '图集' }[m.kind] || m.kind || '';
-    const sub = useClip ? `${m.frames} 帧 · ${m.fps}fps · ${kindLabel}` : '程序脸 · 实时绘制';
-    // style=b 让后端强制渲染 SDF 缩略图（否则有 GIF 的情绪会返回 GIF 首帧）。
+    const sub = useClip ? `${m.frames} 帧 · ${m.fps}fps · ${kindLabel}`
+      : (styleKey === 'bw' ? '程序补齐 · 黑白风格' : '程序实时绘制');
+    // style=b 让后端强制渲染彩色 SDF；不带则素材优先、缺的用黑白风格 SDF 补（与该分区风格一致）。
     const thumb = `/api/material-thumb?name=${encodeURIComponent(m.name)}` +
       (styleKey === 'b' ? '&style=b' : '') + `&v=${matVersion}`;
+    const cn = emoCN(m.name);
     const card = document.createElement('div');
     card.className = 'mat-card' + (useClip ? '' : ' mat-sdf');
     card.innerHTML =
-      `<img class="mat-thumb" alt="${m.name}" src="${thumb}" />` +
-      `<div class="mat-meta"><b class="mat-name">${m.name}</b><span class="mat-sub">${sub}</span></div>` +
+      `<img class="mat-thumb" alt="${cn}" src="${thumb}" />` +
+      `<div class="mat-meta"><b class="mat-name" title="${m.name}">${cn}</b><span class="mat-sub">${sub}</span></div>` +
       `<div class="mat-ops"><button class="qa mat-preview">▶ 预览</button>` +
       (useClip ? `<button class="mr-rm" title="删除素材">✕</button>` : '') + `</div>`;
     card.querySelector('.mat-preview').addEventListener('click', () => {
       send(CliType.SetEmotion, { emotion: m.name, preview: true }); // preview：只切屏，不联动动作
-      toast(`预览「${m.name}」（按当前生效类型显示）`);
+      toast(`预览「${cn}」（按当前生效类型显示）`);
     });
     const rm = card.querySelector('.mr-rm');
     if (rm) rm.addEventListener('click', () => {
-      if (confirm(`删除素材「${m.name}」？删除后该情绪在「黑白眼睛类」下改用类型B(程序脸)。`)) {
+      if (confirm(`删除素材「${cn}」？删除后该情绪在「黑白眼睛类」下改为程序按黑白风格补齐。`)) {
         send(CliType.MaterialDelete, { name: m.name });
       }
     });
