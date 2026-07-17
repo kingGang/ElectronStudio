@@ -21,7 +21,9 @@ type libusbAPI struct {
 
 	Init             func(ctx uintptr) int32
 	Exit             func(ctx uintptr)
-	OpenVIDPID       func(ctx uintptr, vid, pid uint16) uintptr
+	// Open：libusb_open，按【设备指针】打开。不用 libusb_open_device_with_vid_pid——那个便捷函数
+	// 的参数是 uint16，经 purego 绑定后在本机实测恒返回 NULL（见 openSupported 的注释）。
+	Open func(dev uintptr, handle uintptr) int32
 	Close            func(dev uintptr)
 	SetAutoDetach    func(dev uintptr, enable int32) int32
 	SetConfiguration func(dev uintptr, config int32) int32
@@ -61,7 +63,7 @@ func loadLibusb() (*libusbAPI, error) {
 		api := &libusbAPI{handle: h}
 		purego.RegisterLibFunc(&api.Init, h, "libusb_init")
 		purego.RegisterLibFunc(&api.Exit, h, "libusb_exit")
-		purego.RegisterLibFunc(&api.OpenVIDPID, h, "libusb_open_device_with_vid_pid")
+		purego.RegisterLibFunc(&api.Open, h, "libusb_open")
 		purego.RegisterLibFunc(&api.Close, h, "libusb_close")
 		purego.RegisterLibFunc(&api.SetAutoDetach, h, "libusb_set_auto_detach_kernel_driver")
 		purego.RegisterLibFunc(&api.SetConfiguration, h, "libusb_set_configuration")
@@ -137,6 +139,56 @@ func probeWith(lib *libusbAPI) bool {
 	return false
 }
 
+// openSupported 枚举 USB 总线，找到受支持的设备并用 libusb_open【按设备指针】打开。
+// 返回句柄、命中的设备标识、是否成功。
+//
+// 【为什么不用 libusb_open_device_with_vid_pid】：那个便捷函数的参数是 uint16，经 purego 绑定后在本机
+// 【实测恒返回 NULL】——现象是"设备明明插着、驱动也是 WinUSB，程序却一直报『未找到设备』"。而完全相同的
+// 枚举(get_device_list + get_device_descriptor)在 probeWith 里能找到它、cmd/usbscan 用 libusb_open 也能
+// 打开它并读出厂商/产品字符串。即：libusb 与设备都正常，只有那一个 uint16 绑定不灵。
+// 故这里自己枚举、在 Go 里比对 VID/PID，再用 libusb_open(dev)（参数是指针，不涉及 uint16 传参），
+// 与 probeWith / usbscan 走同一条已验证可用的路径，顺带让"找设备"的逻辑更透明。
+func openSupported(lib *libusbAPI, log *slog.Logger) (uintptr, deviceID, bool) {
+	var listPtr unsafe.Pointer
+	count := lib.GetDeviceList(0, uintptr(unsafe.Pointer(&listPtr)))
+	if count <= 0 {
+		log.Debug("枚举 USB 设备失败/为空", "count", count)
+		return 0, deviceID{}, false
+	}
+	defer lib.FreeDeviceList(uintptr(listPtr), 1)
+
+	ptrSize := unsafe.Sizeof(uintptr(0))
+	var desc [18]byte // libusb_device_descriptor：idVendor@8、idProduct@10（主机字节序）
+	for i := int64(0); i < count; i++ {
+		dev := *(*uintptr)(unsafe.Add(listPtr, uintptr(i)*ptrSize))
+		if dev == 0 {
+			break
+		}
+		if lib.GetDeviceDesc(dev, uintptr(unsafe.Pointer(&desc[0]))) != 0 {
+			continue
+		}
+		vid := uint16(desc[8]) | uint16(desc[9])<<8
+		pid := uint16(desc[10]) | uint16(desc[11])<<8
+		for _, id := range supportedDevices {
+			if id.vid != vid || id.pid != pid {
+				continue
+			}
+			var handle uintptr
+			ret := lib.Open(dev, uintptr(unsafe.Pointer(&handle)))
+			if ret != 0 || handle == 0 {
+				// 打不开(被占用/权限/驱动不对)：记下真实错误码，否则只会看到笼统的"未找到设备"。
+				log.Warn("找到设备但 libusb_open 失败", "name", id.name,
+					"vid", fmt.Sprintf("%04x", vid), "pid", fmt.Sprintf("%04x", pid),
+					"ret", ret, "handle", handle)
+				continue
+			}
+			return handle, id, true
+		}
+	}
+	log.Debug("枚举完成但没有可打开的受支持设备", "设备总数", count)
+	return 0, deviceID{}, false
+}
+
 // Device 是 ElectronBot 的 USB 传输实现，满足 robot.Transport。
 type Device struct {
 	log *slog.Logger
@@ -201,16 +253,9 @@ func (d *Device) Connect() error {
 	if ret := lib.Init(0); ret != 0 { // 0 = 使用默认 context
 		return fmt.Errorf("electronbot: libusb_init 失败: %d", ret)
 	}
-	// 依次尝试已知设备标识（初代 / 精英版）。
-	var handle uintptr
-	var dev deviceID
-	for _, id := range supportedDevices {
-		if h := lib.OpenVIDPID(0, id.vid, id.pid); h != 0 {
-			handle, dev = h, id
-			break
-		}
-	}
-	if handle == 0 {
+	// 枚举总线找到受支持的设备并打开（初代 / 精英版）。见 openSupported——不用 uint16 参数的便捷函数。
+	handle, dev, ok := openSupported(lib, d.log)
+	if !ok {
 		lib.Exit(0)
 		return fmt.Errorf("electronbot: 未找到设备（尝试 %s，均未插入或未枚举）", deviceListString())
 	}
