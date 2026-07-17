@@ -91,6 +91,10 @@ func buildSystemPrompt(persona string) string {
 // maxHistory 限制保留的对话轮数，防止上下文无限增长。
 const maxHistory = 20
 
+// closeHardLimit 是退出时等 bot.Close() 的硬上限。取 8s：Close() 内部的优雅宽限是 3s
+// （acquireGraceful，等当前帧走完），留足余量后仍不返回，就是设备已经不在、libusb 收不了尾了。
+const closeHardLimit = 8 * time.Second
+
 func main() {
 	addr := flag.String("addr", "", "HTTP/WebSocket 监听地址（覆盖配置文件）")
 	cfgPath := flag.String("config", "config.json", "配置文件路径")
@@ -112,7 +116,24 @@ func main() {
 		log.Error("初始化失败", "err", err)
 		os.Exit(1)
 	}
-	defer a.bot.Close()
+	// 关设备【必须有硬上限】，否则进程可能永远退不出来。实测(2026-07-17)：设备从 USB 总线上
+	// 消失后 Close() 挂死——它内部两处都是无界等待(抢不到 d.mu 时的 d.mu.Lock()，以及 libusb 的
+	// Close/Exit 在设备被意外拔除后不返回)。当时 server 已关、驱动已停、CPU 归零，进程却成了攥着
+	// 句柄不放的僵尸，最后只能强杀。
+	//
+	// 超时后直接退出是安全的：能走到这里说明驱动已经收工（上面那个 defer 等过 driverDone），
+	// 没有"半帧"可掐；而 Close() 都收不了尾，基本就是设备已经不在总线上了——真不在，也就无所谓
+	// 打断谁。进程退出时 OS 会回收 USB 句柄。
+	defer func() {
+		done := make(chan struct{})
+		go func() { defer close(done); _ = a.bot.Close() }()
+		select {
+		case <-done:
+		case <-time.After(closeHardLimit):
+			log.Warn("关闭设备超时，直接退出（设备多半已从总线消失、libusb 收不了尾；句柄交由 OS 回收）",
+				"limit", closeHardLimit)
+		}
+	}()
 
 	// Ctrl+C 触发优雅关闭。/api/shutdown（仅本机可调）走的也是这个 stop——强杀进程会把固件
 	// 掐死在半帧的 lockstep 里、只能拔电源，所以必须有一条不依赖终端的干净退出路径。

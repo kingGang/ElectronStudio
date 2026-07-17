@@ -26,11 +26,17 @@ type Sidecar struct {
 
 	events chan Event
 
+	// mu 只保护下面这几个【瞬时状态】字段，临界区必须短——Status() 也要拿它，而 Status() 在
+	// statusSnapshot() 里、每个网页连上时都会走。绝不可在持有它时做网络 I/O（见 send 的注释）。
 	mu        sync.Mutex
 	conn      *websocket.Conn // 当前连接；nil 表示未连接
 	connected bool
 	writeTO   time.Duration
 	onState   func() // 连接状态变化回调（连上/断开），用于刷新界面状态
+
+	// writeMu 单独串行化 conn.Write（coder/websocket 不允许并发写）。与 mu 分开，是为了让一次
+	// 慢写不会连累 Status() —— 那会让整个界面在 OnConnect 挂死。
+	writeMu sync.Mutex
 }
 
 // OnStateChange 注册连接状态变化回调（连上或断开时触发）。
@@ -253,9 +259,13 @@ func (s *Sidecar) send(ctx context.Context, m sidecarMsg) error {
 	}
 	wctx, cancel := context.WithTimeout(ctx, s.writeTO)
 	defer cancel()
-	// coder/websocket 不允许并发写，这里用锁串行化。
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// coder/websocket 不允许并发写，故串行化——但【必须用独立的 writeMu，不能用 s.mu】。
+	// s.mu 保护的是 conn/connected 这类瞬时状态，Status() 也要拿它；而这里的 conn.Write 是一次
+	// 网络写，最坏要等满 writeTO。若两者共用一把锁，sidecar 一卡住写，Status() 就跟着卡
+	// → statusSnapshot() 卡 → 每个新网页在 OnConnect 那一步就挂死、连接堆成 CLOSE_WAIT，
+	// 整个界面失去响应。锁的作用域必须跟着"保护什么"走，而不是图省事复用一把。
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return conn.Write(wctx, websocket.MessageText, data)
 }
 

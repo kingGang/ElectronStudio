@@ -382,6 +382,38 @@ func (d *Driver) frameLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte)
 	}
 }
 
+// logThrottleEvery 是"逐帧失败"类日志的最小间隔。
+const logThrottleEvery = 2 * time.Second
+
+// throttledLog 把"每帧都会失败"的日志压成【首次一条 + 之后每隔 logThrottleEvery 一条（带本段累计次数）】。
+//
+// 为什么必须节流：设备一从 USB 总线上消失，SetImage 与 Sync 就会逐帧失败，30fps 下即
+// 【每秒 60 条】灌进 stderr。而所有 goroutine 共用 slog handler 的同一把写锁——控制台一旦写得慢
+// （Windows 控制台被鼠标点选就会直接阻塞写），这把锁就变成全局咽喉，任何要打日志的 goroutine 都排在
+// 后面。/api/shutdown 的 handler 第一句正是 a.log.Info(...)，它一挂，连"优雅退出"这条命都递不进去。
+// 2026-07-17 实测过这个死法：网页全无响应、/api/shutdown 15s 零字节、最后只能强杀。
+//
+// 逐帧刷同一条错本来也没有信息量——真正有用的是"从何时开始失败、失败了多少次、何时恢复"。
+type throttledLog struct {
+	last time.Time
+	n    int // 距上次输出以来的累计次数
+}
+
+// hit 记一次失败。返回是否该输出，以及本段累计次数（含这次）。
+func (t *throttledLog) hit(interval time.Duration) (bool, int) {
+	t.n++
+	if now := time.Now(); t.last.IsZero() || now.Sub(t.last) >= interval {
+		t.last = now
+		n := t.n
+		t.n = 0
+		return true, n
+	}
+	return false, 0
+}
+
+// reset 在恢复正常后调用，让下一段失败能立刻打出第一条。
+func (t *throttledLog) reset() { *t = throttledLog{} }
+
 // syncLoop 把最近画面 + 姿态 Sync 给设备（设备唯一拥有者）。
 //
 // 设备有个“连接后就绪窗口”：host 必须连上后【立刻】开始 Sync，否则它就不再发就绪包
@@ -403,6 +435,8 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 	// stuckTimeout 仍在枚举，就判定卡死、回调上层提示用户断电复位（churn 救不回，只有彻底断电放电才行）。
 	var limp limpWatch     // 舵机失力检测（能报位置但不转）→ 自动重新使能
 	var reboot rebootWatch // 卡死自动软复位（串口，免拔电源）→ 冷却+上限内自动救
+	// 掉线时 SetImage/Sync 逐帧失败，节流成"首次 + 每 2s 一条(带累计)"，见 throttledLog 注释。
+	var imgFail, syncFail throttledLog
 	backoff := 2 * time.Second
 	const backoffMax = 10 * time.Second
 	// stuckTimeout：连续无就绪包多久后判定固件真卡死、提示断电复位。远大于任何瞬时拥塞（单帧至多命中
@@ -463,7 +497,11 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 			}
 			if len(buf) > 0 {
 				if err := d.bot.SetImage(buf); err != nil {
-					d.log.Debug("设置画面失败", "err", err)
+					if ok, n := imgFail.hit(logThrottleEvery); ok {
+						d.log.Debug("设置画面失败", "err", err, "本段累计", n)
+					}
+				} else {
+					imgFail.reset()
 				}
 			}
 			d.mu.Lock()
@@ -490,8 +528,11 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 			}
 			_ = d.bot.SetJointAngles(sendPose, sentEnable)
 			if err := d.bot.Sync(); err != nil {
-				d.log.Debug("同步失败", "err", err)
+				if ok, n := syncFail.hit(logThrottleEvery); ok {
+					d.log.Debug("同步失败", "err", err, "本段累计", n)
+				}
 			} else {
+				syncFail.reset()
 				synced = true
 				tick++
 				fb := stripTrim(d.bot.JointAngles(), trim)

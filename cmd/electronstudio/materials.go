@@ -90,6 +90,7 @@ var videoExts = map[string]bool{
 // materialRoutes 在 HTTP mux 上挂载素材管理的 REST 接口。
 func (a *app) materialRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/shutdown", a.handleShutdown) // 优雅退出（仅回环地址可调）
+	a.debugRoutes(mux)                                // pprof 运行时自省（仅回环地址可调，见 debug.go）
 	mux.HandleFunc("/api/materials", a.handleMaterialUpload)
 	mux.HandleFunc("/api/material-frames", a.handleMaterialFrames)
 	mux.HandleFunc("/api/material-thumb", a.handleMaterialThumb)
