@@ -495,6 +495,14 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 				synced = true
 				tick++
 				fb := stripTrim(d.bot.JointAngles(), trim)
+				for i := range disabled {
+					if disabled[i] {
+						// 排除轴不驱动、固件也跳过它的 I²C 读回 → 反馈是野值(实测 -47548 之类)。报成目标值：
+						// 既不污染 UI/3D 模型(否则身体轴野值会让模型整个上半身疯转、带飞头和手臂)，
+						// 也让失力检测看到 0 偏差、不误触重新使能(那会翻 enable、点名坏舵机)。
+						fb[i] = pose[i]
+					}
+				}
 				limp.check(d, pose, fb, enable && servoOK) // 失力检测 → 必要时自动重新使能
 				if tick%3 == 0 && d.onJoints != nil {
 					d.onJoints(fb)
