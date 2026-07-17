@@ -90,7 +90,19 @@ func emotionColor(e string) [3]float64 {
 		return [3]float64{182, 194, 236} // 柔蓝紫
 	case "silly":
 		return [3]float64{150, 246, 150} // 亮绿
-	default: // neutral / happy / laughing / funny / cool / confident / winking
+	case "naughty":
+		return [3]float64{250, 130, 205} // 艳粉（色色，比 loving 更骚）
+	case "asleep":
+		return [3]float64{150, 165, 215} // 深柔蓝紫（比 sleepy 更沉、更静）
+	case "tired":
+		return [3]float64{172, 182, 202} // 灰蓝（没电了）
+	case "manic":
+		return [3]float64{255, 110, 220} // 亮品红（鬼畜）
+	case "speechless":
+		return [3]float64{190, 200, 210} // 灰（无语）
+	case "scared":
+		return [3]float64{198, 228, 250} // 惨白蓝（吓的）
+	default: // neutral / happy / laughing / lol / funny / cool / confident / winking
 		return [3]float64{124, 240, 240} // 青
 	}
 }
@@ -189,9 +201,87 @@ func emotionTarget(e string) faceParams {
 		p.cross = 0.9
 		p.mouthCurve = 0.9
 		p.mouthOpen = 0.42
+	case "lol": // 哈哈大笑：比 laughing 再狠一档——眼挤成 ∩∩、嘴大张、笑出眼泪、笑到歪头
+		p.squint = 1
+		p.mouthCurve = 1
+		p.mouthOpen = 0.95
+		p.tears = 0.65
+		p.tilt = 0.12
+		p.eyeScale = 1.05
+	case "naughty": // 色色：半眯的色眯眯眼 + 单边坏笑 + 左右不对称
+		p.lidTop = 0.5
+		p.smirk = 1
+		p.mouthCurve = 0.45
+		p.mouthOpen = 0.2
+		p.squint = 0.25
+		p.brow = 1
+		p.browAngle = -0.2
+		p.browRaise = -0.05
+		p.asym = 1
+	case "asleep": // 睡着了：闭眼（eyeOpen→0，渲染里被 Max(4) 兜成一条细线）+ 微张嘴安睡
+		p.eyeOpen = 0.05
+		p.mouthOpen = 0.18
+		p.mouthCurve = 0.15
+		p.gazeY = 0.1
+	case "tired": // 累了：眼皮很沉但还睁着 + 八字眉 + 叹气 + 冒汗（比 sleepy 更"没电"而非"想睡"）
+		p.lidTop = 0.62
+		p.eyeOpen = 0.85
+		p.brow = 1
+		p.browAngle = 0.55
+		p.browRaise = -0.15
+		p.mouthCurve = -0.35
+		p.mouthOpen = 0.14
+		p.gazeY = 0.28
+		p.sweat = 0.7
+	case "manic": // 鬼畜：斗鸡 + 左右不一 + 瞪大 + 狂张嘴 + 歪头，整个抽风感
+		p.cross = 0.6
+		p.asym = 1
+		p.tall = 0.3
+		p.eyeScale = 1.12
+		p.mouthOpen = 0.85
+		p.mouthCurve = 0.75
+		p.tilt = 0.18
+		p.brow = 1
+		p.browAngle = -0.6
+		p.browRaise = 0.35
+	case "speechless": // 无语：死鱼眼(半眯) + 嘴平直 + 斜眼看别处 + 一滴汗
+		p.lidTop = 0.7
+		p.eyeOpen = 0.9
+		p.mouthCurve = 0
+		p.gazeX = 0.35
+		p.sweat = 0.8
+	case "scared": // 害怕：竖长瞪大 + 高高的八字眉 + 张嘴 + 冒汗
+		p.tall = 0.32
+		p.eyeScale = 1.15
+		p.brow = 1
+		p.browAngle = 0.65
+		p.browRaise = 0.6
+		p.mouthOpen = 0.5
+		p.mouthCurve = -0.45
+		p.sweat = 1
 	}
 	p.col = emotionColor(e)
 	return p
+}
+
+// RenderEmotionThumb 渲染某情绪【缓动收敛后】的 SDF 表情单帧（RGB888，240×240）。
+//
+// 供素材页当缩略图用：没有 GIF 素材的情绪（新加的表情、silly 等）在界面上也能看到它长什么样。
+// 用【独立实例】渲染，绝不碰正在驱动屏幕的那张脸；先空跑够帧数让参数缓动收敛到目标表情，
+// 再强制清掉眨眼状态渲染最后一帧，避免正好抓到闭眼的那一瞬（asleep 除外——它本来就闭眼）。
+func RenderEmotionThumb(emotion string) []byte {
+	s := NewSDFFaceSource()
+	s.SetEmotion(emotion)
+	for i := 0; i < 80; i++ { // 跑够帧数让缓动收敛（指数缓动，80 帧足够到位）
+		_ = s.Frame()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blinkT = 0 // 别抓到眨眼闭眼的一帧
+	s.render()
+	out := make([]byte, len(s.buf))
+	copy(out, s.buf)
+	return out
 }
 
 // NewSDFFaceSource 创建 SDF 表情脸，初始 neutral。
