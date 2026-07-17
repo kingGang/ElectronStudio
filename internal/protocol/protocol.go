@@ -74,6 +74,7 @@ const (
 	TypeSetRealtime    Type = "set_realtime"    // 更新实时语音对话配置（设置页）
 	TypeParty          Type = "party"           // 一键蹦迪：同时放歌 + 循环跳舞（踩拍变脸）
 	TypeReenable       Type = "reenable"        // 舵机重新上扭矩（过载保护锁存后靠它解锁）
+	TypeRebootDevice   Type = "reboot_device"   // 串口软复位设备（免拔电源；固件卡死时驱动也会自动软复位）
 )
 
 // Payload 是所有可被封装进 Envelope 的负载结构的统一约束。

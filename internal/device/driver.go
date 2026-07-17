@@ -8,6 +8,7 @@ package device
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -27,8 +28,8 @@ import (
 //	   断电"的故障，变成了"看着一切正常、实际全死"的静默故障，比原来更危险。
 //
 // 所以：固件真卡死就是只能断电复位（拔线 ≥15 秒放净电容）。驱动的职责是【如实报告】，见下面
-// stuckAfter 那条 Warn——不要再加"自动解卡"。真正该做的是【别把它掐死】：优雅退出(Ctrl+C)会
-// 等当前帧走完，强杀(Stop-Process -Force/任务管理器/崩溃)则必然掐在半帧中间。
+// stuckTimeout 那条 Warn——不要再加"自动解卡"。真正该做的是【别把它掐死】：优雅退出(Ctrl+C 或
+// /api/shutdown)会等当前帧走完，强杀(Stop-Process -Force/任务管理器/崩溃)则必然掐在半帧中间。
 
 // Driver 以固定帧率驱动机器人传输层。
 type Driver struct {
@@ -52,6 +53,10 @@ type Driver struct {
 	// 串行 读→Sync，仿官方 EmoticonActionFrameService 单一串行发送），期间不跑自由 ticker、
 	// 也无独立读帧 goroutine——消除"并发读管道帧"与 libusb 争抢卡死设备屏的路径。
 	framePull atomic.Pointer[func() []byte]
+
+	// autoReboot：检测到固件卡死时是否自动发串口软复位(免拔电源，见 robot.Rebooter)。
+	// SetAutoReboot 设、syncLoop 读；关掉则只提示用户断电、不自动复位。
+	autoReboot atomic.Bool
 
 	// reenableFrames > 0 时，这么多帧内强制下发 enable=0。归零后恢复正常使能，于是设备侧看到一次
 	// 0→1 跳变——固件正是靠这个跳变才会重新给舵机上扭矩：
@@ -79,6 +84,21 @@ func (d *Driver) SetServoEnable(on bool) {
 	d.mu.Lock()
 	d.servoEnable = on
 	d.mu.Unlock()
+}
+
+// SetAutoReboot 设置"卡死时自动串口软复位(免拔电源)"开关。默认由配置注入(io.auto_reboot，缺省开)。
+func (d *Driver) SetAutoReboot(on bool) { d.autoReboot.Store(on) }
+
+// Reboot 手动触发设备软复位（串口，免拔电源）。供 UI「复位电子」按钮调用（固件卡死时驱动也会自动软复位）。
+// 传输不支持软复位(如 Mock)时返回错误。复位会让设备掉线 ~6s 再重连，由 syncLoop 的掉线分支自动接回。
+// 会阻塞约 1s(串口写完等 MCU 收指令)，调用方宜放后台。
+func (d *Driver) Reboot() error {
+	rb, ok := d.bot.(robot.Rebooter)
+	if !ok {
+		return fmt.Errorf("device: 当前设备不支持软复位（非真机？）")
+	}
+	d.log.Info("手动触发串口软复位(免拔电源)")
+	return rb.Reboot()
 }
 
 // 舵机失力（过流/堵转保护锁存：能应答 I²C、能报位置，但电机不转）的检测与自愈参数。
@@ -155,6 +175,45 @@ func abs32(f float32) float32 {
 		return -f
 	}
 	return f
+}
+
+// 卡死自动软复位（串口，免拔电源）的参数。判定卡死后按冷却+次数上限发串口复位；救不回就停手等断电。
+const (
+	rebootCooldown    = 25 * time.Second // 两次自动软复位之间的最短间隔（复位+重枚举约 6s，留足观察窗口）
+	rebootMaxAttempts = 2                // 连续这么多次软复位仍卡死就放弃、提示断电（避免复位死循环）
+)
+
+// rebootWatch 跟踪自动软复位的次数与冷却。设备判定卡死时，在同一 handle 继续硬顶的同时，按冷却+上限
+// 发串口软复位去救（对照官方 ElectronBot.DotNet 的 RebootElectron）；救回来(重连并跑通一帧)即清零。
+type rebootWatch struct {
+	attempts int
+	lastTry  time.Time
+}
+
+// try 在设备卡死时按冷却+上限发一次串口软复位。传输不支持软复位(Mock)或开关关闭时静默跳过。
+func (w *rebootWatch) try(d *Driver) {
+	if !d.autoReboot.Load() {
+		return
+	}
+	rb, ok := d.bot.(robot.Rebooter)
+	if !ok {
+		return // Mock 或不支持软复位的传输：只能等用户断电
+	}
+	if w.attempts >= rebootMaxAttempts {
+		return // 复位多次仍卡死：放弃，日志已提示断电
+	}
+	if !w.lastTry.IsZero() && time.Since(w.lastTry) < rebootCooldown {
+		return // 冷却中：给上一次复位留足重枚举+观察的时间
+	}
+	w.lastTry = time.Now()
+	w.attempts++
+	d.log.Warn("卡死自动软复位(串口，免拔电源)", "第几次", w.attempts, "上限", rebootMaxAttempts)
+	if err := rb.Reboot(); err != nil {
+		d.log.Warn("串口软复位失败(回退：请手动断电复位)", "err", err)
+	}
+	if w.attempts >= rebootMaxAttempts {
+		d.log.Warn("已自动软复位多次仍卡死——请彻底断电(拔线≥15秒放净电容)再插")
+	}
 }
 
 // SetJointTrim 设置 6 轴机械零位补偿(度)。装配公差让"角度 0"不一定是端正姿态（例如头部归零时略微
@@ -294,18 +353,27 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 	tick := 0
 	var buf []byte // syncLoop 私有缓冲，避免与 frameLoop 共享底层数组
 	var lastReopen time.Time
-	// 退避重连：没命中就重连，但间隔逐次翻倍封顶——频繁 Close+Connect（churn）正是把固件
-	// 搞进“停发就绪包”深度卡死的元凶，越没命中越要少碰它。连续 stuckAfter 次仍无就绪包，
-	// 就判定卡死、回调上层提示用户断电复位（churn 救不回，只有彻底断电放电才行）。
-	var limp limpWatch // 舵机失力检测（能报位置但不转）→ 自动重新使能
+	// 重连策略（对照 ElectronBot.DotNet：连一次、错就跳帧、绝不 churn）：只有【真掉线(NO_DEVICE)】或
+	// 【连上却一帧都没跑通(疑似错过就绪窗口)】才 Close+Connect，且退避间隔逐次翻倍封顶。一旦跑通过一帧、
+	// 之后只是传输卡顿，就【绝不重连】、在同一 handle 上继续硬顶——频繁 Close+Connect（churn，会重发
+	// SET_CONFIGURATION 撞在固件半帧等待上）正是把它搞进“停发就绪包”深度卡死的元凶。连续无就绪包超过
+	// stuckTimeout 仍在枚举，就判定卡死、回调上层提示用户断电复位（churn 救不回，只有彻底断电放电才行）。
+	var limp limpWatch     // 舵机失力检测（能报位置但不转）→ 自动重新使能
+	var reboot rebootWatch // 卡死自动软复位（串口，免拔电源）→ 冷却+上限内自动救
 	backoff := 2 * time.Second
 	const backoffMax = 10 * time.Second
-	const stuckAfter = 5
-	failStreak := 0
+	// stuckTimeout：连续无就绪包多久后判定固件真卡死、提示断电复位。远大于任何瞬时拥塞（单帧至多命中
+	// 12s backstop 即恢复），故正常/瞬时拥塞下永不误判；只有“连着设备却一帧都跑不通”才会累计到它。
+	const stuckTimeout = 20 * time.Second
+	var failingSince time.Time // 本轮连续失败的起点（零值=当前不在失败中）；跑通一帧即清零
 	stuck := false
+	// syncedSinceConnect：本次连接是否已跑通过至少一帧。仿 ElectronBot.DotNet——一旦跑通，之后的
+	// 传输卡顿【绝不 Close+Connect 重连】，只在同一 handle 上继续硬顶（见下方失败分支）。
+	syncedSinceConnect := false
 	reopen := func() {
 		lastReopen = time.Now()
 		_ = d.bot.Close()
+		syncedSinceConnect = false // 新连接：跑通一帧前不算“已就绪”
 		if err := d.bot.Connect(); err != nil {
 			d.log.Debug("重开设备失败", "err", err)
 			return
@@ -313,7 +381,9 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 		// Connect 后【零间隔】立刻 Sync 一次抢就绪窗口——这一步只碰设备自身的锁(d.mu)，
 		// 不取 fmu/pose 锁、不与 frameLoop 抢，尽量复刻 ebtest 的“Connect 后即刻 Sync”，
 		// 把 Connect→首读 的抖动压到最小（窗口很短，差几毫秒就错过）。
-		_ = d.bot.Sync()
+		if err := d.bot.Sync(); err == nil {
+			syncedSinceConnect = true
+		}
 	}
 	reopen()
 
@@ -372,35 +442,54 @@ func (d *Driver) syncLoop(ctx context.Context, fmu *sync.Mutex, latest *[]byte) 
 			}
 		}
 		if synced {
-			// 命中：清零退避与卡死状态（之后掉线还能快速重试），并通知 UI 恢复。
-			if failStreak > 0 {
-				failStreak = 0
-				backoff = 2 * time.Second
-			}
+			// 命中：清零失败计时与卡死状态（之后掉线还能快速重试），并通知 UI 恢复。
+			syncedSinceConnect = true
+			failingSince = time.Time{}
+			backoff = 2 * time.Second
+			reboot = rebootWatch{} // 恢复后重置软复位预算（下次卡死可再自动救）
 			if stuck {
 				stuck = false
 				d.log.Info("设备同步已恢复")
 				d.notifyStuck(false)
 			}
-		} else if time.Since(lastReopen) >= backoff {
-			// 未同步（帧首超时=窗口过期/掉线）：退避 reopen 并立刻重试 Sync（reopen 内已含
-			// Connect 后零间隔 Sync，紧贴 Connect 命中就绪窗口）。间隔逐次翻倍，减少 churn。
-			failStreak++
-			reopen()
-			if failStreak >= stuckAfter && !stuck {
+		} else {
+			// 本帧未同步。核心原则（对照 ElectronBot.DotNet 的低层与上层：连一次、错就跳帧、绝不 churn）：
+			//   · 已跑通过至少一帧、现在只是传输卡顿 → 【绝不 reopen】，在同一 handle 上继续硬顶下一帧，
+			//     等拥塞过去自然恢复。Close+Connect 会重发 SET_CONFIGURATION，正撞在固件半帧等待上把它
+			//     彻底搞死——churn 才是死总线的元凶（我们自己的注释与官方源码都证实这一点）。
+			//   · 真掉线(NO_DEVICE，Connected()=false，含用户断电复位后重插) → 必须重连才能找回设备，
+			//     此时设备已不在，reopen 谈不上“打断半帧”。
+			//   · 连上了却一帧都没跑通(疑似错过就绪窗口) → 有限退避 reopen 去重抢窗口，判死后停手。
+			if failingSince.IsZero() {
+				failingSince = time.Now()
+			}
+			disconnected := !d.bot.Connected()
+			if disconnected && stuck {
+				// 卡死后设备被拔走（用户正在断电复位）：转入重连去接回，不再是“卡死等断电”。
+				stuck = false
+				d.notifyStuck(false)
+			}
+			// 连续失败够久且设备仍在枚举 → 判卡死、提示断电（真掉线不算卡死，靠重连恢复）。
+			if !disconnected && !stuck && time.Since(failingSince) >= stuckTimeout {
 				stuck = true
 				d.log.Warn("设备持续无就绪包，疑似固件卡死——请彻底断电(拔线≥15秒放净电容)再插；频繁重连不会自愈、只会加重")
 				d.notifyStuck(true)
 			}
-			backoff *= 2
-			maxBackoff := backoffMax
-			if stuck {
-				maxBackoff = 30 * time.Second // 已判卡死：几乎停手等用户断电(churn 救不回、只会加重)
+			// 判定卡死后：自动串口软复位（免拔电源）去救——冷却+上限内发一次，复位后设备会掉线重枚举、
+			// 由上面的掉线分支自动接回。救不回(超上限)就停手、等用户断电。仅设备仍在枚举时才发。
+			if stuck && !disconnected {
+				reboot.try(d)
 			}
-			if backoff > maxBackoff {
-				backoff = maxBackoff
+			// 仅两种情况才动连接：真掉线（总要重连找回设备）；或连上但从未跑通一帧且尚未判死（有限退避
+			// 抢就绪窗口）。【已跑通过一帧的卡顿】两个条件都不满足 → 什么都不做，落到末尾 ticker 等下一帧
+			// 重试同一 handle，这正是“不 churn”的关键。
+			if (disconnected || (!syncedSinceConnect && !stuck)) && time.Since(lastReopen) >= backoff {
+				reopen()
+				backoff *= 2
+				if backoff > backoffMax {
+					backoff = backoffMax
+				}
 			}
-			continue
 		}
 		if blockingPaced {
 			// 摄像头模式且已阻塞拉帧：拉取本身即节流，不再等 ticker，只检查退出。

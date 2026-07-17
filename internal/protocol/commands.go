@@ -288,3 +288,15 @@ type ReenableCommand struct{}
 
 // Type 实现 Payload。
 func (ReenableCommand) Type() Type { return TypeReenable }
+
+// ---------------------------------------------------------------------------
+// reboot_device —— 串口软复位设备（免拔电源）
+// ---------------------------------------------------------------------------
+
+// RebootDeviceCommand 触发设备软复位：往 ElectronBot 的 CP210x/CH340 串口发一条复位指令，
+// 使 MCU 系统复位并重新枚举 USB——【免拔电源】。对应官方 ElectronBot.DotNet 的"复位电子"按钮。
+// 固件卡死(bulk 无就绪包)时驱动也会自动软复位；这个命令是手动触发入口。无参数。
+type RebootDeviceCommand struct{}
+
+// Type 实现 Payload。
+func (RebootDeviceCommand) Type() Type { return TypeRebootDevice }

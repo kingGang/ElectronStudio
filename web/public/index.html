@@ -111,6 +111,7 @@
         <h2>手动调试（6 轴）</h2>
         <label class="enable-toggle"><input type="checkbox" id="jog-enable" /> 舵机使能</label>
         <button id="jog-reenable" title="舵机过载/堵转保护锁存后会「能报位置但不转」，点这里重新上扭矩解锁（驱动也会自动检测重试）">重新使能舵机</button>
+        <button id="reboot-device" title="固件卡死（屏幕/关节不动、连着却不同步）时，点这里往设备串口发软复位指令——免拔电源，设备会重启并自动重连（驱动检测到卡死也会自动软复位）">复位电子</button>
       </div>
       <div class="joints" id="joints"></div>
     </section>

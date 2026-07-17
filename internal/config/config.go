@@ -148,7 +148,12 @@ type IOConfig struct {
 	// DeviceVolume：设备扬声器输出音量(0~100)。仅 macOS + 配了 AudioDevice 时生效，经 playto
 	// helper 设 USB 声卡输出音量。0 视为未设，DeviceVolumeOr() 默认 100(满)。
 	DeviceVolume int           `json:"device_volume,omitempty"`
-	MiniMax      MiniMaxConfig `json:"minimax"`
+	// ResetPort：ElectronBot 串口软复位通道（免拔电源）。""/"auto"=按 VID/PID 自动找 CP210x/CH340，
+	// 或显式串口名(如 "COM3" / "/dev/ttyUSB0")。见 electronbot.SendReboot。
+	ResetPort string `json:"reset_port,omitempty"`
+	// AutoReboot：检测到固件卡死时是否自动串口软复位(免拔电源)。nil=默认开启；显式 false 关闭(只提示断电)。
+	AutoReboot *bool         `json:"auto_reboot,omitempty"`
+	MiniMax    MiniMaxConfig `json:"minimax"`
 }
 
 // 各路由的默认值（空配置时）。
@@ -164,6 +169,12 @@ func (io IOConfig) DeviceVolumeOr() int {
 	}
 	return io.DeviceVolume
 }
+
+// ResetPortOr 返回复位串口设置，默认 "auto"(按 VID/PID 自动找 CP210x/CH340)。
+func (io IOConfig) ResetPortOr() string { return orStr(io.ResetPort, "auto") }
+
+// AutoRebootOr 返回卡死时是否自动软复位；未设(nil)默认 true。
+func (io IOConfig) AutoRebootOr() bool { return io.AutoReboot == nil || *io.AutoReboot }
 
 // Config 是应用的完整配置。
 type Config struct {

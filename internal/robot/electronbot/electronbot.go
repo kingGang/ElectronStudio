@@ -141,6 +141,10 @@ func probeWith(lib *libusbAPI) bool {
 type Device struct {
 	log *slog.Logger
 
+	// resetPort：串口软复位通道（""/"auto" 自动按 VID/PID 找 CP210x/CH340，或显式 "COM3"/"/dev/ttyUSB0"）。
+	// 由 SetResetPort 在启动时设一次，Reboot 时读取。见 reboot.go。
+	resetPort string
+
 	mu     sync.Mutex
 	lib    *libusbAPI
 	handle uintptr // libusb_device_handle*
@@ -312,6 +316,12 @@ var errDeviceLost = errors.New("electronbot: 设备已从总线断开")
 var errFeedbackLost = errors.New("electronbot: 反馈包丢失(读到零长)")
 
 const errNoDevice = -4 // LIBUSB_ERROR_NO_DEVICE
+
+// errIO：LIBUSB_ERROR_IO。句柄级 I/O 失败——设备被复位/重枚举后旧 handle 变野时，Windows/WinUSB
+// 常返这个而【非】NO_DEVICE(-4)。串口软复位(见 reboot.go)后就是它。必须【当掉线处理→重连拿新 handle】：
+// 它是【瞬间返回】(不像超时会阻塞)，若在旧 handle 上原地重试会满速空转烧满 CPU(实测重试累计上千万)、
+// 且永远等不到自愈。真机实锤：串口复位后若不把 -1 当掉线，设备卡在 ret=-1 死循环、只有重连能救。
+const errIO = -1
 // errPipe：LIBUSB_ERROR_PIPE，端点管道停滞(stall)。macOS 的 libusb 在 bulk 传输上会偶发此错
 // （Windows/WinUSB 不会或自动清除），是“Mac 上跑一会儿就死”的真因。正确处理是 libusb_clear_halt
 // 清掉停滞后【重试】该传输，而非当掉线去 reopen（reopen 的 churn 会把固件彻底搞掉线）。
@@ -510,7 +520,7 @@ func (d *Device) bulkWriteZLPBestEffort(ep uint8) error {
 	var transferred int32
 	ret := d.lib.BulkTransfer(d.handle, ep, uintptr(unsafe.Pointer(&dummy[0])), 0,
 		uintptr(unsafe.Pointer(&transferred)), writeTimeoutMs)
-	if ret == errNoDevice {
+	if ret == errNoDevice || ret == errIO { // 掉线/句柄失效：交上层重连（见 bulkRetry 处同款注释）
 		return errDeviceLost
 	}
 	if ret != 0 {
@@ -567,8 +577,11 @@ func (d *Device) bulkRetry(ep uint8, ptr uintptr, length int32, timeoutMs uint32
 		if ret == 0 && transferred == length { // 读/写满(ZLP 时 length==0 亦成立)
 			return nil
 		}
-		if ret == errNoDevice {
-			return errDeviceLost // 真掉线：退出让上层重连
+		if ret == errNoDevice || ret == errIO {
+			// NO_DEVICE(-4)=设备已从总线消失；IO(-1)=句柄失效(设备被复位/重枚举后旧 handle 变野，
+			// 串口软复位后常见)。两者都需【重连拿新 handle】，绝不能在旧 handle 上原地重试——尤其 -1
+			// 瞬间返回，重试会满速空转烧 CPU 且永不自愈。交上层 teardown→reopen 拿新 handle 接回。
+			return errDeviceLost
 		}
 		// IN 端点上"传输成功、却一个字节都没读到"：设备确实发了包，但数据在主机 USB 栈里被吞了
 		// （macOS 上摄像头/麦克风的等时流一挤就会发生）。设备那边已经认为发完、往下走了——继续重读
@@ -660,5 +673,30 @@ func (d *Device) acquireGraceful(grace time.Duration) bool {
 	}
 }
 
-// 编译期断言：Device 实现 robot.Transport。
-var _ robot.Transport = (*Device)(nil)
+// SetResetPort 设置串口软复位通道（""/"auto" 自动找 CP210x/CH340，或显式 "COM3"）。启动时设一次即可。
+func (d *Device) SetResetPort(port string) {
+	d.mu.Lock()
+	d.resetPort = port
+	d.mu.Unlock()
+}
+
+// Reboot 实现 robot.Rebooter：通过串口给设备发软复位指令（免拔电源）。走的是独立于 USB bulk 的
+// CP210x/CH340 UART，故 bulk 卡死时它照样能发出去 → MCU 系统复位 → USB 重新枚举 → 驱动自动接回。
+// 只在读 resetPort 时短暂持锁，实际串口 I/O 不持 d.mu（不阻塞设备主循环、也不碰 USB handle）。
+func (d *Device) Reboot() error {
+	d.mu.Lock()
+	port := d.resetPort
+	d.mu.Unlock()
+	name, err := SendReboot(port)
+	if err != nil {
+		return err
+	}
+	d.log.Info("已发送串口软复位指令(免拔电源)", "port", name)
+	return nil
+}
+
+// 编译期断言：Device 实现 robot.Transport 与 robot.Rebooter。
+var (
+	_ robot.Transport = (*Device)(nil)
+	_ robot.Rebooter  = (*Device)(nil)
+)

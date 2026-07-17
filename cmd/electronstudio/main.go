@@ -396,8 +396,9 @@ func newApp(cfg *config.Config, cfgPath string, log *slog.Logger) (*app, error) 
 	bot := connectRobot(cfg, log)
 	a.bot = bot
 	a.driver = device.NewDriver(bot, a.screen, log, 30, a.onDriverFrame, a.onDriverJoints)
-	a.driver.SetServoEnable(cfg.IO.ServoEnable) // 舵机总开关：关时不上扭矩（可手动摆姿）
-	a.driver.SetJointTrim(cfg.JointTrim)        // 机械零位补偿：让上层的 0 就是端正姿态
+	a.driver.SetServoEnable(cfg.IO.ServoEnable)      // 舵机总开关：关时不上扭矩（可手动摆姿）
+	a.driver.SetJointTrim(cfg.JointTrim)             // 机械零位补偿：让上层的 0 就是端正姿态
+	a.driver.SetAutoReboot(cfg.IO.AutoRebootOr())    // 卡死时自动串口软复位（免拔电源，io.auto_reboot 缺省开）
 	a.driver.SetStuckHandler(func(stuck bool) { // 设备卡死/恢复 → 广播状态，UI 据此提示断电复位
 		a.robotStuck.Store(stuck)
 		a.srv.Broadcast(a.statusSnapshot())
@@ -606,7 +607,9 @@ func connectRobot(cfg *config.Config, log *slog.Logger) robot.Transport {
 		switch {
 		case found:
 			log.Info("已探测到 ElectronBot，连接交由驱动循环")
-			return electronbot.New(log)
+			dev := electronbot.New(log)
+			dev.SetResetPort(cfg.IO.ResetPortOr()) // 串口软复位通道（免拔电源）：""/"auto" 自动找 CP210x/CH340
+			return dev
 		case err != nil:
 			// libusb 没装 ≠ 设备没插。这两种情况以前打的是同一句"未探测到"，
 			// 于是"机器人插着却连不上"要靠猜。见 docs/ELECTRONBOT.md。
@@ -1015,6 +1018,13 @@ func (a *app) handle(ctx context.Context, in server.Inbound) {
 
 	case protocol.TypeReenable:
 		a.driver.Reenable() // 舵机过载保护锁存后手动解锁（驱动也会自动检测并重试）
+
+	case protocol.TypeRebootDevice:
+		go func() { // 串口软复位阻塞 ~1s 且设备会掉线重连，放后台；成功/失败都由状态广播与日志反映
+			if err := a.driver.Reboot(); err != nil {
+				a.log.Warn("手动软复位失败", "err", err)
+			}
+		}()
 
 	case protocol.TypeMusic:
 		if cmd, err := protocol.As[protocol.MusicCommand](in.Env); err == nil {

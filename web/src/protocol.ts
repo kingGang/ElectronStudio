@@ -61,6 +61,7 @@ export const ClientType = {
   SetRealtime: 'set_realtime',
   Party: 'party',
   Reenable: 'reenable',
+  RebootDevice: 'reboot_device',
 } as const
 
 export interface SetIOCommand {

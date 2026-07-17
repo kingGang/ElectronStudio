@@ -24,7 +24,7 @@
     Camera: 'camera', Greet: 'greet', Music: 'music', Party: 'party',
     ScheduleAdd: 'schedule_add', ScheduleRemove: 'schedule_remove',
     MaterialDelete: 'material_delete', SetIO: 'set_io', SetDevice: 'set_device', SetVolume: 'set_volume',
-    SetRealtime: 'set_realtime',
+    SetRealtime: 'set_realtime', RebootDevice: 'reboot_device',
   };
 
   // 6 轴关节名称（顺序与后端 robot.JointNames 一致，即官方下发给固件的线上顺序：头在 0 号）。
@@ -47,7 +47,7 @@
     mic: $('btn-mic'), interrupt: $('btn-interrupt'), toast: $('toast'), camera: $('btn-camera'),
     // 编排页
     actionList: $('action-list'), joints: $('joints'), jogEnable: $('jog-enable'), choreoStop: $('choreo-stop'),
-    jogReenable: $('jog-reenable'),
+    jogReenable: $('jog-reenable'), rebootDevice: $('reboot-device'),
     // 设置页
     modelList: $('model-list'), setASR: $('set-asr'), setTTS: $('set-tts'),
     setUSB: $('set-usb'), setVidPid: $('set-vidpid'), setFPS: $('set-fps'),
@@ -604,6 +604,8 @@
   el.choreoStop.addEventListener('click', () => send(CliType.Interrupt, { reason: 'choreo-stop' }));
   // 重新使能舵机：过载/堵转保护锁存后，舵机会「能报位置但电机不转」，只有 enable 0→1 跳变能解锁。
   el.jogReenable.addEventListener('click', () => { send(CliType.Reenable, {}); toast('已重新给舵机上扭矩'); });
+  // 复位电子：固件卡死(屏幕/关节不动、连着却不同步)时，往设备串口发软复位指令——免拔电源，设备会重启并自动重连。
+  if (el.rebootDevice) el.rebootDevice.addEventListener('click', () => { send(CliType.RebootDevice, {}); toast('已发送复位指令，设备将重启并自动重连…'); });
 
   // 跟随设备 + 示教录制。
   function setupRecord() {

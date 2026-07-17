@@ -102,3 +102,11 @@ type Transport interface {
 	// Close 释放连接资源。
 	Close() error
 }
+
+// Rebooter 是可选能力：能通过带外通道（如 ElectronBot 的 CP210x/CH340 串口）给设备发软复位指令，
+// 使 MCU 系统复位并重新枚举 USB——【无需拔电源】。真机(electronbot)实现它，Mock 不实现。
+// 上层（device.Driver）检测到固件卡死时据此自动软复位；调用方应对不支持者(类型断言失败)优雅降级。
+type Rebooter interface {
+	// Reboot 触发设备软复位（免拔电源）。返回错误表示复位通道不可用或写入失败。
+	Reboot() error
+}
