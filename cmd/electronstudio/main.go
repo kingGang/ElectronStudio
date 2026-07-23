@@ -1975,6 +1975,16 @@ func (a *app) handleSetIO(cmd protocol.SetIOCommand) {
 		a.log.Info("舵机总开关已切换", "on", *cmd.ServoEnable)
 	}
 	a.srv.Broadcast(a.statusSnapshot())
+	// 输出路由切到 page/both 后，把当前曲目再次下发，让页面无需重新点歌即可创建
+	// 可播放、可 seek 的 <audio> 元素。设备独播没有可读取的播放时钟，不能提供精确进度。
+	if cmd.AudioOut != "" {
+		if pb := a.music.Snapshot(); pb.State != "" && pb.State != music.StateStopped && pb.Track.URL != "" {
+			a.srv.Broadcast(protocol.MusicEvent{
+				State: string(pb.State), Name: pb.Track.Name, Artist: pb.Track.Artist,
+				URL: pb.Track.URL, Position: pb.Position, Restore: true,
+			})
+		}
+	}
 }
 
 // handleSetRealtime 更新实时语音对话配置（设置页）：落盘 → 结束当前会话 → 热重建后端 → 广播状态。

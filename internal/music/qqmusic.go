@@ -145,9 +145,9 @@ func fcgURL(payload []byte) string {
 		strings.ReplaceAll(url.QueryEscape(string(payload)), "+", "%20")
 }
 
-// do 发起一次 musicu.fcg 请求。withCookie 决定是否附带登录 cookie：
-// 搜索是免登录的，且实测【带上过期/异常的登录 cookie 反而会被判为非法请求(code=2001)返回空结果】，
-// 故搜索必须匿名(withCookie=false)；只有取流(vkey)需要 cookie 才能拿到账号可播的 purl。
+// do 发起一次 musicu.fcg 请求。withCookie 决定是否附带登录 cookie。
+// QQ 目前会拒绝部分匿名搜索（code=2001）；有有效登录态时应携带 Cookie。若 Cookie
+// 已过期，Search 会再匿名尝试一次，兼容旧的匿名可用网络。
 func (q *QQMusicSearcher) do(ctx context.Context, rawURL string, out any, withCookie bool) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0")
@@ -168,7 +168,7 @@ func (q *QQMusicSearcher) do(ctx context.Context, rawURL string, out any, withCo
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// Search 实现 Searcher（走新版 musicu.fcg 搜索模块，匿名可用）。
+// Search 实现 Searcher（走新版 musicu.fcg 搜索模块）。
 // 关键：comm 必须是 ct="19",cv="1859"（字符串），且请求键用 "req"。实测 ct=24/cv=0 会被
 // 软拒绝（code=0 但空列表），QQ 2024+ 收紧了桌面端搜索的客户端版本校验。
 func (q *QQMusicSearcher) Search(ctx context.Context, query string) ([]Track, error) {
@@ -190,8 +190,18 @@ func (q *QQMusicSearcher) Search(ctx context.Context, query string) ([]Track, er
 	u := fcgURL(payload)
 	q.throttle()
 	var r qqSearchResp
-	if err := q.do(ctx, u, &r, false); err != nil { // 搜索匿名：带 cookie 会被判非法(2001)
+	withCookie := q.cookieHeader() != ""
+	if err := q.do(ctx, u, &r, withCookie); err != nil {
 		return nil, err
+	}
+	// 新版 QQ 会拒绝部分匿名请求；反过来，个别旧/异常 Cookie 也可能被拒。
+	// 登录搜索失败时只退回匿名一次，避免反复请求加重风控。
+	if withCookie && r.Req.Code != 0 && len(r.Req.Data.Body.Song.List) == 0 {
+		q.throttle()
+		var fallback qqSearchResp
+		if err := q.do(ctx, u, &fallback, false); err == nil {
+			r = fallback
+		}
 	}
 	list := r.Req.Data.Body.Song.List
 	// code!=0 且空列表：多为 QQ 限流(2001)。包成 ErrRateLimited，让上层能与“真没搜到/需登录”区分。

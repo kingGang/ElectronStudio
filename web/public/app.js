@@ -1362,10 +1362,14 @@
     if (!t) return;
     if (musicAudio && isFinite(musicAudio.duration)) {
       t.textContent = fmtTime(musicAudio.currentTime) + ' / ' + fmtTime(musicAudio.duration);
-      if (seek) { seek.max = musicAudio.duration || 0; if (!seek.dragging) seek.value = musicAudio.currentTime || 0; }
+      if (seek) {
+        seek.disabled = false;
+        seek.max = musicAudio.duration || 0;
+        if (!seek.dragging) seek.value = musicAudio.currentTime || 0;
+      }
     } else {
-      t.textContent = audioOutMode === 'device' ? '设备播放中' : '--:-- / --:--';
-      if (seek) { seek.max = 0; seek.value = 0; }
+      t.textContent = audioOutMode === 'device' ? '设备播放中（设备独播不支持拖动）' : '--:-- / --:--';
+      if (seek) { seek.disabled = true; seek.max = 0; seek.value = 0; }
     }
   }
   function onMusicState(p) {
@@ -1430,6 +1434,10 @@
     a.addEventListener('pause', () => { musicPlaying = false; renderMusicLabel(); stopViz(); reportMusic(true); });
     // 一首放完自动切下一首（连续播放），由服务端解析下一首 URL 再下发 music_state。
     a.addEventListener('ended', () => { stopViz(); send(CliType.Music, { action: 'next' }); });
+    a.addEventListener('error', () => {
+      stopViz();
+      toast('音乐流加载失败，请切换下一首或重新播放');
+    });
   }
 
   // ---- 音乐实时频谱（Web Audio AnalyserNode → 播放器内居中柱状条）----
@@ -1515,8 +1523,19 @@
   (function () {
     const seek = $('music-seek');
     if (!seek) return;
-    seek.addEventListener('input', () => { seek.dragging = true; if (musicAudio) $('music-time').textContent = fmtTime(seek.value) + ' / ' + fmtTime(musicAudio.duration); });
-    seek.addEventListener('change', () => { if (musicAudio) musicAudio.currentTime = parseFloat(seek.value) || 0; seek.dragging = false; });
+    const commitSeek = () => {
+      if (musicAudio) {
+        musicAudio.currentTime = parseFloat(seek.value) || 0;
+        reportMusic(true);
+      }
+      seek.dragging = false;
+    };
+    seek.addEventListener('input', () => {
+      seek.dragging = true;
+      if (musicAudio) $('music-time').textContent = fmtTime(seek.value) + ' / ' + fmtTime(musicAudio.duration);
+    });
+    seek.addEventListener('change', commitSeek);
+    seek.addEventListener('pointerup', commitSeek);
   })();
   // 控制：本地有浏览器播放器时直接控制它；否则把命令发给服务端（设备侧 mpg123）。
   $('music-pause').addEventListener('click', () => {
